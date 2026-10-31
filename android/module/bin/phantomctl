@@ -1,0 +1,104 @@
+#!/system/bin/sh
+# phantomctl · comandi della sonda F0 di Phantom (da eseguire come root).
+#
+#   phantomctl status | start | stop | restart
+#   phantomctl video on|off        flusso H.264 di base sulla porta 47802
+#   phantomctl autostart on|off    avvio della sonda all'accensione
+#   phantomctl doze on|off         forza il Doze profondo (per test rapidi) o lo ripristina
+#   phantomctl report              report completo del dispositivo
+#   phantomctl log [righe]
+
+MODDIR=${PHANTOM_MODDIR:-/data/adb/modules/phantom_f0}
+DATA=/data/adb/phantom-f0
+BIN=$MODDIR/bin/phantom-probe
+PIDF=$DATA/probe.pid
+LOG=$DATA/probe.log
+CONF=$DATA/probe.conf
+
+mkdir -p "$DATA"
+[ -f "$CONF" ] || printf 'AUTOSTART=1\nVIDEO=0\nBITRATE=12000000\nSIZE=\n' > "$CONF"
+. "$CONF"
+
+running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
+
+setconf() {
+    grep -v "^$1=" "$CONF" > "$CONF.tmp"
+    echo "$1=$2" >> "$CONF.tmp"
+    mv "$CONF.tmp" "$CONF"
+    . "$CONF"
+}
+
+start() {
+    if running; then echo "Sonda già attiva (PID $(cat "$PIDF"))"; return 0; fi
+    # Il log non deve crescere all'infinito durante i test di più ore.
+    [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 1048576 ] && mv "$LOG" "$LOG.1"
+    set -- --daemon --pidfile "$PIDF" --log "$LOG" --bitrate "$BITRATE"
+    [ "$VIDEO" = 1 ] && set -- "$@" --video
+    [ -n "$SIZE" ] && set -- "$@" --size "$SIZE"
+    "$BIN" "$@"
+    sleep 1
+    if running; then echo "Sonda avviata"; else echo "Avvio fallito. Ultime righe del log:"; tail -n 5 "$LOG"; return 1; fi
+}
+
+stop() {
+    running && kill "$(cat "$PIDF")" 2>/dev/null
+    rm -f "$PIDF"
+    echo "Sonda fermata"
+}
+
+wifi_ip() { ip -4 -o addr show wlan0 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }'; }
+
+status() {
+    if running; then echo "Sonda: ATTIVA (PID $(cat "$PIDF"))"; else echo "Sonda: ferma"; fi
+    echo "Video di base: $([ "$VIDEO" = 1 ] && echo acceso || echo spento) · avvio automatico: $([ "$AUTOSTART" = 1 ] && echo sì || echo no)"
+    echo "Indirizzi del telefono:"
+    ip -4 -o addr show 2>/dev/null | awk '$2 != "lo" { split($4, a, "/"); print "  " $2 ": " a[1] }'
+    ipw=$(wifi_ip)
+    if [ -n "$ipw" ]; then
+        echo "Dall'iPhone (Safari):  http://$ipw:47801"
+        echo "Dal PC:                python f0_client.py ping $ipw"
+        [ "$VIDEO" = 1 ] && echo "Video dal PC:          python f0_client.py video $ipw"
+    fi
+    echo "Ultime righe del log:"
+    tail -n 6 "$LOG" 2>/dev/null
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop >/dev/null; start ;;
+    status | "") status ;;
+    video)
+        case "$2" in
+            on) setconf VIDEO 1 ;;
+            off) setconf VIDEO 0 ;;
+            *) echo "uso: phantomctl video on|off"; exit 2 ;;
+        esac
+        stop >/dev/null; start
+        echo "Video di base: $([ "$VIDEO" = 1 ] && echo acceso || echo spento)" ;;
+    autostart)
+        case "$2" in
+            on) setconf AUTOSTART 1 ;;
+            off) setconf AUTOSTART 0 ;;
+            *) echo "uso: phantomctl autostart on|off"; exit 2 ;;
+        esac
+        echo "Avvio automatico: $([ "$AUTOSTART" = 1 ] && echo sì || echo no)" ;;
+    doze)
+        case "$2" in
+            on)
+                dumpsys battery unplug
+                input keyevent 223
+                sleep 2
+                dumpsys deviceidle force-idle
+                echo "Doze profondo forzato: schermo spento e caricatore simulato come scollegato." ;;
+            off)
+                dumpsys deviceidle unforce
+                dumpsys battery reset
+                input keyevent 224
+                echo "Doze normale ripristinato." ;;
+            *) echo "uso: phantomctl doze on|off"; exit 2 ;;
+        esac ;;
+    report) PHANTOM_MODDIR=$MODDIR sh "$MODDIR/bin/phantom-report.sh" ;;
+    log) tail -n "${2:-50}" "$LOG" ;;
+    *) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

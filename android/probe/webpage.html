@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phantom · Fase 0</title>
+<style>
+  :root { color-scheme: light dark; --bg:#fafaf8; --fg:#1d1d1b; --mut:#6b6b66; --card:#fff; --line:#e4e3de; --acc:#2f6fdb; --ok:#2e8b57; --warn:#c77700; --bad:#c0392b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141413; --fg:#f2f1ec; --mut:#a3a29c; --card:#1e1e1c; --line:#33332f; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.45 -apple-system, system-ui, sans-serif; background:var(--bg); color:var(--fg); padding:20px env(safe-area-inset-right) 40px env(safe-area-inset-left); }
+  main { max-width:560px; margin:0 auto; padding:0 16px; }
+  h1 { font-size:22px; margin:8px 0 2px; } .sub { color:var(--mut); margin:0 0 18px; font-size:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:14px; }
+  .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+  .k { color:var(--mut); font-size:12px; } .v { font-size:22px; font-weight:600; font-variant-numeric:tabular-nums; }
+  button { font:inherit; font-weight:600; border:0; border-radius:10px; padding:12px 14px; background:var(--acc); color:#fff; margin:4px 6px 4px 0; }
+  button.sec { background:transparent; color:var(--acc); border:1px solid var(--line); }
+  button:disabled { opacity:.45; }
+  canvas { width:100%; height:120px; display:block; }
+  pre { white-space:pre-wrap; font:12px/1.4 ui-monospace, Menlo, monospace; color:var(--mut); margin:0; }
+  .verdict { font-weight:600; } .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+  a { color:var(--acc); }
+  /* orologio */
+  body.clock { background:#000; color:#fff; padding:0; overflow:hidden; }
+  #clock { display:none; height:100vh; flex-direction:column; justify-content:center; align-items:center; }
+  body.clock #clock { display:flex; } body.clock main { display:none; }
+  #ms { font:700 22vw/1 ui-monospace, Menlo, monospace; font-variant-numeric:tabular-nums; }
+  #frames { font:600 6vw ui-monospace, monospace; color:#9a9a9a; margin-top:2vh; }
+  #bar { position:fixed; left:0; bottom:0; height:6vh; width:4vw; background:#fff; }
+  #blocks { display:flex; gap:1vw; margin-top:3vh; } #blocks div { width:7vw; height:7vw; background:#222; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Phantom · test di rete</h1>
+  <p class="sub" id="dev">Telefono Android: connessione in corso…</p>
+
+  <div class="card">
+    <div class="grid">
+      <div><div class="k">RTT mediano</div><div class="v" id="p50">–</div></div>
+      <div><div class="k">RTT p95</div><div class="v" id="p95">–</div></div>
+      <div><div class="k">RTT p99</div><div class="v" id="p99">–</div></div>
+      <div><div class="k">Jitter</div><div class="v" id="jit">–</div></div>
+      <div><div class="k">Picchi &gt; 50 ms</div><div class="v" id="spk">–</div></div>
+      <div><div class="k">Campioni</div><div class="v" id="cnt">0</div></div>
+    </div>
+  </div>
+
+  <div class="card"><canvas id="chart" width="1040" height="240"></canvas></div>
+
+  <div class="card">
+    <button id="b30">Test da 30 s</button><button id="b120" class="sec">Test da 2 min</button><button id="bstop" class="sec" disabled>Ferma</button>
+    <p class="verdict" id="verdict"></p>
+    <pre id="report"></pre>
+    <button id="bcopy" class="sec" style="display:none">Copia risultati</button>
+  </div>
+
+  <div class="card">
+    <pre>Il telefono Android rimanda indietro ogni messaggio. L'iPhone misura il tempo di andata e ritorno (RTT) ogni 20 ms. Fai il test vicino e lontano dal router e, se puoi, con l'iPhone collegato a un altro access point.
+
+Per la misura al rallentatore apri <a href="/clock">/clock</a> sul telefono Android: mostra un orologio al millisecondo da filmare insieme allo schermo che lo riceve.</pre>
+  </div>
+</main>
+
+<div id="clock"><div id="ms">00.000</div><div id="frames">frame 0</div><div id="blocks"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div><div id="bar"></div></div>
+
+<script>
+"use strict";
+if (location.pathname === "/clock" || location.search.includes("clock")) runClock(); else runTest();
+
+function runClock() {
+  document.body.classList.add("clock");
+  const ms = document.getElementById("ms"), fr = document.getElementById("frames"), bar = document.getElementById("bar");
+  const blocks = [...document.querySelectorAll("#blocks div")];
+  let n = 0;
+  (function tick() {
+    const t = Date.now() % 100000;
+    ms.textContent = (Math.floor(t / 1000)).toString().padStart(2, "0") + "." + (t % 1000).toString().padStart(3, "0");
+    fr.textContent = "frame " + n;
+    bar.style.left = ((t % 1000) / 1000 * 96) + "vw";
+    blocks.forEach((b, i) => b.style.background = (n % 8) === i ? "#fff" : "#222");
+    n++;
+    requestAnimationFrame(tick);
+  })();
+}
+
+function runTest() {
+  const $ = id => document.getElementById(id);
+  fetch("/status").then(r => r.json()).then(s => {
+    const d = s.device;
+    $("dev").textContent = `${d.model} · Android ${d.android} · ${d.lineage !== "sconosciuto" ? "LineageOS " + d.lineage : "ROM " + d.codename} · sonda ${s.probe}`;
+  }).catch(() => $("dev").textContent = "Stato del telefono non disponibile");
+
+  let ws, timer, endAt, seq = 0, rtts = [], sent = 0, running = false;
+  const INTERVAL = 20;
+  const pct = (a, p) => a.length ? a[Math.min(a.length - 1, Math.floor(p / 100 * a.length))] : NaN;
+  const f = v => isNaN(v) ? "–" : v.toFixed(1) + " ms";
+
+  function stats() {
+    const s = [...rtts].sort((a, b) => a - b);
+    let j = 0; for (let i = 1; i < rtts.length; i++) j += Math.abs(rtts[i] - rtts[i - 1]);
+    return { n: rtts.length, sent, p50: pct(s, 50), p95: pct(s, 95), p99: pct(s, 99), max: s[s.length - 1] ?? NaN,
+             jitter: rtts.length > 1 ? j / (rtts.length - 1) : NaN, spikes: rtts.filter(x => x > 50).length };
+  }
+
+  function draw() {
+    const st = stats();
+    $("p50").textContent = f(st.p50); $("p95").textContent = f(st.p95); $("p99").textContent = f(st.p99);
+    $("jit").textContent = f(st.jitter); $("spk").textContent = st.spikes; $("cnt").textContent = st.n;
+    const c = $("chart"), g = c.getContext("2d"), W = c.width, H = c.height, last = rtts.slice(-300);
+    g.clearRect(0, 0, W, H);
+    const top = Math.max(20, ...last) * 1.1;
+    g.strokeStyle = "rgba(128,128,128,.35)"; g.lineWidth = 1; g.font = "20px system-ui"; g.fillStyle = "rgba(128,128,128,.9)";
+    [10, 20, 50, 100].filter(v => v < top).forEach(v => { const y = H - v / top * H; g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); g.fillText(v + " ms", 6, y - 4); });
+    g.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--acc"); g.lineWidth = 2.5; g.beginPath();
+    last.forEach((v, i) => { const x = i / 299 * W, y = H - v / top * H; i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke();
+  }
+
+  function start(seconds) {
+    rtts = []; sent = 0; seq = 0; running = true;
+    $("report").textContent = ""; $("verdict").textContent = "Test in corso…"; $("verdict").className = "verdict"; $("bcopy").style.display = "none";
+    $("b30").disabled = $("b120").disabled = true; $("bstop").disabled = false;
+    ws = new WebSocket(`ws://${location.host}/ws`);
+    ws.onopen = () => {
+      endAt = performance.now() + seconds * 1000;
+      timer = setInterval(() => {
+        if (performance.now() > endAt) return stop();
+        ws.send(`${seq++},${performance.now()}`); sent++;
+      }, INTERVAL);
+    };
+    ws.onmessage = e => { const t = parseFloat(e.data.split(",")[1]); rtts.push(performance.now() - t); };
+    ws.onerror = () => { $("verdict").textContent = "Connessione WebSocket fallita"; $("verdict").className = "verdict bad"; stop(); };
+    (function loop() { draw(); if (running) requestAnimationFrame(loop); })();
+  }
+
+  function stop() {
+    if (!running) return;
+    running = false; clearInterval(timer);
+    setTimeout(() => { try { ws.close(); } catch (e) {} finish(); }, 300);
+    $("b30").disabled = $("b120").disabled = false; $("bstop").disabled = true;
+  }
+
+  function finish() {
+    draw();
+    const s = stats();
+    if (!s.n) return;
+    let cls = "ok", msg = "Ottimo per Phantom: rete adatta alla latenza obiettivo.";
+    if (s.p95 > 15 || s.spikes > s.n * 0.01) { cls = "warn"; msg = "Usabile, ma con ritardi irregolari: probabile Wi-Fi congestionato o powerline nel percorso."; }
+    if (s.p95 > 40 || s.spikes > s.n * 0.05) { cls = "bad"; msg = "Troppo irregolare per un'esperienza nativa: va migliorato il percorso di rete."; }
+    $("verdict").textContent = msg; $("verdict").className = "verdict " + cls;
+    const txt = `Phantom F0 · test di rete iPhone → Android (WebSocket/TCP)
+${new Date().toISOString()} · ${$("dev").textContent}
+campioni ${s.n}/${s.sent} · intervallo ${INTERVAL} ms
+RTT p50 ${s.p50.toFixed(1)} · p95 ${s.p95.toFixed(1)} · p99 ${s.p99.toFixed(1)} · max ${s.max.toFixed(1)} ms
+jitter ${s.jitter.toFixed(2)} ms · picchi >50 ms: ${s.spikes}`;
+    $("report").textContent = txt; $("bcopy").style.display = "inline-block";
+    $("bcopy").onclick = () => {
+      // Su http (non https) Safari non espone navigator.clipboard: si ripiega su execCommand.
+      const ta = document.createElement("textarea");
+      ta.value = txt; ta.setAttribute("readonly", ""); ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, txt.length);
+      const ok = document.execCommand("copy"); document.body.removeChild(ta);
+      $("bcopy").textContent = ok ? "Copiato" : "Tieni premuto il testo per copiarlo";
+    };
+  }
+
+  $("b30").onclick = () => start(30);
+  $("b120").onclick = () => start(120);
+  $("bstop").onclick = stop;
+}
+</script>
+</body>
+</html>
