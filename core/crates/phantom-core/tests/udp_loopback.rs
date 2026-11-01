@@ -40,8 +40,8 @@ struct ClientReport {
     clock_err_us: i64,
 }
 
-fn frame_bytes(rng: &mut Rng, id: u32, scale: f64) -> (Vec<u8>, bool) {
-    let key = id % 240 == 0;
+fn frame_bytes(rng: &mut Rng, id: u32, scale: f64, host_wants_key: bool) -> (Vec<u8>, bool) {
+    let key = id % 240 == 0 || host_wants_key;
     let base = if key { 120_000.0 } else { 10_000.0 + rng.up_to(20_000) as f64 };
     let len = ((base * scale) as usize).max(200);
     ((0..len).map(|i| (i as u32).wrapping_mul(2654435761).wrapping_add(id) as u8).collect(), key)
@@ -64,13 +64,15 @@ fn host_thread(
     while !stop.load(Ordering::Relaxed) {
         while let Ok((n, _)) = sock.recv_from(&mut buf) {
             let now = us_since(epoch);
-            for r in host.on_datagram(now, &buf[..n], host_clock) {
+            for r in host.on_datagram(host_clock(now), &buf[..n]) {
                 let _ = sock.send_to(&r, peer);
             }
         }
         while Instant::now() >= next_frame {
-            let (data, key) = frame_bytes(&mut rng, id, host.target_bitrate_bps() as f64 / 20_000_000.0);
-            for d in host.send_frame(id, key, host_clock(us_since(epoch)), &data) {
+            let capture = host_clock(us_since(epoch));
+            let wants_key = host.wants_keyframe(capture);
+            let (data, key) = frame_bytes(&mut rng, id, host.target_bitrate_bps() as f64 / 20_000_000.0, wants_key);
+            for d in host.send_frame(id, key, capture, &data) {
                 let _ = sock.send_to(&d, peer);
             }
             id += 1;

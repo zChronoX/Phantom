@@ -1,0 +1,15 @@
+[package]
+name = "uniffi-bindgen"
+description = "Generatore dei binding Swift e Kotlin: cargo run -p uniffi-bindgen -- generate --library <lib> --language swift --out-dir <dir>"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version = "1.88"
+publish = false
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/main.rs"
+
+[dependencies]
+uniffi = { version = "0.32", features = ["cli"] }

@@ -50,6 +50,8 @@ pub struct SessionConfig {
     pub max_bitrate_bps: u64,
     /// Bitrate video minimo sotto cui non si scende (bit/s).
     pub min_bitrate_bps: u64,
+    /// Codec dei frame che l'host spedisce.
+    pub codec: Codec,
 }
 
 impl Default for SessionConfig {
@@ -69,6 +71,7 @@ impl Default for SessionConfig {
             start_bitrate_bps: 6_000_000,
             max_bitrate_bps: 20_000_000,
             min_bitrate_bps: 2_000_000,
+            codec: Codec::H265,
         }
     }
 }
@@ -108,12 +111,14 @@ pub struct Host {
     cfg: SessionConfig,
     video: VideoSender,
     seq: u32,
-    /// L'host deve produrre un keyframe al prossimo frame (richiesto dal client o all'avvio).
-    pub keyframe_wanted: bool,
+    /// Il client ha chiesto un keyframe (o la sessione è appena iniziata).
+    keyframe_wanted: bool,
     last_key_ts_us: Option<u64>,
-    /// Ultimo stato del tocco ricevuto (stato completo).
+    /// Ultimo stato del tocco ricevuto (stato completo): numero di sequenza, istante sul client, dita.
     pub last_touch: Option<(u32, u64, Vec<Finger>)>,
     last_touch_seq: Option<u32>,
+    /// `last_touch` è arrivato dopo l'ultima chiamata a [`Host::take_touch`].
+    touch_fresh: bool,
     stats: HostStats,
     rate: RateController,
 }
@@ -135,6 +140,7 @@ impl Host {
             last_key_ts_us: None,
             last_touch: None,
             last_touch_seq: None,
+            touch_fresh: false,
             stats: HostStats::default(),
             rate,
         }
@@ -161,25 +167,41 @@ impl Host {
         &self.rate
     }
 
-    /// Codifica e spedisce un frame: datagrammi da mandare.
+    /// `true` se l'encoder deve produrre un keyframe adesso: il client ne ha chiesto uno (o la sessione è appena
+    /// iniziata) e dall'ultimo sono passati almeno `min_keyframe_gap_us`; se il collegamento è saturo, un keyframe
+    /// dopo l'altro peggiora la saturazione. `now_us` è l'orologio dell'host.
+    pub fn wants_keyframe(&self, now_us: u64) -> bool {
+        self.keyframe_wanted
+            && self.last_key_ts_us.is_none_or(|t| now_us.saturating_sub(t) >= self.cfg.min_keyframe_gap_us)
+    }
+
+    /// Spedisce un frame già codificato: restituisce i datagrammi da mandare al client. `key` dice cosa ha prodotto
+    /// l'encoder; chi chiama deve chiedere un keyframe all'encoder quando [`Host::wants_keyframe`] è `true`.
+    /// `capture_ts_us` è l'istante di cattura sull'orologio dell'host.
     pub fn send_frame(&mut self, frame_id: u32, key: bool, capture_ts_us: u64, data: &[u8]) -> Vec<Vec<u8>> {
-        // una richiesta di keyframe si soddisfa subito solo se l'ultimo è abbastanza lontano; altrimenti resta in attesa
-        let allowed =
-            self.last_key_ts_us.is_none_or(|t| capture_ts_us.saturating_sub(t) >= self.cfg.min_keyframe_gap_us);
-        let key = key || (self.keyframe_wanted && allowed);
         if key {
             self.keyframe_wanted = false;
             self.last_key_ts_us = Some(capture_ts_us);
         }
-        let f = EncodedFrame { frame_id, codec: Codec::H265, key, config: key, capture_ts_us, data };
+        let f = EncodedFrame { frame_id, codec: self.cfg.codec, key, config: key, capture_ts_us, data };
         let out = self.video.send_frame(&f);
         self.stats.frames_sent += 1;
         self.stats.datagrams += out.len() as u64;
         out
     }
 
-    /// Elabora un datagramma ricevuto dal client all'istante `now_us` dell'orologio dell'host; restituisce le risposte.
-    pub fn on_datagram(&mut self, now_us: u64, bytes: &[u8], host_clock_us: impl Fn(u64) -> u64) -> Vec<Vec<u8>> {
+    /// Lo stato del tocco arrivato dopo l'ultima chiamata, se c'è: (numero di sequenza, istante sul client, dita).
+    pub fn take_touch(&mut self) -> Option<(u32, u64, Vec<Finger>)> {
+        if std::mem::take(&mut self.touch_fresh) {
+            self.last_touch.clone()
+        } else {
+            None
+        }
+    }
+
+    /// Elabora un datagramma ricevuto dal client; `now_us` è l'istante di arrivo sull'orologio dell'host. Restituisce
+    /// le risposte da rimandare al client.
+    pub fn on_datagram(&mut self, now_us: u64, bytes: &[u8]) -> Vec<Vec<u8>> {
         let Ok((hdr, msg)) = decode(bytes) else { return Vec::new() };
         if hdr.conn_id != self.cfg.conn_id {
             return Vec::new();
@@ -187,19 +209,16 @@ impl Host {
         let mut out = Vec::new();
         match msg {
             Message::Ping { id, t_client_us } => {
-                let rx = host_clock_us(now_us);
-                let reply = Message::Pong { id, t_client_us, t_host_rx_us: rx, t_host_tx_us: host_clock_us(now_us) };
+                let reply = Message::Pong { id, t_client_us, t_host_rx_us: now_us, t_host_tx_us: now_us };
                 let h = Header { conn_id: self.cfg.conn_id, seq: self.seq };
                 self.seq = self.seq.wrapping_add(1);
                 if let Ok(b) = reply.encode(h) {
                     out.push(b);
                 }
             }
-            Message::Nack { frame_id, missing } => {
-                out.extend(self.video.on_nack(host_clock_us(now_us), frame_id, &missing))
-            }
+            Message::Nack { frame_id, missing } => out.extend(self.video.on_nack(now_us, frame_id, &missing)),
             Message::Stats(s) => {
-                self.rate.on_stats(host_clock_us(now_us), &s);
+                self.rate.on_stats(now_us, &s);
             }
             Message::KeyframeRequest { .. } => {
                 self.keyframe_wanted = true;
@@ -212,6 +231,7 @@ impl Host {
                 if is_newest {
                     self.last_touch_seq = Some(state_seq);
                     self.last_touch = Some((state_seq, t_client_us, fingers));
+                    self.touch_fresh = true;
                     self.stats.touch_states += 1;
                 }
             }
@@ -257,6 +277,12 @@ impl Client {
             touch_seq: 0,
             delivered: Vec::new(),
         }
+    }
+
+    /// Frame consegnati dal ricevitore dall'ultima chiamata, nell'ordine di arrivo: chi usa il client per un'app li
+    /// preleva a ogni giro (nelle prove restano in `delivered` per l'analisi finale).
+    pub fn take_frames(&mut self) -> Vec<Delivered> {
+        std::mem::take(&mut self.delivered)
     }
 
     /// Statistiche del ricevitore video.

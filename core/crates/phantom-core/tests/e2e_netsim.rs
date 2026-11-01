@@ -48,8 +48,9 @@ fn pct(v: &[f64], q: f64) -> f64 {
 
 /// Frame sintetici: ~20 Mbps a 120 fps (circa 20 KB per frame, ±50%), un keyframe da 120 KB ogni 2 s.
 /// `scale` = bitrate richiesto dall'host / 20 Mbps: l'encoder simulato produce frame più piccoli quando gli si chiede di meno.
-fn frame_data(rng: &mut Rng, id: u32, scale: f64) -> (Vec<u8>, bool) {
-    let key = id % 240 == 0;
+fn frame_data(rng: &mut Rng, id: u32, scale: f64, host_wants_key: bool) -> (Vec<u8>, bool) {
+    // keyframe periodico ogni 2 s, oppure su richiesta dell'host: l'encoder simulato produce davvero un frame grosso
+    let key = id % 240 == 0 || host_wants_key;
     let base = if key { 120_000.0 } else { 10_000.0 + rng.up_to(20_000) as f64 };
     let len = ((base * scale) as usize).max(200);
     let data: Vec<u8> = (0..len).map(|i| (i as u32).wrapping_mul(2654435761).wrapping_add(id) as u8).collect();
@@ -111,7 +112,8 @@ fn run_with(
             if frame_id % 12 == 0 {
                 bitrate_trace.push((next_frame, bps));
             }
-            let (data, key) = frame_data(&mut rng, frame_id, bps as f64 / 20_000_000.0);
+            let wants_key = host.wants_keyframe(host_clock(next_frame));
+            let (data, key) = frame_data(&mut rng, frame_id, bps as f64 / 20_000_000.0, wants_key);
             capture_real.push(next_frame);
             for d in host.send_frame(frame_id, key, host_clock(next_frame), &data) {
                 sim.send(Dir::AtoB, d);
@@ -136,7 +138,7 @@ fn run_with(
 
         // rete → host
         while let Some((arr, d)) = sim.recv(Dir::BtoA) {
-            for r in host.on_datagram(arr, &d, host_clock) {
+            for r in host.on_datagram(host_clock(arr), &d) {
                 sim.send(Dir::AtoB, r);
             }
             if let Some((_, t_client, _)) = &host.last_touch {

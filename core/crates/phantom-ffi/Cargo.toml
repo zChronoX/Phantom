@@ -1,0 +1,18 @@
+[package]
+name = "phantom-ffi"
+description = "Binding UniFFI (Swift e Kotlin) del core di Phantom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version = "1.88"
+
+[lib]
+name = "phantom_ffi"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[dependencies]
+phantom-core = { path = "../phantom-core" }
+uniffi = "0.32"
+
+# Niente `[lints] workspace = true`: il codice generato da UniFFI usa `unsafe`, che nel resto del workspace è vietato.
+# Tutta la logica sta negli altri crate; qui c'è solo l'involucro.

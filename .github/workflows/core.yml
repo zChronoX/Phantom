@@ -103,4 +103,91 @@ jobs:
         with:
           workspaces: core
           key: msrv
-      - run: cargo +1.82 check --workspace --lib
+      # il binding UniFFI richiede un compilatore più recente: l'MSRV riguarda il nucleo che gira dappertutto
+      - run: cargo +1.82 check --workspace --lib --exclude phantom-ffi --exclude uniffi-bindgen
+
+  # I binding: il core Rust visto da Swift (app iPhone) e da Kotlin (server Android).
+  # Il test Swift compila i binding generati insieme a un programma che pilota host e client in memoria.
+  ffi-apple:
+    name: Binding Swift (macOS) · prova e libreria iOS
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain e bersagli iOS
+        run: |
+          rustup show
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+          key: ffi-apple
+      - name: Libreria per macOS e binding Swift
+        run: |
+          cargo build -p phantom-ffi --release
+          mkdir -p ../dist/swift
+          cargo run -q -p uniffi-bindgen --release -- generate --library target/release/libphantom_ffi.dylib --language swift --out-dir ../dist/swift
+          ls -l ../dist/swift
+      - name: Prova in Swift (host e client in memoria)
+        run: |
+          mkdir -p ../dist/swift-smoke
+          swiftc -O -module-name PhantomSmoke \
+            -Xcc -fmodule-map-file=../dist/swift/phantom_ffiFFI.modulemap -I ../dist/swift \
+            -L target/release -lphantom_ffi \
+            ../dist/swift/phantom_ffi.swift crates/phantom-ffi/swift-smoke/main.swift \
+            -o ../dist/swift-smoke/smoke
+          DYLD_LIBRARY_PATH=target/release ../dist/swift-smoke/smoke
+      - name: Librerie statiche per iPhone e simulatore
+        run: |
+          cargo rustc -p phantom-ffi --release --target aarch64-apple-ios --crate-type staticlib
+          cargo rustc -p phantom-ffi --release --target aarch64-apple-ios-sim --crate-type staticlib
+          mkdir -p ../dist/ios
+          cp target/aarch64-apple-ios/release/libphantom_ffi.a ../dist/ios/libphantom_ffi-ios.a
+          cp target/aarch64-apple-ios-sim/release/libphantom_ffi.a ../dist/ios/libphantom_ffi-ios-sim.a
+          ls -l ../dist/ios
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phantom-ffi-apple
+          path: |
+            dist/swift/
+            dist/ios/
+          retention-days: 14
+
+  ffi-android:
+    name: Binding Kotlin e libreria Android
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain e bersaglio Android
+        run: |
+          rustup show
+          rustup target add aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+          key: ffi-android
+      - name: Binding Kotlin (da una libreria per Linux)
+        run: |
+          cargo build -p phantom-ffi --release
+          mkdir -p ../dist/kotlin
+          cargo run -q -p uniffi-bindgen --release -- generate --library target/release/libphantom_ffi.so --language kotlin --no-format --out-dir ../dist/kotlin
+          test -s ../dist/kotlin/uniffi/phantom_ffi/phantom_ffi.kt
+          grep -q "class PhantomHost" ../dist/kotlin/uniffi/phantom_ffi/phantom_ffi.kt
+          grep -q "class PhantomClient" ../dist/kotlin/uniffi/phantom_ffi/phantom_ffi.kt
+      - name: Libreria per Android (arm64, NDK del runner)
+        env:
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_NDK_LATEST_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
+        run: |
+          cargo rustc -p phantom-ffi --release --target aarch64-linux-android --crate-type cdylib
+          mkdir -p ../dist/android/arm64-v8a
+          cp target/aarch64-linux-android/release/libphantom_ffi.so ../dist/android/arm64-v8a/
+          ls -l ../dist/android/arm64-v8a
+          file ../dist/android/arm64-v8a/libphantom_ffi.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phantom-ffi-android
+          path: |
+            dist/kotlin/
+            dist/android/
+          retention-days: 14

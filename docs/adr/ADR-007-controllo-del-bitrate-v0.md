@@ -23,7 +23,7 @@ Regole:
 - Si parte a 6 Mbps e si sale del 25% per finestra (**startup**) finché non c'è congestione, così il RTT di riferimento si misura a collegamento scarico; poi +4% (più 50 kbps) per finestra, dopo almeno 1 s dall'ultima riduzione.
 - **Il tetto si rialza del 10% ogni 4 s**; se la sonda fallisce (nuova congestione con il tetto ancora in vigore) l'intervallo raddoppia fino a 32 s; il tetto si dimentica dopo almeno 60 s tranquilli. Perché: ogni sonda oltre la capacità costa frame persi, un keyframe e circa 300 ms di immagine ferma. Modello a fluido: 9 congestioni in 5 minuti invece di 116, per il 2% di bitrate medio in meno.
 
-Risultati sul simulatore (semi fissi): Wi-Fi buono 100%, bitrate invariato; Wi-Fi disturbato 98,2%, bitrate invariato; raffiche (9% del tempo al 95% di perdita) 91,5%, bitrate invariato; collegamento saturo 94,1% dei frame (100% nell'ultimo terzo) a 9,3 Mbps su circa 10,5 utili, 2 riduzioni.
+Risultati sul simulatore (semi fissi; i keyframe su richiesta sono grossi come quelli veri, perché li produce l'encoder simulato): Wi-Fi buono 100% dei frame, bitrate invariato; Wi-Fi disturbato 98,8%, bitrate invariato; raffiche (9% del tempo al 95% di perdita) 84,0%, e 99% nell'ultimo terzo, bitrate invariato; collegamento saturo 91,5% dei frame (100% nell'ultimo terzo) a 9,4 Mbps su circa 10,5 utili, 2 riduzioni.
 
 ## Limiti noti
 
