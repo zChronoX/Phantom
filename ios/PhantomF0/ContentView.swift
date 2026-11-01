@@ -15,6 +15,8 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             Form {
+                CrashLogSection()
+
                 Section("Telefono Android") {
                     TextField("Indirizzo IP del POCO", text: $host)
                         .keyboardType(.numbersAndPunctuation)
@@ -122,6 +124,7 @@ struct ContentView: View {
             .navigationTitle("Phantom F0")
         }
         .onChange(of: scenePhase) { _, phase in
+            CrashLog.markMem("FASE \(phase)")
             // Il registro della scatola nera va su disco subito quando l'app lascia il primo piano.
             if phase != .active { TelemetryRecorder.shared.flush() }
         }
@@ -186,6 +189,31 @@ private struct RttChart: View {
                 if i == 0 { path.move(to: CGPoint(x: x, y: y)) } else { path.addLine(to: CGPoint(x: x, y: y)) }
             }
             ctx.stroke(path, with: .color(.accentColor), lineWidth: 1.5)
+        }
+    }
+}
+
+
+/// Se l'ultima volta l'app si è chiusa da sola, mostra il diario di quel momento: da copiare e incollare in chat.
+private struct CrashLogSection: View {
+    @State private var report = CrashLog.previousReport
+    @State private var copied = false
+
+    var body: some View {
+        if let text = report {
+            Section("Diagnostica: l'ultima volta l'app si è chiusa da sola") {
+                Text(text)
+                    .font(.system(size: 10, design: .monospaced))
+                    .textSelection(.enabled)
+                Button(copied ? "Copiato" : "Copia il rapporto") {
+                    UIPasteboard.general.string = text
+                    copied = true
+                }
+                Button("Cancella il rapporto", role: .destructive) {
+                    CrashLog.clearPrevious()
+                    report = nil
+                }
+            }
         }
     }
 }

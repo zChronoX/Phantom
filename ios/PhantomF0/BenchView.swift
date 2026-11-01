@@ -41,5 +41,6 @@ struct DecoderBenchScreen: View {
         }
         .navigationTitle("Decoder hardware")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { CrashLog.mark("schermata Decoder aperta") }
     }
 }

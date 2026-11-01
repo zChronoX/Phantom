@@ -12,7 +12,8 @@ check() { if eval "$2"; then ok "$1"; else bad "$1  [$2]"; fi; }
 T=$(mktemp -d)
 export PHANTOM_MODDIR="$T/mod" PHANTOM_DATA="$T/data"
 mkdir -p "$PHANTOM_MODDIR/bin" "$PHANTOM_DATA" "$T/Download"
-cp "$SRC/bin/phantomctl" "$SRC/bin/phantom-postmortem.sh" "$SRC/bin/phantom-deep.sh" "$SRC/service.sh" "$PHANTOM_MODDIR/bin/"
+cp "$SRC/bin/phantomctl" "$SRC/bin/phantom-postmortem.sh" "$SRC/bin/phantom-deep.sh" "$SRC/bin/phantom-captest.sh" "$SRC/service.sh" "$PHANTOM_MODDIR/bin/"
+cp "$SRC/module.prop" "$PHANTOM_MODDIR/module.prop"
 mv "$PHANTOM_MODDIR/bin/service.sh" "$PHANTOM_MODDIR/service.sh"
 # La finta sonda: registra gli argomenti, scrive il pid e resta in attesa come un demone.
 cat > "$PHANTOM_MODDIR/bin/phantom-probe" <<'PROBE'
@@ -175,10 +176,15 @@ echo "scatola nera: comandi"
 mkdir -p "$T/bin"
 cat > "$T/bin/nc" <<'NC'
 #!/bin/sh
+# Finto nc: telemetria (porta 47804) come prima; per la cattura (47803) si comporta come il vero, che chiude il collegamento
+# appena il suo ingresso finisce (EOF) e resta aperto finché l'ingresso è aperto. Alla fine la «sonda» scrive la riga di sessione.
 echo "$@" >> "$PHANTOM_DATA/nc.calls"
-echo "H telemetria 1 sonda=prova"
-echo "T 1.000 e=1 | c u1 | finto"
-sleep 30
+if [ "$2" = 47804 ]; then echo "H telemetria 1 sonda=prova"; echo "T 1.000 e=1 | c u1 | finto"; sleep 30; exit 0; fi
+t0=$(date +%s)
+[ -n "$FAKE_NC_QUICK" ] || cat >/dev/null
+dt=$(( $(date +%s) - t0 ))
+frames=$(( dt * 30 )); [ -n "$FAKE_RX" ] && frames=$FAKE_RX
+[ -n "$FAKE_NC_SILENT" ] || echo "2026-11-01T22:00:00Z scrcpy: sessione con 127.0.0.1:5 conclusa (l'iPhone ha chiuso) · frame ricevuti $frames, inviati $frames, scartati 0 in 0 eventi · 1.5 MB inviati" >> "$PHANTOM_DATA/probe.log"
 NC
 chmod +x "$T/bin/nc"
 $C scrcpy on 1 >/dev/null
@@ -190,19 +196,78 @@ check "blackbox mostra le ultime righe del registro" "echo \"\$out\" | grep -q '
 rm -f "$PHANTOM_DATA/blackbox.txt"
 out=$($C blackbox 2>&1)
 check "blackbox senza registro lo dice" "echo \"\$out\" | grep -q 'nessun registro'"
-rm -f "$PHANTOM_DATA/nc.calls"
-out=$(PATH="$T/bin:$PATH" $C captest 3 4 2>&1)
+echo "prova locale (captest): deve dire la verità"
+export PHANTOM_CAPTEST_TAIL=1 PHANTOM_CAPTEST_ALIVE_TIMEOUT=1
+cat > "$T/bin/wmfake" <<'WM'
+#!/bin/sh
+# finto «cmd window size»: risponde, a meno che il file «congelato» esista (allora resta appeso, come con il blocco del window manager)
+if [ -f "$PHANTOM_DATA/congelato" ]; then sleep 100; fi
+echo "Physical size: 1080x2400"
+WM
+chmod +x "$T/bin/wmfake"
+export PHANTOM_WMCMD="$T/bin/wmfake"
+rm -f "$PHANTOM_DATA/nc.calls" "$PHANTOM_DATA/congelato"
+
+# 1) prova regolare: il collegamento resta aperto per tutta la durata e l'esito è VALIDA
+out=$(PATH="$T/bin:$PATH" $C captest 4 4 2>&1)
 check "captest accende scrcpy col profilo scelto" "args | grep -q -- '--scrcpy-profile hw-mid'"
-check "captest spiega come proseguire" "echo \"\$out\" | grep -q 'PROVA LOCALE avviata' && echo \"\$out\" | grep -q 'Post-mortem approfondito'"
-check "captest parte staccato (il comando torna subito)" "grep -q 'INIZIO prova locale · profilo hw-mid · 3 s' $PHANTOM_DATA/captest.log"
-sleep 6
+check "captest spiega come proseguire" "echo \"\$out\" | grep -q 'PROVA LOCALE avviata' && echo \"\$out\" | grep -q 'Post-mortem approfondito' && echo \"\$out\" | grep -q 'RISULTATO: VALIDA'"
+check "captest parte staccato (il comando torna subito)" "grep -q 'INIZIO prova locale · profilo hw-mid · 4 s' $PHANTOM_DATA/captest.log"
+sleep 9
 check "captest si collega al ponte scrcpy in locale" "grep -qx '127.0.0.1 47803' $PHANTOM_DATA/nc.calls"
-check "captest scrive l'esito a fine prova" "grep -q 'FINE prova locale' $PHANTOM_DATA/captest.log"
-check "captest status mostra il registro" "$C captest status | grep -q 'FINE prova locale'"
+check "captest scrive le leve in uso" "grep -q 'schermo automatico · display virtuali predefiniti · modulo v0.5' $PHANTOM_DATA/captest.log"
+check "captest tiene il collegamento aperto per tutta la durata e dice VALIDA" "grep -q 'RISULTATO: VALIDA · NESSUN BLOCCO' $PHANTOM_DATA/captest.log"
+check "captest conta i controlli del window manager" "grep -Eq 'il window manager ha risposto [0-9]+ volte su [0-9]+' $PHANTOM_DATA/captest.log"
+check "captest status mostra l'esito" "$C captest status | grep -q 'RISULTATO: VALIDA'"
+
+# 2) il difetto della 0.5.1: collegamento chiuso subito e nessun frame → NON deve mai dire «non si è bloccato»
+export FAKE_NC_QUICK=1 FAKE_RX=0
+PATH="$T/bin:$PATH" $C captest 4 4 manual >/dev/null 2>&1
+sleep 9
+check "se il collegamento si chiude subito senza frame la prova è NON VALIDA" "grep -q 'RISULTATO: NON VALIDA · la sessione si è chiusa senza nessun frame' $PHANTOM_DATA/captest.log"
+check "…e non dice mai «NESSUN BLOCCO» né «non si è bloccato»" "! grep -q 'NESSUN BLOCCO' $PHANTOM_DATA/captest.log && ! grep -q 'NON si è bloccato' $PHANTOM_DATA/captest.log"
+unset FAKE_NC_QUICK FAKE_RX
+
+# 3) la sonda non ha registrato nessuna sessione
+export FAKE_NC_SILENT=1
+PATH="$T/bin:$PATH" $C captest 4 4 manual >/dev/null 2>&1
+sleep 9
+check "senza riga di sessione nel log della sonda la prova è NON VALIDA" "grep -q 'RISULTATO: NON VALIDA · la sonda non ha registrato nessuna sessione' $PHANTOM_DATA/captest.log"
+unset FAKE_NC_SILENT
+
+# 4) la scatola nera segnala uno stallo durante la prova, anche se il controllo risponde
+PATH="$T/bin:$PATH" $C captest 4 4 manual >/dev/null 2>&1
+sleep 1
+echo "S 100.000 inizio: surfaceflinger aspetta da 2100 ms la risposta di un altro processo" >> "$PHANTOM_DATA/blackbox.txt"
+sleep 9
+check "stallo della scatola nera durante la prova: esito BLOCCO" "grep -q 'RISULTATO: BLOCCO · la scatola nera ha visto uno stallo' $PHANTOM_DATA/captest.log && grep -q 'surfaceflinger aspetta da 2100 ms' $PHANTOM_DATA/captest.log"
+rm -f "$PHANTOM_DATA/blackbox.txt"
+
+# 5) il window manager si ferma durante la cattura: BLOCCO rilevato, si ferma la cattura e si guarda se il sistema si riprende
+PATH="$T/bin:$PATH" $C captest 30 4 manual >/dev/null 2>&1
+sleep 2
+touch "$PHANTOM_DATA/congelato"
+for i in $(seq 1 40); do grep -q 'BLOCCO RILEVATO' "$PHANTOM_DATA/captest.log" && break; sleep 0.5; done
+check "window manager fermo: BLOCCO RILEVATO" "grep -q 'BLOCCO RILEVATO dopo' $PHANTOM_DATA/captest.log"
+rm -f "$PHANTOM_DATA/congelato"
+for i in $(seq 1 40); do grep -q 'RISULTATO: BLOCCO' "$PHANTOM_DATA/captest.log" && break; sleep 0.5; done
+check "se si riprende dopo aver fermato la cattura lo scrive" "grep -q 'RISULTATO: BLOCCO · il sistema si è RIPRESO' $PHANTOM_DATA/captest.log"
+rm -f "$PHANTOM_DATA/congelato"
+
+# 6) il sistema è già bloccato prima di iniziare
+touch "$PHANTOM_DATA/congelato"
+PATH="$T/bin:$PATH" $C captest 4 4 manual >/dev/null 2>&1
+sleep 3
+check "se il window manager non risponde già all'inizio la prova è NON VALIDA" "grep -q 'RISULTATO: NON VALIDA · il window manager non risponde NEMMENO prima' $PHANTOM_DATA/captest.log"
+rm -f "$PHANTOM_DATA/congelato"
+unset PHANTOM_WMCMD PHANTOM_CAPTEST_TAIL PHANTOM_CAPTEST_ALIVE_TIMEOUT
+
 $C captest 1 >/dev/null 2>&1; rc=$?
 check "captest rifiuta durate troppo brevi" "[ $rc -ne 0 ]"
 $C captest 5 99 >/dev/null 2>&1; rc=$?
 check "captest rifiuta profili sconosciuti" "[ $rc -ne 0 ]"
+$C captest 5 4 sempre >/dev/null 2>&1; rc=$?
+check "captest rifiuta una modalità sconosciuta" "[ $rc -ne 0 ]"
 echo 'TELEMETRY=0' >> "$PHANTOM_DATA/probe.conf"
 $C restart >/dev/null
 check "con TELEMETRY=0 la porta di telemetria non viene richiesta" "! args | grep -q -- '--telemetry-port'"

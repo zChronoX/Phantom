@@ -37,12 +37,17 @@ final class DecoderBench: ObservableObject {
         report = ""
         progress = "Preparazione…"
         UIApplication.shared.isIdleTimerDisabled = true
+        CrashLog.markMem("Decoder: avvio del banco di prova")
         DispatchQueue.global(qos: .userInitiated).async {
             var out = "Phantom F0 · banco di prova del decoder (iPhone)\n"
             out += "modello \(DecoderBench.machineId()) · iOS \(UIDevice.current.systemVersion) · stato termico all'inizio: \(DecoderBench.thermal())\n\n"
             for (i, c) in DecoderBench.configs.enumerated() {
                 self.setProgress("Prova \(i + 1) di \(DecoderBench.configs.count): \(c.name) \(c.width)×\(c.height) a \(c.fps) fps…")
-                out += self.runOne(c) + "\n"
+                CrashLog.markMem("Decoder: inizio prova \(i + 1) di \(DecoderBench.configs.count)")
+                // Un blocco di autorelease per prova: libera i buffer di VideoToolbox appena la prova finisce.
+                let text = autoreleasepool { self.runOne(c) }
+                out += text + "\n"
+                CrashLog.markMem("Decoder: fine prova \(i + 1)")
             }
             out += "stato termico alla fine: \(DecoderBench.thermal())\n"
             DispatchQueue.main.async {
@@ -93,6 +98,7 @@ final class DecoderBench: ObservableObject {
     private func runOne(_ c: Config) -> String {
         let label = "\(c.name) · \(c.width)×\(c.height) · \(c.fps) fps · \(c.bitrate / 1_000_000) Mbps richiesti"
         let frames = c.fps * 3
+        CrashLog.mark("Decoder: \(label)")
 
         var encoder: VTCompressionSession?
         let lowLatency: [CFString: Any] = [kVTVideoEncoderSpecification_EnableLowLatencyRateControl: true]
@@ -105,6 +111,7 @@ final class DecoderBench: ObservableObject {
                                             encoderSpecification: nil, imageBufferAttributes: nil, compressedDataAllocator: nil,
                                             outputCallback: nil, refcon: nil, compressionSessionOut: &encoder)
         }
+        CrashLog.mark("Decoder: creazione encoder, stato \(st), sessione \(encoder == nil ? "assente" : "presente")")
         guard st == noErr, let session = encoder else { return "\(label)\n  impossibile creare l'encoder (errore \(st))\n" }
 
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
@@ -113,7 +120,8 @@ final class DecoderBench: ObservableObject {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: c.bitrate))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: c.fps * 2))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 0))
-        VTCompressionSessionPrepareToEncodeFrames(session)
+        let prepared = VTCompressionSessionPrepareToEncodeFrames(session)
+        CrashLog.mark("Decoder: encoder preparato, stato \(prepared)")
         defer { VTCompressionSessionInvalidate(session) }
 
         // Texture di partenza: più righe del necessario, così ogni frame la legge con uno scarto diverso (movimento globale).
@@ -134,6 +142,7 @@ final class DecoderBench: ObservableObject {
             CVPixelBufferPoolCreate(nil, nil, attrs as CFDictionary, &pool)
         }
         guard let bufferPool = pool else { return "\(label)\n  nessun pool di buffer per l'encoder\n" }
+        CrashLog.mark("Decoder: pool di buffer pronto")
 
         let lock = NSLock()
         var encMs = [Double](repeating: .nan, count: frames)
@@ -149,6 +158,7 @@ final class DecoderBench: ObservableObject {
         let start = DecoderBench.nowNs() + 50_000_000
         for i in 0..<frames {
             DecoderBench.sleepUntil(start + UInt64(i) * 1_000_000_000 / UInt64(c.fps))
+            if i == 0 || i % 60 == 0 { CrashLog.mark("Decoder: frame \(i) di \(frames)") }
 
             var pbOut: CVPixelBuffer?
             guard CVPixelBufferPoolCreatePixelBuffer(nil, bufferPool, &pbOut) == kCVReturnSuccess, let pb = pbOut else {
@@ -164,6 +174,7 @@ final class DecoderBench: ObservableObject {
             let r = VTCompressionSessionEncodeFrame(session, imageBuffer: pb, presentationTimeStamp: pts, duration: frameDuration,
                                                     frameProperties: props, infoFlagsOut: nil) { status, _, sampleBuffer in
                 let tEnc = DecoderBench.nowNs()
+                if i == 0 { CrashLog.mark("Decoder: primo frame uscito dall'encoder, stato \(status), campione \(sampleBuffer == nil ? "assente" : "presente")") }
                 guard status == noErr, let sb = sampleBuffer else {
                     lock.lock(); failures += 1; lock.unlock()
                     group.leave()
@@ -176,8 +187,10 @@ final class DecoderBench: ObservableObject {
                 if decoder == nil, let fd = CMSampleBufferGetFormatDescription(sb) {
                     var ds: VTDecompressionSession?
                     let hw: [CFString: Any] = [kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: true]
-                    if VTDecompressionSessionCreate(allocator: nil, formatDescription: fd, decoderSpecification: hw as CFDictionary,
-                                                    imageBufferAttributes: nil, outputCallback: nil, decompressionSessionOut: &ds) == noErr {
+                    let created = VTDecompressionSessionCreate(allocator: nil, formatDescription: fd, decoderSpecification: hw as CFDictionary,
+                                                               imageBufferAttributes: nil, outputCallback: nil, decompressionSessionOut: &ds)
+                    CrashLog.mark("Decoder: creazione decoder, stato \(created)")
+                    if created == noErr {
                         decoder = ds
                     }
                 }
@@ -212,8 +225,10 @@ final class DecoderBench: ObservableObject {
                 group.leave()
             }
         }
+        CrashLog.mark("Decoder: tutti i frame inviati, attendo l'encoder")
         VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: CMTime.invalid)
         let waited = group.wait(timeout: .now() + 15)
+        CrashLog.mark("Decoder: attesa finita (\(waited == .timedOut ? "tempo scaduto" : "ok"))")
 
         // Fase B: solo decodifica, il più in fretta possibile, sugli stessi frame già codificati.
         var maxFps = Double.nan
@@ -222,6 +237,7 @@ final class DecoderBench: ObservableObject {
         let stored = encoded
         lock.unlock()
         if let dec = dec {
+            CrashLog.mark("Decoder: fase B, decodifica a tutta velocità")
             var outputs = 0
             let t0 = DecoderBench.nowNs()
             for sb in stored {
@@ -258,8 +274,10 @@ final class DecoderBench: ObservableObject {
         CVPixelBufferLockBaseAddress(pb, [])
         defer { CVPixelBufferUnlockBaseAddress(pb, []) }
         guard let ybase = CVPixelBufferGetBaseAddressOfPlane(pb, 0), let src = tex.baseAddress else { return }
-        let h = CVPixelBufferGetHeightOfPlane(pb, 0)
-        let w = CVPixelBufferGetWidthOfPlane(pb, 0)
+        // Mai oltre la texture: se il buffer dell'encoder fosse più grande del previsto si copia solo la parte che c'è.
+        let texRows = texStride > 0 ? tex.count / texStride : 0
+        let h = min(CVPixelBufferGetHeightOfPlane(pb, 0), max(texRows - rowShift, 0))
+        let w = min(CVPixelBufferGetWidthOfPlane(pb, 0), texStride)
         let ystride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
         for y in 0..<h {
             memcpy(ybase + y * ystride, src + (y + rowShift) * texStride, w)

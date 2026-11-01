@@ -5,6 +5,10 @@ import SwiftUI
 /// così si separa l'effetto di Safari e del TCP da quello del Wi-Fi.
 @main
 struct PhantomF0App: App {
+    init() {
+        CrashLog.start()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()

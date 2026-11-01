@@ -43,9 +43,11 @@
   <div class="label">Scatola nera (stato del telefono in tempo reale, anche sull'app iPhone) · nessun video</div>
   <button data-cmd="live 4" class="main">Telemetria 4 s</button>
   <button data-cmd="blackbox 40">Registro su disco</button>
-  <div class="label">Prova di cattura locale: il telefono cattura se stesso, senza iPhone né Wi-Fi (poi scorri la lista delle app)</div>
-  <button data-cmd="captest 60">Prova locale 60 s (profilo attivo)</button>
-  <button data-cmd="captest status">Esito prova locale</button>
+  <div class="label">Prova di cattura locale: il telefono cattura se stesso, senza iPhone né Wi-Fi. Fa scorrere le Impostazioni da solo (non toccare il telefono), controlla che il sistema risponda e scrive «RISULTATO: VALIDA», «BLOCCO» o «NON VALIDA»</div>
+  <button data-cmd="captest 60 sw-low auto" class="main">Prova 60 s · profilo 1 software leggero</button>
+  <button data-cmd="captest 60 hw-max auto">Prova 60 s · profilo 6 hardware 120 fps</button>
+  <button data-cmd="captest 60">Prova 60 s · profilo attivo</button>
+  <button data-cmd="captest status" class="main">Esito prova locale</button>
   <div class="label">Leve di prova per capire il blocco (fai una prova per volta)</div>
   <button data-cmd="hz 60">Schermo fisso 60 Hz</button>
   <button data-cmd="hz 120">Schermo fisso 120 Hz</button>

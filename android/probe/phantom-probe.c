@@ -42,7 +42,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define PROBE_VERSION "0.5.1"
+#define PROBE_VERSION "0.5.2"
 #define UDP_MAGIC "PHP1"
 #define UDP_HDR 32          /* magic(4) seq(4) client_ns(8) server_mono_ns(8) server_suspend_ms(8) */
 #define WAKE_GAP_NS (30ull * 1000000000ull)
@@ -1100,7 +1100,7 @@ static void usage(void) {
             "  --no-sysrq         non chiedere al kernel gli stack dei task bloccati\n"
             "  --tm-autostop      se la sessione video è in corso e lo stallo dura 3 s, ferma la cattura\n"
             "  --no-blackbox-disk non scrivere blackbox.txt nella cartella di stato\n"
-            "  --proc-root P / --sys-root P / --kmsg P / --sysrq-file P / --sysrq-mask P   percorsi alternativi (per i test)\n"
+            "  --proc-root P / --sys-root P / --kmsg P / --sysrq-file P / --sysrq-mask P / --binder-file P   percorsi alternativi (per i test)\n"
             "  --allow-any        accetta anche indirizzi pubblici (sconsigliato)\n"
             "  --log FILE         file di log (default stderr)\n"
             "  --pidfile FILE     scrive il PID\n"
@@ -1152,6 +1152,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--sys-root")) { NEEDV(); g_sys = v; }
         else if (!strcmp(a, "--kmsg")) { NEEDV(); g_kmsg_path = v; }
         else if (!strcmp(a, "--sysrq-file")) { NEEDV(); g_sysrq_path = v; }
+        else if (!strcmp(a, "--binder-file")) { NEEDV(); g_binder_file = v; }
         else if (!strcmp(a, "--sysrq-mask")) { NEEDV(); g_sysrq_mask_path = v; }
         else if (!strcmp(a, "--version")) { printf("%s\n", PROBE_VERSION); return 0; }
         else { usage(); return 2; }

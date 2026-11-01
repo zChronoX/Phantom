@@ -92,6 +92,7 @@ final class CoreLoopback: ObservableObject {
         report = ""
         progress = "Preparazione…"
         UIApplication.shared.isIdleTimerDisabled = true
+        CrashLog.markMem("Core: avvio prova · \(settings.fps) fps · perdita \(settings.lossPercent)% · \(settings.seconds) s")
         let flag = StopFlag()
         stopFlag = flag
         DispatchQueue.global(qos: .userInteractive).async {
@@ -137,18 +138,24 @@ private final class LoopbackRun {
         self.stop = stop
         self.onSample = onSample
         self.onProgress = onProgress
+        CrashLog.mark("Core: creo le impostazioni di sessione")
         var cfg = defaultSessionSettings()
         cfg.codec = .h265
         settings = cfg
+        CrashLog.mark("Core: creo PhantomHost")
         host = PhantomHost(settings: cfg)
+        CrashLog.mark("Core: creo PhantomClient")
         client = PhantomClient(settings: cfg)
+        CrashLog.mark("Core: host e client creati")
         lossP = max(0, min(0.5, loopback.lossPercent / 100))
     }
 
     // MARK: Esecuzione
 
     func execute() -> String {
+        CrashLog.mark("Core: creo l'encoder HEVC")
         guard let encoder = makeEncoder() else { return "Impossibile creare l'encoder HEVC dell'iPhone." }
+        CrashLog.mark("Core: encoder HEVC pronto")
         defer { VTCompressionSessionInvalidate(encoder) }
         var pool = VTCompressionSessionGetPixelBufferPool(encoder)
         if pool == nil {
@@ -158,9 +165,11 @@ private final class LoopbackRun {
             CVPixelBufferPoolCreate(nil, nil, attrs as CFDictionary, &pool)
         }
         guard let bufferPool = pool else { return "Nessun pool di buffer per l'encoder." }
+        CrashLog.mark("Core: pool di buffer pronto, creo la sorgente sintetica")
 
         let thermalStart = DecoderBench.thermal()
         let source = Source(width: s.width, height: s.height)
+        CrashLog.markMem("Core: sorgente pronta, avvio il timer di rete")
         var appliedBitrate = Int(host.targetBitrateBps())
         startTimer()
 
@@ -172,6 +181,7 @@ private final class LoopbackRun {
         for i in 0..<total {
             if stop.isSet { break }
             sleepUntil(start + UInt64(i) * 1_000_000_000 / UInt64(s.fps))
+            if i == 0 || i % s.fps == 0 { CrashLog.mark("Core: frame \(i) di \(total)") }
 
             // Ogni mezzo secondo l'encoder segue il bitrate che il controllo di Phantom ha deciso.
             if i % (s.fps / 2) == 0 {
@@ -205,6 +215,7 @@ private final class LoopbackRun {
 
             if i % s.fps == 0 { onProgress(liveText(second: i / s.fps, of: s.seconds)) }
         }
+        CrashLog.markMem("Core: tutti i frame inviati")
         VTCompressionSessionCompleteFrames(encoder, untilPresentationTimeStamp: CMTime.invalid)
         usleep(500_000) // lascia arrivare ritrasmissioni e ultimi frame
         let wallSeconds = Double(nowNs() - wall0) / 1e9
@@ -212,6 +223,7 @@ private final class LoopbackRun {
 
         tickTimer?.cancel()
         netQueue.sync {}
+        CrashLog.mark("Core: scrivo il rapporto")
         return makeReport(wallSeconds: wallSeconds, cpuSeconds: cpuSecondsUsed, thermalStart: thermalStart)
     }
 
@@ -236,6 +248,7 @@ private final class LoopbackRun {
                                             imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: nil,
                                             refcon: nil, compressionSessionOut: &enc)
         }
+        CrashLog.mark("Core: creazione encoder HEVC, stato \(st), sessione \(enc == nil ? "assente" : "presente")")
         guard st == noErr, let session = enc else { return nil }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
@@ -244,7 +257,8 @@ private final class LoopbackRun {
         // Un keyframe periodico ogni 10 s come rete di sicurezza; gli altri li chiede l'host quando serve.
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: s.fps * 10))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 0))
-        VTCompressionSessionPrepareToEncodeFrames(session)
+        let prepared = VTCompressionSessionPrepareToEncodeFrames(session)
+        CrashLog.mark("Core: encoder preparato, stato \(prepared)")
         return session
     }
 
@@ -262,6 +276,7 @@ private final class LoopbackRun {
             $0.encodeMs.append(Double(tEnc - submitNs) / 1e6)
             if key { $0.keyFrames += 1 }
         }
+        if m.read({ $0.encodedFrames }) == 1 { CrashLog.mark("Core: primo frame dall'encoder (\(annex.count) byte, keyframe \(key)), lo passo all'host") }
         let t0 = nowNs()
         let datagrams = host.sendFrame(key: key, captureTsUs: captureHostUs, data: annex)
         let elapsed = nowNs() - t0

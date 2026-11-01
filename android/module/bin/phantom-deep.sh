@@ -63,7 +63,10 @@ epoch_utc() {
 utc_of() {
     ms=${1##*@}; ms=${ms%%.*}
     case "$ms" in *[!0-9]* | "") echo "?"; return ;; esac
-    epoch_utc $((ms / 1000))
+    # I millisecondi (13 cifre) non entrano in un intero a 32 bit, e la shell di Android calcola a 32 bit: dividere per 1000
+    # dava date del 1969. Si tolgono le ultime 3 cifre come TESTO; restano secondi, che ci stanno.
+    case "$ms" in ???*) secs=${ms%???} ;; *) secs=0 ;; esac
+    epoch_utc "$secs"
 }
 
 # Filtro dei thread interessanti in un dump (stack Java dell'ART o stack nativi di debuggerd).
@@ -199,6 +202,43 @@ cat /proc/loadavg 2>/dev/null
 sec "Proprietà grafiche e di sistema che contano per la cattura dello schermo"
 if have getprop; then
     getprop | grep -i -E 'surface_flinger|renderengine|debug[.]sf|hwui|vulkan|opengles|sf[.]|display[.]|composer|vsync|gralloc|ro[.]build[.](fingerprint|version[.]incremental)|ro[.]vendor[.]build[.]fingerprint' | cut -c1-200 | head -n 60
+fi
+
+sec "Scatola nera: stalli registrati su disco (blackbox.txt)"
+BB=$DATA/blackbox.txt
+if [ -f "$BB" ]; then
+    echo "$(wc -c < "$BB") byte · ultime righe di stallo (S), istantanee dei task e della catena binder (D), eventi (E):"
+    tail -n 4000 "$BB" 2>/dev/null | grep -E '^[SDE] ' | tail -n 220 | cut -c1-700
+else
+    echo "(nessun registro: la scatola nera scrive su disco solo durante una sessione video o uno stallo)"
+fi
+if [ -f "$DATA/binder-last.txt" ]; then
+    echo "--- elenco binder dell'ultimo stallo: prime 120 righe di binder-last.txt ($(wc -c < "$DATA/binder-last.txt") byte) ---"
+    head -n 120 "$DATA/binder-last.txt" | cut -c1-260
+fi
+
+sec "Avvio precedente: pstore e log di Android salvati prima del riavvio"
+if [ -d /sys/fs/pstore ] && [ -n "$(ls /sys/fs/pstore 2>/dev/null)" ]; then
+    # shellcheck disable=SC2012  # elenco per l'occhio
+    ls -l /sys/fs/pstore 2>/dev/null | head -n 12
+    for f in /sys/fs/pstore/console-ramoops*; do
+        [ -f "$f" ] || continue
+        echo "--- $f: ultime 80 righe ---"
+        tail -n 80 "$f" 2>/dev/null | cut -c1-240
+        break
+    done
+else
+    echo "(nessun file in /sys/fs/pstore: il telefono non conserva i log del kernel tra un avvio e l'altro)"
+fi
+if have logcat; then
+    LC=$WORK/logcat-L.txt
+    timeout 25 logcat -L -d -v threadtime > "$LC" 2>&1
+    if [ -s "$LC" ]; then
+        echo "--- logcat -L: log di Android dell'avvio precedente ($(wc -l < "$LC") righe), solo quelle su schermo, codec, watchdog, binder; ultime 150 ---"
+        grep -i -E 'SurfaceFlinger|VirtualDisplay|DisplayManager|MediaCodec|CCodec|Codec2|scrcpy|Watchdog|ANR in|am_anr|BufferQueue|hwcomposer|composer|lowmemorykiller|am_kill|binder:' "$LC" | tail -n 150 | cut -c1-260
+    else
+        echo "(logcat -L non ha restituito nulla: nessun log dell'avvio precedente)"
+    fi
 fi
 
 sec "Appendice A: testo completo dei file ANR"

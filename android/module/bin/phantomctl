@@ -8,7 +8,8 @@
 #   phantomctl vds gpu|default|status  display virtuali composti dalla GPU invece che dal display hardware (si applica al riavvio)
 #   phantomctl live [secondi]      mostra qualche secondo della scatola nera in tempo reale (stato del telefono, nessun video)
 #   phantomctl blackbox [righe]    ultime righe del registro su disco della scatola nera (e lo copia in Download)
-#   phantomctl captest [sec] [profilo] | status   cattura locale senza iPhone né Wi-Fi: il telefono cattura se stesso e butta il video
+#   phantomctl captest [sec] [profilo] [auto|manual] | status   cattura locale senza iPhone né Wi-Fi: il telefono cattura se stesso e butta il video,
+#                                  controlla da solo che il sistema risponda e dice se la prova è valida (auto = scorre le Impostazioni da solo)
 #   phantomctl postmortem [deep]   rapporto su un blocco o un riavvio anomalo; «deep» legge anche i dump del watchdog e i tombstone
 #   phantomctl video on|off        flusso H.264 di base sulla porta 47802
 #   phantomctl autostart on|off    avvio della sonda all'accensione
@@ -343,30 +344,33 @@ case "$1" in
     captest)
         # Prova di cattura SENZA iPhone e senza Wi-Fi: il telefono si collega a se stesso (127.0.0.1) e butta via il video.
         # Se così si blocca, il problema è la cattura dello schermo di questa ROM; se non si blocca, contano rete o app.
+        # Lo script phantom-captest.sh controlla che il sistema risponda per tutta la durata e scrive un esito onesto
+        # (VALIDA / BLOCCO / NON VALIDA): una prova che non ha catturato nulla non deve mai dire «non si è bloccato».
         if [ "$2" = status ]; then
             if [ -f "$DATA/captest.log" ]; then cat "$DATA/captest.log"; else echo "(nessuna prova locale eseguita)"; fi
             exit 0
         fi
         secs=${2:-60}
-        case "$secs" in "" | *[!0-9]*) echo "uso: phantomctl captest [secondi] [profilo] | status"; exit 2 ;; esac
+        case "$secs" in "" | *[!0-9]*) echo "uso: phantomctl captest [secondi] [profilo] [auto|manual] | status"; exit 2 ;; esac
         [ "$secs" -ge 3 ] && [ "$secs" -le 600 ] || { echo "durata da 3 a 600 secondi"; exit 2; }
         prof=${3:-$SCRCPY_PROFILE}
         profile_load "$prof" || { echo "Profilo «$prof» sconosciuto: vedi phantomctl scrcpy profiles"; exit 2; }
+        act=${4:-auto}
+        case "$act" in auto | manual) ;; *) echo "uso: phantomctl captest [secondi] [profilo] [auto|manual] | status"; exit 2 ;; esac
         NC=$(find_nc) || { echo "Manca nc sul telefono: la prova locale non è possibile"; exit 1; }
         sh "$MODDIR/bin/phantomctl" scrcpy on "$P_NAME" >/dev/null 2>&1
         : > "$DATA/captest.log"
+        knobs="schermo $([ "${HZ_LOCK:-0}" != 0 ] && echo "fisso a ${HZ_LOCK} Hz" || echo automatico) · display virtuali $([ -f "$MODDIR/system.prop" ] && echo "in GPU" || echo predefiniti) · modulo $(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null)"
         # La prova gira staccata da questo comando: si può uscire dall'app e usare il telefono.
-        setsid sh -c "
-            echo \"\$(date -u '+%Y-%m-%dT%H:%M:%SZ') INIZIO prova locale · profilo $P_NAME · $secs s\" >> '$DATA/captest.log'
-            timeout $secs $NC 127.0.0.1 47803 >/dev/null 2>&1
-            sleep 2
-            echo \"\$(date -u '+%Y-%m-%dT%H:%M:%SZ') FINE prova locale: il telefono NON si è bloccato\" >> '$DATA/captest.log'
-            tail -n 5 '$LOG' >> '$DATA/captest.log'
-        " </dev/null >/dev/null 2>&1 &
+        setsid sh "$MODDIR/bin/phantom-captest.sh" "$secs" "$P_NAME" "$NC" "$act" "$DATA" "$LOG" "$knobs" </dev/null >/dev/null 2>&1 &
         echo "PROVA LOCALE avviata: profilo $P_NAME, $secs secondi, senza iPhone né Wi-Fi."
-        echo "Esci da questa app e usa il telefono come quando si bloccava (apri la lista delle app e scorri su e giù)."
-        echo "Se il telefono si blocca: tieni premuto l'accensione, riavvia e apri il Post-mortem approfondito."
-        echo "Se dopo $secs secondi tutto va bene: phantomctl captest status (oppure il pulsante «Esito prova locale»)." ;;
+        if [ "$act" = auto ]; then
+            echo "Lo schermo scorrerà da solo (apre le Impostazioni): NON toccare il telefono e non spegnere lo schermo."
+        else
+            echo "Esci da questa app e usa il telefono come quando si bloccava (apri la lista delle app e scorri su e giù)."
+        fi
+        echo "Se il telefono si blocca: aspetta 30 secondi (la scatola nera prova a liberarlo); poi tieni premuto l'accensione, riavvia e apri il Post-mortem approfondito."
+        echo "Dopo $secs secondi: premi «Esito prova locale» (phantomctl captest status). Conta solo se c'è scritto RISULTATO: VALIDA o BLOCCO." ;;
     postmortem)
         case "$2" in
             deep)

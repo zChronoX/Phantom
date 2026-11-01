@@ -299,6 +299,13 @@ static volatile int g_want_deep = 0;        /* richiesta di istantanea dei task 
 static volatile int g_n_blk = 0;
 static volatile double g_n_io_full = 0, g_n_mem_full = 0;
 static volatile int g_n_dmain = 0;          /* processi chiave con il thread principale bloccato nel kernel */
+/* Da quando il thread principale di surfaceflinger aspetta la risposta di un altro processo (0 = non aspetta). Nei blocchi
+ * del POCO è esattamente questo: la composizione resta ferma in una chiamata binder (queueBuffer/dequeueBuffer) verso il
+ * processo che riceve i frame della cattura, e con lei si ferma tutto il sistema. Non è uno stato D: il rilevatore dei task
+ * bloccati sul disco non se ne accorgeva. */
+static volatile uint64_t g_sf_bwait_since = 0;
+static volatile long long g_sf_cs = -1;     /* cambi di contesto del thread principale di surfaceflinger all'ultimo campione */
+static const char *g_binder_file = NULL;    /* file delle transazioni binder del kernel; NULL = si provano i percorsi noti */
 
 static void part_set(struct tm_part *p, const char *txt) {
     pthread_mutex_lock(&g_part_mu);
@@ -638,6 +645,16 @@ static void tm_task_wchan(const char *tdir, char *wchan, size_t wn) {
     if (wchan[0] == '0' && wchan[1] == 0) wchan[0] = 0;
 }
 
+/* Cambi di contesto (volontari + involontari) del thread principale di un processo; -1 se non leggibili. */
+static long long tm_ctxt_switches(const char *tdir) {
+    char p[480], b[2048];
+    snprintf(p, sizeof p, "%s/status", tdir);
+    if (tm_rd(p, b, sizeof b) <= 0) return -1;
+    long long v = tm_after(b, "voluntary_ctxt_switches:");
+    long long nv = tm_after(b, "nonvoluntary_ctxt_switches:");
+    return v < 0 || nv < 0 ? -1 : v + nv;
+}
+
 /* Funzioni dello stack del kernel di un task, dalla più recente: «a<b<c». */
 static void tm_task_stack(const char *tdir, char *out, size_t n) {
     char p[480], b[2048];
@@ -710,6 +727,89 @@ static void tm_proc_snapshot(const char *label, pid_t pid, int all) {
     closedir(d);
 }
 
+/* Un solo thread, anche se aspetta «tranquillo» (serve per il thread principale di surfaceflinger e per quello che deve rispondergli). */
+static void tm_thread_snapshot(const char *label, pid_t pid, pid_t tid) {
+    if (pid <= 0 || tid <= 0) return;
+    char td[400], st = '?', wc[64], cm[32] = "?", stack[300];
+    snprintf(td, sizeof td, "%s/%d/task/%d", g_proc, (int)pid, (int)tid);
+    if (!tm_task_state(td, &st, cm, sizeof cm)) { tm_emit('D', "proc %s %d/%d non esiste più", label, (int)pid, (int)tid); return; }
+    tm_task_wchan(td, wc, sizeof wc);
+    tm_task_stack(td, stack, sizeof stack);
+    tm_emit('D', "proc %s %d/%d(%s) %c wchan=%s stack=%s", label, (int)pid, (int)tid, cm, st, wc[0] ? wc : "-", stack[0] ? stack : "-");
+}
+
+/* ---- binder: chi aspetta chi. Il kernel elenca le transazioni in corso («outgoing transaction ... from P:T to Q:R»).
+ * Partendo da surfaceflinger si segue la catena fino al processo che non risponde, di cui si scrivono i thread e gli stack. */
+
+struct tm_btx { int from_pid, from_tid, to_pid, to_tid; char kind; };
+
+static int tm_binder_read(char *buf, size_t n) {
+    static const char *known[] = {"/dev/binderfs/binder_logs/transactions", "/sys/kernel/debug/binder/transactions", "/d/binder/transactions"};
+    if (g_binder_file) return tm_rd(g_binder_file, buf, n);
+    for (size_t i = 0; i < sizeof known / sizeof *known; i++) {
+        int r = tm_rd(known[i], buf, n);
+        if (r > 0) return r;
+    }
+    return -1;
+}
+
+static void tm_binder_dump(pid_t sf) {
+    static char buf[1 << 19]; /* 512 KB: l'elenco di un telefono normale è molto più corto */
+    static struct tm_btx tx[600];
+    g_stage_task = "binder:lettura";
+    int len = tm_binder_read(buf, sizeof buf);
+    g_stage_task = "binder:analisi";
+    if (len <= 0) { tm_emit('D', "binder: elenco delle transazioni non leggibile (nessun file noto)"); return; }
+    /* copia intera dell'elenco: si legge con calma dopo il riavvio (il disco potrebbe non rispondere: si prosegue lo stesso) */
+    char path[300];
+    state_path(path, sizeof path, "binder-last.txt");
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd >= 0) {
+        if (write(fd, buf, (size_t)len) < 0) { /* disco pieno */ }
+        fsync(fd);
+        close(fd);
+    }
+    int n = 0, shown = 0;
+    char *save = NULL;
+    for (char *l = strtok_r(buf, "\n", &save); l && n < 600; l = strtok_r(NULL, "\n", &save)) {
+        char kind = strstr(l, "outgoing transaction") ? 'o' : strstr(l, "incoming transaction") ? 'i' : strstr(l, "pending transaction") ? 'p' : 0;
+        if (!kind) continue;
+        const char *f = strstr(l, " from ");
+        if (!f || sscanf(f, " from %d:%d to %d:%d", &tx[n].from_pid, &tx[n].from_tid, &tx[n].to_pid, &tx[n].to_tid) != 4) continue;
+        tx[n].kind = kind;
+        n++;
+        if (kind != 'i' && shown < 40) { /* in uscita e in coda: sono quelle che aspettano */
+            while (*l == ' ') l++;
+            tm_emit('D', "binder %.600s", l);
+            shown++;
+        }
+    }
+    int pid = (int)sf, tid = (int)sf;
+    for (int hop = 0; hop < 6; hop++) {
+        const struct tm_btx *e = NULL;
+        for (int i = 0; i < n && !e; i++) if (tx[i].kind == 'o' && tx[i].from_pid == pid && tx[i].from_tid == tid) e = &tx[i];
+        for (int i = 0; i < n && !e && hop == 0; i++) if (tx[i].kind == 'o' && tx[i].from_pid == pid) e = &tx[i]; /* un altro thread di surfaceflinger */
+        if (!e) {
+            if (hop == 0) tm_emit('D', "binder catena: surfaceflinger %d non ha transazioni in uscita nel kernel (%d righe lette)", pid, n);
+            else tm_emit('D', "binder catena: finisce al thread %d:%d, che non aspetta nessuno", pid, tid);
+            break;
+        }
+        char comm[64] = "?", cp[300];
+        snprintf(cp, sizeof cp, "%s/%d/comm", g_proc, e->to_pid);
+        if (tm_rd(cp, comm, sizeof comm) > 0) comm[strcspn(comm, "\n")] = 0;
+        else snprintf(comm, sizeof comm, "?");
+        tm_emit('D', "binder catena %d: %d:%d -> %d:%d (%s)%s", hop + 1, e->from_pid, e->from_tid, e->to_pid, e->to_tid, comm,
+                e->to_tid == 0 ? " · nessun thread libero: la richiesta resta in coda" : "");
+        if (e->to_pid > 0) {
+            tm_thread_snapshot(hop == 0 ? "peer" : "peer2", e->to_pid, e->to_tid);
+            tm_proc_snapshot(hop == 0 ? "peer" : "peer2", e->to_pid, 0);
+        }
+        if (e->to_tid == 0 || e->to_pid <= 0) break;
+        pid = e->to_pid;
+        tid = e->to_tid;
+    }
+}
+
 /* Istantanea di tutti i task bloccati nel kernel (stato D) nel sistema, con stack. */
 static void tm_deep_snapshot(const char *why) {
     static uint64_t last_proc = 0;
@@ -746,7 +846,9 @@ static void tm_deep_snapshot(const char *why) {
     /* i processi chiave dello schermo e della cattura, al massimo ogni 5 s */
     if (!last_proc || since(now_ms(), last_proc) >= 5000) {
         last_proc = now_ms();
+        tm_thread_snapshot("sf-main", g_watch[0].pid, g_watch[0].pid); /* il thread principale aspetta su binder: il filtro dei thread «tranquilli» lo salterebbe */
         tm_proc_snapshot("sf", g_watch[0].pid, 0);
+        tm_binder_dump(g_watch[0].pid);
         tm_proc_snapshot("hwc", g_watch[2].pid, 0);
         tm_proc_snapshot("swc", g_watch[3].pid, 0);
         tm_proc_snapshot("srv", g_tm ? (pid_t)g_tm->server_pid : 0, 1);
@@ -766,13 +868,27 @@ static void tm_task_sample(void) {
     for (int i = 0; i < TM_NWATCH + 2; i++) {
         const char *label = i < TM_NWATCH ? g_watch[i].label : extra_label[i - TM_NWATCH];
         pid_t pid = i < TM_NWATCH ? g_watch[i].pid : extra[i - TM_NWATCH];
-        if (pid <= 0) continue;
+        if (pid <= 0) { if (i == 0) g_sf_bwait_since = 0; continue; }
         char td[300], st = '?', wc[64], det[160];
         int nt, nd;
         g_stage_task = "proc";
         snprintf(td, sizeof td, "%s/%d", g_proc, (int)pid);
-        if (!tm_task_state(td, &st, NULL, 0)) { o += (size_t)snprintf(out + o, sizeof out - o, "%s%s -", o ? " " : "", label); continue; }
+        if (!tm_task_state(td, &st, NULL, 0)) {
+            if (i == 0) g_sf_bwait_since = 0;
+            o += (size_t)snprintf(out + o, sizeof out - o, "%s%s -", o ? " " : "", label);
+            continue;
+        }
         tm_task_wchan(td, wc, sizeof wc);
+        if (i == 0) { /* surfaceflinger: il thread principale è fermo in attesa di una risposta binder, senza aver lavorato nel frattempo */
+            /* Il solo wchan non basta: a ogni fotogramma il thread principale aspetta qualche millisecondo la risposta del composer.
+             * Un vero blocco è un'attesa binder SENZA nessun cambio di contesto da un campione all'altro. */
+            long long cs = tm_ctxt_switches(td);
+            if (st == 'S' && strcmp(wc, "binder_thread_read") == 0 && cs >= 0) {
+                if (!g_sf_bwait_since || cs != g_sf_cs) { g_sf_bwait_since = now; g_sf_cs = cs; }
+            } else {
+                g_sf_bwait_since = 0;
+            }
+        }
         g_stage_task = "threads";
         tm_proc_threads(pid, &nt, &nd, det, sizeof det);
         if (st == 'D') dmain++;
@@ -927,7 +1043,9 @@ static void tm_main(pid_t parent) {
         cnt_mem = g_n_mem_full >= 40 ? cnt_mem + 1 : 0;
         const char *why = NULL;
         char why_buf[96];
+        uint64_t sfw = g_sf_bwait_since ? since(now, g_sf_bwait_since) : 0;
         if (stuck_name) { snprintf(why_buf, sizeof why_buf, "campionatore %s fermo in %s", stuck_name, stuck_stage); why = why_buf; }
+        else if (sfw >= 2000) { snprintf(why_buf, sizeof why_buf, "surfaceflinger aspetta da %llu ms la risposta di un altro processo", (unsigned long long)sfw); why = why_buf; }
         else if (cnt_io >= 3) { snprintf(why_buf, sizeof why_buf, "pressione I/O piena %.0f%%", g_n_io_full); why = why_buf; }
         else if (cnt_mem >= 3) { snprintf(why_buf, sizeof why_buf, "pressione memoria piena %.0f%%", g_n_mem_full); why = why_buf; }
         else if (g_tm->relay_pid && since(now, g_tm->relay_loop_ms) > 2500 && since(now, g_tm->session_start_ms) > 4000) {

@@ -77,6 +77,7 @@ class Phone:
             write(f"{r}/proc/{pid}/wchan", "do_epoll_wait\n")
             write(f"{r}/proc/{pid}/task/{pid}/stat", f"{pid} ({name}) S 1 {pid} {pid} 0 -1 0 0 0 0 0 0 0 0 0 20 0 3 0 1 0 0\n")
             write(f"{r}/proc/{pid}/task/{pid}/wchan", "do_epoll_wait\n")
+            write(f"{r}/proc/{pid}/status", f"Name:\t{name}\nState:\tS (sleeping)\nvoluntary_ctxt_switches:\t100\nnonvoluntary_ctxt_switches:\t5\n")
         write(f"{r}/proc/1/comm", "init\n")
         # GPU, temperature, frequenze
         write(f"{r}/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage", "35 %\n")
@@ -106,6 +107,18 @@ class Phone:
         write(f"{r}/proc/200/task/201/stat", "201 (kworker/u16:3) D 2 0 0 0 -1 69238880 0 0 0 0 0 0 0 0 20 0 1 0 1 0 0\n")
         write(f"{r}/proc/200/task/201/wchan", "io_schedule\n")
         write(f"{r}/proc/200/task/201/stack", "[<0>] __switch_to+0x1c/0x28\n[<0>] io_schedule+0x20/0x40\n[<0>] wait_on_page_bit+0x80/0x90\n[<0>] f2fs_sync_file+0x100/0x300\n[<0>] do_fsync+0x40/0x70\n")
+
+    def sf_binder_wait(self, switches=None):
+        """surfaceflinger (100) con il thread principale in attesa di una risposta binder. switches: cambi di contesto (None = fermo a 105)."""
+        r = self.root
+        write(f"{r}/proc/100/wchan", "binder_thread_read\n")
+        write(f"{r}/proc/100/task/100/wchan", "binder_thread_read\n")
+        write(f"{r}/proc/100/status", f"Name:\tsurfaceflinger\nvoluntary_ctxt_switches:\t{(switches or 105) - 5}\nnonvoluntary_ctxt_switches:\t5\n")
+
+    def sf_idle(self):
+        r = self.root
+        write(f"{r}/proc/100/wchan", "do_epoll_wait\n")
+        write(f"{r}/proc/100/task/100/wchan", "do_epoll_wait\n")
 
     def clear_dstate(self):
         for f in ("stat", "wchan", "stack"):
@@ -143,7 +156,8 @@ class Probe:
         r = phone.root
         args = [PROBE, "--udp-port", str(self.port), "--http-port", str(self.port + 1), "--log", f"{r}/probe.log", "--state-dir", f"{r}/state",
                 "--telemetry-port", str(self.port + 4), "--tm-hz", "10", "--tm-idle-ms", "300",
-                "--proc-root", f"{r}/proc", "--sys-root", f"{r}/sys", "--kmsg", f"{r}/kmsg", "--sysrq-file", f"{r}/sysrq", "--sysrq-mask", f"{r}/sysrqmask"]
+                "--proc-root", f"{r}/proc", "--sys-root", f"{r}/sys", "--kmsg", f"{r}/kmsg", "--sysrq-file", f"{r}/sysrq", "--sysrq-mask", f"{r}/sysrqmask",
+                "--binder-file", f"{r}/binder"]
         env = dict(os.environ, FAKE_DIR=r, **(fake_env or {}))
         if scrcpy:
             args += ["--scrcpy-port", str(self.port + 3), "--scrcpy-jar", f"{r}/fake.jar", "--scrcpy-version", "9.9", "--scrcpy-profile", "prova",
@@ -276,7 +290,7 @@ def test_stream():
         n0 = len(c.of("T"))
         time.sleep(2.0)
         rate = (len(c.of("T")) - n0) / (time.monotonic() - t0)
-        check(c.lines and c.lines[0].startswith("H telemetria 1 sonda=0.5.1"), "intestazione H con versione del protocollo e della sonda")
+        check(c.lines and c.lines[0].startswith("H telemetria 1 sonda=0.5."), "intestazione H con versione del protocollo e della sonda")
         check(7 <= rate <= 13, f"circa 10 campioni al secondo con un client collegato ({rate:.1f}/s)")
         check(len(c.of("B")) >= 2, "battiti B ogni secondo")
         t = c.of("T")[-1]
@@ -429,6 +443,83 @@ def test_key_process_blocked():
         write(f"{ph.root}/proc/100/stat", "100 (surfaceflinger) D 1 100 100 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 3 0 1 0 0\n")
         check(wait_for(lambda: c.has("S", "un processo chiave è bloccato nel kernel"), 6), "surfaceflinger bloccato nel kernel viene segnalato")
         check(wait_for(lambda: any("sf D/do_epoll_wait" in l for l in c.of("T")), 3), "lo stato D di surfaceflinger compare nel campione")
+        c.close()
+    finally:
+        p.close()
+
+
+BINDER_FAKE = (
+    "binder transactions:\n"
+    "proc 100\n"
+    "  thread 100: l 00 need_return 0 tr 0\n"
+    "    outgoing transaction 9001: 0000000000000000 from 100:100 to 400:401 code 3 flags 10 pri 0:120 r1 node 5 size 100:0 data 0000\n"
+    "  thread 150: l 00 need_return 0 tr 0\n"
+    "proc 400\n"
+    "  thread 401: l 00 need_return 0 tr 0\n"
+    "    incoming transaction 9001: 0000000000000000 from 100:100 to 400:401 code 3 flags 10 pri 0:120 r1 node 5 size 100:0 data 0000\n"
+    "    outgoing transaction 9002: 0000000000000000 from 400:401 to 500:0 code 7 flags 10 pri 0:120 r1 node 6 size 80:0 data 0000\n"
+    "proc 500\n"
+    "  pending transaction 9002: 0000000000000000 from 400:401 to 500:0 code 7 flags 10 pri 0:120 r1 node 6 size 80:0 data 0000\n"
+)
+
+
+def test_sf_binder_wait():
+    ph = Phone()
+    p = Probe(ph)
+    try:
+        c = p.client()
+        wait_for(lambda: len(c.of("T")) >= 3, 5)
+        r = ph.root
+        write(f"{r}/binder", BINDER_FAKE)
+        write(f"{r}/proc/400/comm", "app_process\n")
+        write(f"{r}/proc/400/task/401/stat", "401 (binder:400_1) S 1 400 400 0 -1 0 0 0 0 0 0 0 0 0 20 0 3 0 1 0 0\n")
+        write(f"{r}/proc/400/task/401/wchan", "futex_wait_queue_me\n")
+        write(f"{r}/proc/400/task/401/stack", "[<0>] __switch_to+0x1c/0x28\n[<0>] futex_wait_queue_me+0xc4/0x120\n[<0>] do_futex+0x1b0/0x2a0\n")
+        write(f"{r}/proc/500/comm", "media.hwcodec\n")
+        ph.sf_binder_wait()
+        check(wait_for(lambda: c.has("S", "surfaceflinger aspetta da"), 9), "surfaceflinger in attesa binder senza lavorare per 2 s: stallo segnalato")
+        check(wait_for(lambda: c.has("D", "proc sf-main 100/100(surfaceflinger) S wchan=binder_thread_read"), 4), "il thread principale di surfaceflinger compare nell'istantanea")
+        check(wait_for(lambda: c.has("D", "binder catena 1: 100:100 -> 400:401 (app_process)"), 4), "la catena binder indica il processo che non risponde (400:401)")
+        check(c.has("D", "binder catena 2: 400:401 -> 500:0 (media.hwcodec) · nessun thread libero"), "e il passo dopo: richiesta in coda in un processo senza thread liberi")
+        check(c.has("D", "proc peer 400/401(binder:400_1) S wchan=futex_wait_queue_me stack=futex_wait_queue_me<do_futex"), "con thread e stack del processo che non risponde")
+        check(c.has("D", "binder outgoing transaction 9001"), "le transazioni in uscita sono nel registro")
+        check(os.path.exists(f"{r}/state/binder-last.txt") and "from 100:100 to 400:401" in open(f"{r}/state/binder-last.txt").read(), "copia intera dell'elenco binder su disco")
+        ph.sf_idle()
+        check(wait_for(lambda: c.has("S", "fine dopo"), 6), "quando surfaceflinger torna a lavorare lo stallo finisce")
+        c.close()
+    finally:
+        p.close()
+
+
+def test_sf_binder_busy_is_not_a_stall():
+    # A ogni fotogramma il thread principale aspetta qualche ms il composer: anche se il campione lo coglie in attesa binder,
+    # finché fa cambi di contesto non è un blocco.
+    ph = Phone()
+    p = Probe(ph)
+    try:
+        c = p.client()
+        wait_for(lambda: len(c.of("T")) >= 3, 5)
+        n = 105
+        end = time.monotonic() + 5.0
+        while time.monotonic() < end:
+            n += 7
+            ph.sf_binder_wait(n)
+            time.sleep(0.1)
+        check(not c.has("S", "surfaceflinger aspetta"), "attesa binder con cambi di contesto in corso: nessun falso allarme")
+        c.close()
+    finally:
+        p.close()
+
+
+def test_binder_list_unreadable():
+    ph = Phone()
+    p = Probe(ph)
+    try:
+        c = p.client()
+        wait_for(lambda: len(c.of("T")) >= 3, 5)
+        ph.add_dstate()
+        ph.set_blocked(5)  # nessun file binder: lo stallo lo dice invece di tacere
+        check(wait_for(lambda: c.has("D", "binder: elenco delle transazioni non leggibile"), 8), "senza il file binder lo dice nel registro")
         c.close()
     finally:
         p.close()

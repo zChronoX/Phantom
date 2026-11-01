@@ -71,6 +71,7 @@ struct CoreLoopbackScreen: View {
         }
         .navigationTitle("Core Rust sull'iPhone")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { CrashLog.mark("schermata Core Rust aperta") }
         .onDisappear { engine.stop() }
     }
 }
