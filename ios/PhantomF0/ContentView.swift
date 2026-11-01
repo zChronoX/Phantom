@@ -10,6 +10,7 @@ struct ContentView: View {
     @AppStorage("videoMode") private var videoMode = VideoMode.scrcpy.rawValue
     @State private var copied = false
     @State private var remoteMessage = ""
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack {
@@ -65,6 +66,8 @@ struct ContentView: View {
                     }
                 }
 
+                TelemetrySection(host: host)
+
                 Section("Video dal vivo") {
                     Picker("Sorgente", selection: $videoMode) {
                         Text("scrcpy (bassa latenza)").tag(VideoMode.scrcpy.rawValue)
@@ -96,6 +99,10 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Phantom F0")
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Il registro della scatola nera va su disco subito quando l'app lascia il primo piano.
+            if phase != .active { TelemetryRecorder.shared.flush() }
         }
     }
 }

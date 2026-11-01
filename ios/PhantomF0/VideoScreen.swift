@@ -58,6 +58,7 @@ struct VideoScreen: View {
     @StateObject private var model: VideoModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
+    @ObservedObject private var blackbox = TelemetryRecorder.shared
     @State private var showOverlay = true
     /// Impedisce una seconda connessione se SwiftUI chiama onAppear più di una volta.
     @State private var running = false
@@ -98,6 +99,9 @@ struct VideoScreen: View {
         guard !running else { return }
         running = true
         UIApplication.shared.isIdleTimerDisabled = true
+        // La scatola nera si accende con il video e NON si ferma quando si chiude la schermata: se il POCO si blocca,
+        // continua a registrare il silenzio e il ritorno.
+        blackbox.startIfNeeded(host: host)
         model.start(host: host)
     }
 
@@ -154,6 +158,9 @@ struct VideoScreen: View {
                     }
                 }
             }
+            Text(blackbox.badge)
+                .font(.caption2.monospacedDigit().weight(.semibold))
+                .foregroundStyle(blackbox.silentSeconds > 2 ? Color.red : Color.white.opacity(0.75))
             Text("Tocca lo schermo per mostrare o nascondere i dati. Se il POCO non risponde, chiudi questa schermata.")
                 .font(.caption2).foregroundStyle(.white.opacity(0.6))
         }
