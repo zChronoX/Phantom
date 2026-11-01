@@ -66,6 +66,22 @@ struct ContentView: View {
                     }
                 }
 
+                Section("Prove sull'iPhone (senza il POCO)") {
+                    NavigationLink {
+                        DecoderBenchScreen()
+                    } label: {
+                        Label("Decoder hardware (H.264 e HEVC)", systemImage: "speedometer")
+                    }
+                    NavigationLink {
+                        TouchBenchScreen()
+                    } label: {
+                        Label("Tocco e frequenza dello schermo", systemImage: "hand.tap")
+                    }
+                    Text("Misure dell'iPhone da solo, utili per decidere come mandare video e tocco: quanto costa decodificare e con quale precisione l'iPhone legge le dita.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 TelemetrySection(host: host)
 
                 Section("Video dal vivo") {

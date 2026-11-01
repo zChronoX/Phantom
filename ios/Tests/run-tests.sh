@@ -17,3 +17,10 @@ mkdir -p "$OUT/telemetry"
 cp TelemetryLinesTests.swift "$OUT/telemetry/main.swift"
 swiftc -O -o "$OUT/run-telemetry" ../PhantomF0/TelemetryLines.swift "$OUT/telemetry/main.swift"
 "$OUT/run-telemetry"
+
+echo
+echo "== banco di prova (statistiche)"
+mkdir -p "$OUT/bench"
+cp BenchStatsTests.swift "$OUT/bench/main.swift"
+swiftc -O -o "$OUT/run-bench" ../PhantomF0/BenchStats.swift "$OUT/bench/main.swift"
+"$OUT/run-bench"

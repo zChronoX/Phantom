@@ -9,7 +9,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.3.0"
+    MARKETING_VERSION: "0.4.0"
     CURRENT_PROJECT_VERSION: "1"
     ENABLE_USER_SCRIPT_SANDBOXING: YES
 targets:
@@ -29,6 +29,8 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         UIRequiresFullScreen: true
+        # Senza questa voce iOS limita a 60 Hz gli aggiornamenti dello schermo delle app: serve per i 120 fps di ProMotion.
+        CADisableMinimumFrameDurationOnPhone: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         # Senza questa voce iOS blocca le connessioni verso la rete di casa.
