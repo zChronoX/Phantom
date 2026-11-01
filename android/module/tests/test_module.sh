@@ -56,7 +56,8 @@ WD
 gzip -c "$T/wd.txt" > "$PHANTOM_DROPBOX/system_server_pre_watchdog@1793547660450.txt.gz"
 printf 'Build: test\n' > "$PHANTOM_DROPBOX/SYSTEM_BOOT@1793547572357.txt"
 printf 'pid: 1527, tid: 1527, name: surfaceflinger  >>> /system/bin/surfaceflinger <<<\nsignal 6 (SIGABRT), code -1 (SI_QUEUE), fault addr --------\nAbort message: prova\nbacktrace:\n      #00 pc 000000000009c6a8  libc.so (abort+168)\n' > "$PHANTOM_TOMBSTONES/tombstone_43"
-touch "$PHANTOM_ANR/anr_2026-11-01-16-41-00"
+cp "$T/wd.txt" "$PHANTOM_ANR/anr_2026-11-01-16-41-00"
+printf 'questo non è un gzip' > "$PHANTOM_DROPBOX/system_server_pre_watchdog@1793545722653.txt.gz"
 C="sh $PHANTOM_MODDIR/bin/phantomctl"
 args() { cat "$PHANTOM_DATA/probe.args"; }
 opts_of() { args | tr ' ' '\n' | grep -A1 -- '--scrcpy-opt' | grep -v -- '--scrcpy-opt\|^--$' ; }
@@ -70,6 +71,7 @@ $C scrcpy on 1 >/dev/null
 check "argomenti: porta e profilo" "args | grep -q -- '--scrcpy-port 47803 --scrcpy-jar .*scrcpy-server --scrcpy-version 5.0.1 --scrcpy-profile sw-low'"
 check "argomenti: cartella di stato" "args | grep -q -- \"--state-dir $PHANTOM_DATA\""
 check "argomenti: scatola nera sulla porta 47804" "args | grep -q -- '--telemetry-port 47804'"
+check "argomenti: arresto automatico in stallo" "args | grep -q -- '--tm-autostop'"
 check "encoder software" "opts_of | grep -qx 'video_encoder=c2.android.avc.encoder'"
 check "max_size 1280, 30 fps, 4 Mbps" "opts_of | grep -qx 'max_size=1280' && opts_of | grep -qx 'max_fps=30' && opts_of | grep -qx 'video_bit_rate=4000000'"
 check "parametri neutri e keyframe ogni 2 s" "opts_of | grep -qx 'video_codec_options=i-frame-interval=2,priority:int=1,latency:int=0'"
@@ -153,10 +155,15 @@ check "riporta il motivo del watchdog" "grep -q 'Subject: Blocked in monitor' $D
 check "riporta la pressione di memoria" "grep -q '^full avg10=0.10' $D"
 check "il filtro tiene il thread bloccato e chi aspetta" "grep -q 'waiting to lock' $D && grep -q '\"android.display\"' $D"
 check "il filtro tiene lo stack di surfaceflinger" "grep -q 'ioctl_kgsl_wait' $D"
-check "il filtro scarta i thread inattivi" "! sed -n '/thread bloccati/,/=== Tombstone/p' $D | grep -q 'binder:1234_3'"
-check "l'appendice contiene il dump intero" "grep -q '##### INIZIO dump 1' $D && grep -q '##### FINE dump 1' $D"
+check "il filtro scarta i thread inattivi" "! sed -n '/^\\[thread bloccati/,/^\\(--- \\|=== \\)/p' $D | grep -q 'binder:1234_3'"
+check "l'appendice contiene il dump intero" "grep -q '##### INIZIO dump [12]: system_server_pre_watchdog@1793547660450' $D && grep -q '##### FINE dump [12]' $D"
 check "il tombstone è riportato" "grep -q 'signal 6 (SIGABRT)' $D && grep -q 'Abort message: prova' $D"
 check "elenca gli ANR" "grep -q 'anr_2026-11-01-16-41-00' $D"
+check "i file ANR in chiaro vengono riassunti" "sed -n '/File ANR in chiaro/,/Dump del watchdog di system_server/p' $D | grep -q 'waiting to lock'"
+check "e riportati per intero in appendice" "grep -q '##### INIZIO ANR 1: anr_2026-11-01-16-41-00' $D && grep -q '##### FINE ANR 1' $D"
+check "un dump non decomprimibile lo dice" "grep -q 'NON decomprimibile su questo telefono' $D"
+check "e ne riporta la copia codificata" "grep -q '##### INIZIO copia codificata del dump' $D && grep -q '##### FINE copia codificata del dump' $D"
+check "la data del dump non decomprimibile è giusta (15:08:42 UTC)" "grep -q 'system_server_pre_watchdog@1793545722653.txt.gz · .* · 2026-11-01 15:08:42 UTC' $D"
 check "nessuna cartella di lavoro lasciata in giro" "[ ! -d $PHANTOM_DATA/deep-work ]"
 check "l'uscita a video mostra l'inizio e dice dove è il file" "echo \"\$out\" | grep -q 'phantom-f0-deep.txt\|deep.txt' && echo \"\$out\" | grep -q 'post-mortem approfondito'"
 PHANTOM_DROPBOX="$T/vuoto" PHANTOM_TOMBSTONES="$T/vuoto" PHANTOM_ANR="$T/vuoto" $C postmortem deep >/dev/null 2>&1
@@ -201,6 +208,49 @@ $C restart >/dev/null
 check "con TELEMETRY=0 la porta di telemetria non viene richiesta" "! args | grep -q -- '--telemetry-port'"
 check "live lo dice chiaramente" "$C live 1 2>&1 | grep -q 'telemetria è spenta'"
 sed -i '/^TELEMETRY=0$/d' "$PHANTOM_DATA/probe.conf"
+$C restart >/dev/null
+
+echo "leve di prova: refresh e display virtuali"
+cat > "$T/bin/settings" <<'SET'
+#!/bin/sh
+# finto `settings`: chiave=valore in un file
+DB="$PHANTOM_DATA/settings.db"; touch "$DB"
+case "$1" in
+    get) v=$(grep "^$3=" "$DB" | cut -d= -f2); echo "${v:-null}" ;;
+    put) grep -v "^$3=" "$DB" > "$DB.t"; echo "$3=$4" >> "$DB.t"; mv "$DB.t" "$DB" ;;
+    delete) grep -v "^$3=" "$DB" > "$DB.t"; mv "$DB.t" "$DB" ;;
+esac
+SET
+chmod +x "$T/bin/settings"
+cat > "$T/bin/getprop" <<'GP'
+#!/bin/sh
+case "$1" in debug.sf.enable_hwc_vds) echo 1 ;; ro.surface_flinger.force_hwc_copy_for_virtual_displays) echo true ;; *) echo ;; esac
+GP
+chmod +x "$T/bin/getprop"
+export PATH="$T/bin:$PATH"
+echo 'min_refresh_rate=0.0' > "$PHANTOM_DATA/settings.db"
+out=$($C hz 60 2>&1)
+check "hz 60 blocca minimo e massimo a 60" "grep -qx 'min_refresh_rate=60.0' $PHANTOM_DATA/settings.db && grep -qx 'peak_refresh_rate=60.0' $PHANTOM_DATA/settings.db"
+check "hz 60 lo dice e dice come tornare" "echo \"\$out\" | grep -q 'BLOCCATA a 60 Hz' && echo \"\$out\" | grep -q 'hz auto'"
+$C hz 120 >/dev/null
+check "hz 120 cambia il blocco" "grep -qx 'min_refresh_rate=120.0' $PHANTOM_DATA/settings.db"
+check "lo stato mostra il blocco" "$C status | grep -q 'refresh bloccato a 120 Hz'"
+$C hz auto >/dev/null
+check "hz auto ripristina il valore di prima (0.0)" "grep -qx 'min_refresh_rate=0.0' $PHANTOM_DATA/settings.db"
+check "hz auto elimina la chiave che prima non c'era" "! grep -q '^peak_refresh_rate=' $PHANTOM_DATA/settings.db"
+check "lo stato non mostra più il blocco" "$C status | grep -q 'refresh automatico'"
+$C hz 90 >/dev/null 2>&1; rc=$?
+check "hz rifiuta valori sconosciuti" "[ $rc -ne 0 ]"
+$C vds gpu >/dev/null
+check "vds gpu scrive system.prop con le due proprietà" "grep -qx 'debug.sf.enable_hwc_vds=0' $PHANTOM_MODDIR/system.prop && grep -qx 'ro.surface_flinger.force_hwc_copy_for_virtual_displays=false' $PHANTOM_MODDIR/system.prop"
+check "vds status lo mostra" "$C vds status | grep -q 'display virtuali in GPU' && $C vds status | grep -q 'debug.sf.enable_hwc_vds=1'"
+check "lo stato mostra display virtuali in GPU" "$C status | grep -q 'display virtuali in GPU'"
+$C vds default >/dev/null
+check "vds default toglie system.prop" "[ ! -f $PHANTOM_MODDIR/system.prop ]"
+echo 'AUTOSTOP=0' >> "$PHANTOM_DATA/probe.conf"
+$C restart >/dev/null
+check "con AUTOSTOP=0 l'arresto automatico non viene richiesto" "! args | grep -q -- '--tm-autostop' && args | grep -q -- '--telemetry-port 47804'"
+sed -i '/^AUTOSTOP=0$/d' "$PHANTOM_DATA/probe.conf"
 $C restart >/dev/null
 
 echo "aiuto"

@@ -42,7 +42,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define PROBE_VERSION "0.5.0"
+#define PROBE_VERSION "0.5.1"
 #define UDP_MAGIC "PHP1"
 #define UDP_HDR 32          /* magic(4) seq(4) client_ns(8) server_mono_ns(8) server_suspend_ms(8) */
 #define WAKE_GAP_NS (30ull * 1000000000ull)
@@ -1098,6 +1098,7 @@ static void usage(void) {
             "  --tm-hz N          campioni al secondo con client o sessione attivi (default 4)\n"
             "  --tm-idle-ms N     intervallo a riposo (default 5000)\n"
             "  --no-sysrq         non chiedere al kernel gli stack dei task bloccati\n"
+            "  --tm-autostop      se la sessione video è in corso e lo stallo dura 3 s, ferma la cattura\n"
             "  --no-blackbox-disk non scrivere blackbox.txt nella cartella di stato\n"
             "  --proc-root P / --sys-root P / --kmsg P / --sysrq-file P / --sysrq-mask P   percorsi alternativi (per i test)\n"
             "  --allow-any        accetta anche indirizzi pubblici (sconsigliato)\n"
@@ -1145,6 +1146,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--tm-hz")) { NEEDV(); g_tm_hz = atoi(v) > 0 ? atoi(v) : 4; }
         else if (!strcmp(a, "--tm-idle-ms")) { NEEDV(); g_tm_idle_ms = atoi(v) > 0 ? atoi(v) : 5000; }
         else if (!strcmp(a, "--no-sysrq")) g_tm_sysrq = 0;
+        else if (!strcmp(a, "--tm-autostop")) g_tm_autostop = 1;
         else if (!strcmp(a, "--no-blackbox-disk")) g_tm_disk = 0;
         else if (!strcmp(a, "--proc-root")) { NEEDV(); g_proc = v; }
         else if (!strcmp(a, "--sys-root")) { NEEDV(); g_sys = v; }

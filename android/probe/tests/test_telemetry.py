@@ -166,6 +166,22 @@ class Probe:
         except OSError:
             return ""
 
+    def read_fake_server_alive(self):
+        try:
+            with open(f"{self.phone.root}/fake.pid") as f:
+                pid = int(f.read().strip())
+        except (OSError, ValueError):
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        try:  # uno zombie non è vivo
+            with open(f"/proc/{pid}/stat") as f:
+                return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+        except OSError:
+            return False
+
     def blackbox(self):
         try:
             with open(f"{self.phone.root}/state/blackbox.txt") as f:
@@ -260,7 +276,7 @@ def test_stream():
         n0 = len(c.of("T"))
         time.sleep(2.0)
         rate = (len(c.of("T")) - n0) / (time.monotonic() - t0)
-        check(c.lines and c.lines[0].startswith("H telemetria 1 sonda=0.5.0"), "intestazione H con versione del protocollo e della sonda")
+        check(c.lines and c.lines[0].startswith("H telemetria 1 sonda=0.5.1"), "intestazione H con versione del protocollo e della sonda")
         check(7 <= rate <= 13, f"circa 10 campioni al secondo con un client collegato ({rate:.1f}/s)")
         check(len(c.of("B")) >= 2, "battiti B ogni secondo")
         t = c.of("T")[-1]
@@ -287,11 +303,27 @@ def test_kmsg():
         c = p.client()
         wait_for(lambda: len(c.of("T")) >= 3, 5)
         ph.kmsg("6,700,5123456,-;kgsl kgsl-3d0: gpu fault detected, ctx 12\n")
-        ph.kmsg("6,701,5123999,-;wlan: connected to 3c:22:fb:aa:bb:cc on channel 36\n")
+        ph.kmsg("6,701,5123999,-;bluetooth: connected to 3c:22:fb:aa:bb:cc on channel 36\n")
         ph.kmsg("6,702,5124000,-;wlan: SSID CasaMia associated\n")
         ph.kmsg("6,703,5124001,-;audit: type=1400 avc: denied { read } for comm=x\n")
         ph.kmsg("6,704,5124002,-;f2fs: checkpoint took long\n SUBSYSTEM=block\n")
+        ph.kmsg("6,705,5124003,-;[ FTS ]  fts_enter_pointer_event_handler :  Event 0x13 - Press ID[0] type = 1\n")
+        ph.kmsg("6,706,5124004,-;KernelSU: allow root for: 10326\n")
+        ph.kmsg("6,707,5124005,-;servicemanager: Caller(pid=1) Could not find android.hardware.graphics.allocator.IAllocator/default in the VINTF manifest.\n")
+        ph.kmsg("6,708,5124006,-;[mi_disp:_sde_kms_drm_check_dpms [msm_drm]][2026-11-01 18:23:18.669333] [I]conn32 early_trigger:1 (power mode 2->4, fps 120->60) - 0.78(ms)\n")
+        ph.kmsg("6,709,5124007,-;[mi_disp:_sde_kms_drm_check_dpms [msm_drm]][2026-11-01 18:23:18.669400] [I]conn32 early_trigger:0 (power mode 2->4, fps 120->60) - 0.19(ms)\n")
+        ph.kmsg("6,710,5124008,-;wlan: [656:I:PMO] pmo_core_enable_wow_in_fw: drv wow is enabled\n")
+        ph.kmsg("3,711,5124009,-;wlan: command timeout waiting for firmware\n")
+        ph.kmsg("3,712,5124010,-;kgsl kgsl-3d0: |a6xx_gmu_wait_for_idle| GMU idle timeout\n")
+        wait_for(lambda: c.has("K", "#712"), 5)
         wait_for(lambda: c.has("K", "checkpoint took long"), 5)
+        check(not any("fts_enter_pointer" in l or "[ FTS ]" in l for l in c.lines), "il rumore del tocco dello schermo viene scartato")
+        check(not any("KernelSU: allow root" in l for l in c.lines), "il rumore di KernelSU viene scartato")
+        check(not any("VINTF" in l for l in c.lines), "il rumore di servicemanager viene scartato")
+        check(c.has("K", "#708") and "fps 120->60" in "".join(c.of("K")), "il cambio di frequenza del display (fps 120->60) si tiene")
+        check(not c.has("K", "#709"), "ma non la sua copia «early_trigger:0»")
+        check(not c.has("K", "#710"), "il rumore Wi-Fi ordinario viene scartato")
+        check(c.has("K", "#711") and c.has("K", "#712"), "i timeout (anche del Wi-Fi) e gli errori della GPU si tengono sempre")
         check(c.has("K", "#700 <6> kgsl kgsl-3d0: gpu fault detected"), "messaggio del kernel inoltrato con numero e priorità")
         check(c.has("K", "k=5.123"), "porta il tempo del kernel")
         check(c.has("K", "connected to xx:xx:xx:xx:xx:xx on channel 36"), "indirizzo MAC mascherato")
@@ -493,9 +525,99 @@ def test_session_info():
         check(len(c.of("T")) - n1 >= 7, "frequenza piena durante la sessione")
         check(wait_for(lambda: "scatola nera aperta" in p.blackbox(), 4), "durante la sessione il registro su disco si apre da solo")
         check(wait_for(lambda: " T " in "\n" + p.blackbox() or "\nT " in p.blackbox(), 4), "e vi finiscono i campioni")
+        check(c.has("E", "sessione video avviata: ponte pid"), "l'inizio della sessione è segnato nel flusso (riga E)")
         stop[0] = True
         s.close()
         check(wait_for(lambda: all("R -" in l for l in c.of("T")[-2:]), 6), "a sessione chiusa il campione torna a «R -»")
+        check(wait_for(lambda: c.has("E", "sessione video terminata"), 4), "e anche la fine")
+        c.close()
+    finally:
+        p.close()
+
+
+def test_no_false_stall_on_connect():
+    ph = Phone()
+    p = Probe(ph, extra=["--tm-idle-ms", "3000"])  # a riposo si campiona ogni 3 s: al collegamento l'ultimo campione è «vecchio» ma non incastrato
+    try:
+        time.sleep(2.4)
+        c = p.client()
+        time.sleep(3.0)
+        check(len(c.of("T")) >= 10, "il flusso parte")
+        check(not c.of("S"), "nessun falso stallo al passaggio da riposo ad attivo")
+        c.close()
+    finally:
+        p.close()
+
+
+def test_autostop():
+    ph = Phone()
+    p = Probe(ph, scrcpy=True, fake_env={"FAKE_FRAMES": "-1", "FAKE_FPS": "60", "FAKE_FRAME_BYTES": "2000"}, extra=["--tm-autostop"])
+    try:
+        c = p.client()
+        wait_for(lambda: len(c.of("T")) >= 3, 5)
+        s = socket.create_connection(("127.0.0.1", p.port + 3))
+        s.settimeout(0.5)
+        state = {"eof": False, "stop": False}
+
+        def drain():
+            while not state["stop"]:
+                try:
+                    if not s.recv(65536):
+                        state["eof"] = True
+                        return
+                except socket.timeout:
+                    pass
+                except OSError:
+                    state["eof"] = True
+                    return
+
+        threading.Thread(target=drain, daemon=True).start()
+        check(wait_for(lambda: c.has("E", "sessione video avviata"), 6), "sessione avviata")
+        time.sleep(1.0)
+        check(not state["eof"], "la sessione scorre")
+        ph.add_dstate()
+        ph.set_blocked(5)  # stallo che dura
+        check(wait_for(lambda: c.has("S", "arresto automatico dopo"), 8), "dopo 3 s di stallo la scatola nera ferma la sessione (S arresto automatico)")
+        check(wait_for(lambda: state["eof"], 6), "e il flusso verso l'iPhone si chiude")
+        check(wait_for(lambda: c.has("E", "sessione video terminata"), 6), "la sessione risulta terminata")
+        check(wait_for(lambda: not p.read_fake_server_alive(), 6), "il server di cattura è fermato")
+        state["stop"] = True
+        s.close()
+        c.close()
+    finally:
+        p.close()
+
+
+def test_no_autostop_without_option():
+    ph = Phone()
+    p = Probe(ph, scrcpy=True, fake_env={"FAKE_FRAMES": "-1", "FAKE_FPS": "60", "FAKE_FRAME_BYTES": "2000"})
+    try:
+        c = p.client()
+        wait_for(lambda: len(c.of("T")) >= 3, 5)
+        s = socket.create_connection(("127.0.0.1", p.port + 3))
+        s.settimeout(0.5)
+        state = {"eof": False, "stop": False}
+
+        def drain():
+            while not state["stop"]:
+                try:
+                    if not s.recv(65536):
+                        state["eof"] = True
+                        return
+                except socket.timeout:
+                    pass
+                except OSError:
+                    state["eof"] = True
+                    return
+
+        threading.Thread(target=drain, daemon=True).start()
+        wait_for(lambda: c.has("E", "sessione video avviata"), 6)
+        ph.add_dstate()
+        ph.set_blocked(5)
+        check(wait_for(lambda: c.has("S", "continua da 4"), 8), "lo stallo dura più di 4 s")
+        check(not c.has("S", "arresto automatico") and not state["eof"], "senza --tm-autostop la sessione non viene toccata")
+        state["stop"] = True
+        s.close()
         c.close()
     finally:
         p.close()

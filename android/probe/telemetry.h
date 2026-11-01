@@ -40,6 +40,7 @@ static int g_tm_hz = 4;                         /* campioni al secondo con sessi
 static int g_tm_idle_ms = 5000;                 /* intervallo a riposo (praticamente gratis) */
 static int g_tm_sysrq = 1;                      /* in caso di stallo chiede gli stack al kernel (sysrq w, l) */
 static int g_tm_disk = 1;                       /* registro su disco con O_SYNC durante sessioni e stalli */
+static int g_tm_autostop = 0;                   /* se la sessione video è in corso e lo stallo dura 3 s, la ferma (tenta di liberare il telefono) */
 static const char *g_proc = "/proc";
 static const char *g_sys = "/sys";
 static const char *g_kmsg_path = "/dev/kmsg";
@@ -352,6 +353,32 @@ static int tm_mask_kmsg(char *m) {
     return 1;
 }
 
+/* I messaggi del kernel sono molti (tocco dello schermo, KernelSU, Wi-Fi…): si scartano i rumori noti, ma qualsiasi
+ * riga che parli di timeout, errori di GPU/disco/memoria o blocchi si tiene sempre. */
+/* strstr che non accetta il pezzo in mezzo a una parola: «fault» non deve scattare su «default». */
+static int tm_has_word(const char *hay, const char *needle) {
+    size_t n = strlen(needle);
+    for (const char *p = strstr(hay, needle); p; p = strstr(p + 1, needle)) {
+        char before = p == hay ? ' ' : p[-1];
+        (void)n;
+        if (!((before >= 'a' && before <= 'z') || (before >= 'A' && before <= 'Z') || (before >= '0' && before <= '9'))) return 1;
+    }
+    return 0;
+}
+
+static int tm_kmsg_wanted(const char *m) {
+    static const char *const always[] = {"timeout", "timed out", "fault", "hung", "blocked for", "lockup", "oom_", "oom-kill", "Out of memory",
+                                         "panic", "BUG", "Call trace", "kgsl", "adreno", "smmu", "underrun", "ufshcd", "f2fs", "Killed process",
+                                         "lowmemorykiller", "SysRq", "Show Blocked", NULL};
+    static const char *const noise[] = {"fts_enter_pointer_event_handler", "fts_leave_pointer_event_handler", "[ FTS ]", "KernelSU:", "KPM:",
+                                        "VINTF", "Untracked pid", "irq_count)", "BATTERY_CHG", "rmt_storage", "early_trigger:0",
+                                        "mi_dsi_panel_update_cmd_set", "dsi_panel_switch", "wlan:", "pmo_core", "undelivered transaction",
+                                        "Synchronizing SCSI cache", "avc:", "audit", NULL};
+    for (int i = 0; always[i]; i++) if (tm_has_word(m, always[i])) return 1;
+    for (int i = 0; noise[i]; i++) if (strstr(m, noise[i])) return 0;
+    return 1;
+}
+
 static void tm_kmsg_drain(void) {
     if (g_kmsg_fd < 0) return;
     static char b[9000]; /* /dev/kmsg rifiuta (EINVAL) un buffer più piccolo del record */
@@ -374,9 +401,9 @@ static void tm_kmsg_drain(void) {
             int pri = 0;
             if (sscanf(line, "%d,%llu,%llu,", &pri, &seq, &ts) < 3) continue;
             const char *msg = semi + 1;
-            if (strstr(msg, "avc:") || strncmp(msg, "audit", 5) == 0) continue; /* rumore: nega mille permessi al secondo */
             char m[400];
             snprintf(m, sizeof m, "%s", msg);
+            if (!tm_kmsg_wanted(m)) continue;
             if (!tm_mask_kmsg(m)) continue;
             tm_emit('K', "k=%llu.%03llu #%llu <%d> %s", ts / 1000000ull, (ts / 1000ull) % 1000ull, seq, pri & 7, m);
         }
@@ -805,8 +832,8 @@ static void tm_main(pid_t parent) {
     tm_start_thread(tm_task_thread);
     if (g_tm_disk) tm_start_thread(tm_disk_thread);
 
-    int stalled = 0, cnt_blk3 = 0, cnt_blk1 = 0, cnt_dmain = 0;
-    uint64_t stall_start = 0, last_snap = 0, last_sysrq = 0, last_end = 0;
+    int stalled = 0, cnt_blk3 = 0, cnt_blk1 = 0, cnt_dmain = 0, cnt_io = 0, cnt_mem = 0, ever_stalled = 0, last_iv = 0, was_session = 0, autostop_done = 0;
+    uint64_t stall_start = 0, last_snap = 0, last_sysrq = 0, last_end = 0, iv_changed = 0, autostop_at = 0;
     char reason[96] = "";
     for (;;) {
         uint64_t now = now_ms();
@@ -814,7 +841,15 @@ static void tm_main(pid_t parent) {
         int active = tm_active(now);
         int iv = active ? 1000 / (g_tm_hz > 0 ? g_tm_hz : 4) : g_tm_idle_ms;
         g_tm_interval = iv;
-        g_disk_want = g_tm_disk && (g_tm->relay_pid != 0 || stalled || since(now, last_end) < 10000);
+        if (iv != last_iv) { last_iv = iv; iv_changed = now; } /* al cambio di ritmo i campionatori hanno bisogno di un attimo per adeguarsi */
+        g_disk_want = g_tm_disk && (g_tm->relay_pid != 0 || stalled || (ever_stalled && since(now, last_end) < 10000));
+
+        /* inizio e fine di una sessione video, per allineare la linea del tempo */
+        {
+            int rp = g_tm->relay_pid;
+            if (rp && !was_session) { was_session = 1; autostop_done = 0; tm_emit('E', "sessione video avviata: ponte pid %d, server pid %d", rp, (int)g_tm->server_pid); }
+            else if (!rp && was_session) { was_session = 0; tm_emit('E', "sessione video terminata"); }
+        }
 
         char core[700], hw[700], task[700], rl[200], line[TM_TXT];
         uint64_t tc = part_get(&g_core, core, sizeof core), th = part_get(&g_hw, hw, sizeof hw), tt = part_get(&g_task, task, sizeof task);
@@ -830,7 +865,7 @@ static void tm_main(pid_t parent) {
         for (int i = 0; i < 3; i++) {
             uint64_t age = ps[i].t ? since(now, ps[i].t) : 0;
             ao += (size_t)snprintf(agebuf + ao, sizeof agebuf - ao, "%s%s%llu", i ? " " : "", ps[i].n, (unsigned long long)age);
-            if (ps[i].t && age > (i == 0 ? lim_core : lim_slow) && !stuck_name) { stuck_name = ps[i].n; stuck_stage = *ps[i].st; stuck_age = age; }
+            if (ps[i].t && age > (i == 0 ? lim_core : lim_slow) && !stuck_name && since(now, iv_changed) > 1500) { stuck_name = ps[i].n; stuck_stage = *ps[i].st; stuck_age = age; }
         }
         if (stuck_name) {
             char *which = strcmp(stuck_name, "core") == 0 ? core : strcmp(stuck_name, "hw") == 0 ? hw : task;
@@ -851,11 +886,13 @@ static void tm_main(pid_t parent) {
         cnt_blk3 = blk >= 2 ? cnt_blk3 + 1 : 0;
         cnt_blk1 = blk >= 1 ? cnt_blk1 + 1 : 0;
         cnt_dmain = g_n_dmain > 0 ? cnt_dmain + 1 : 0;
+        cnt_io = g_n_io_full >= 40 ? cnt_io + 1 : 0;
+        cnt_mem = g_n_mem_full >= 40 ? cnt_mem + 1 : 0;
         const char *why = NULL;
         char why_buf[96];
         if (stuck_name) { snprintf(why_buf, sizeof why_buf, "campionatore %s fermo in %s", stuck_name, stuck_stage); why = why_buf; }
-        else if (g_n_io_full >= 40) { snprintf(why_buf, sizeof why_buf, "pressione I/O piena %.0f%%", g_n_io_full); why = why_buf; }
-        else if (g_n_mem_full >= 40) { snprintf(why_buf, sizeof why_buf, "pressione memoria piena %.0f%%", g_n_mem_full); why = why_buf; }
+        else if (cnt_io >= 3) { snprintf(why_buf, sizeof why_buf, "pressione I/O piena %.0f%%", g_n_io_full); why = why_buf; }
+        else if (cnt_mem >= 3) { snprintf(why_buf, sizeof why_buf, "pressione memoria piena %.0f%%", g_n_mem_full); why = why_buf; }
         else if (g_tm->relay_pid && since(now, g_tm->relay_loop_ms) > 2500 && since(now, g_tm->session_start_ms) > 4000) {
             snprintf(why_buf, sizeof why_buf, "il ponte video non gira da %llu ms", (unsigned long long)since(now, g_tm->relay_loop_ms));
             why = why_buf;
@@ -865,7 +902,7 @@ static void tm_main(pid_t parent) {
         else if (cnt_blk1 >= 12) { why = "task bloccato nel kernel da oltre 3 secondi"; }
 
         if (why && !stalled) {
-            stalled = 1; stall_start = now; last_snap = now; last_sysrq = now;
+            stalled = 1; ever_stalled = 1; stall_start = now; last_snap = now; last_sysrq = now;
             snprintf(reason, sizeof reason, "%s", why);
             g_disk_want = g_tm_disk;
             tm_emit('S', "inizio: %s", why);
@@ -882,6 +919,22 @@ static void tm_main(pid_t parent) {
             stalled = 0;
             last_end = now;
             tm_emit('S', "fine dopo %llu ms (motivo iniziale: %s)", (unsigned long long)since(now, stall_start), reason);
+        }
+
+        /* Arresto automatico: se durante una sessione video il telefono resta in stallo per 3 s, si tenta di liberarlo
+         * fermando la cattura (SIGTERM al ponte, che ferma il server; dopo 1,5 s SIGKILL a entrambi). Prima si è già
+         * scritta l'istantanea dei task bloccati: la prova non si perde. */
+        if (g_tm_autostop && stalled && g_tm->relay_pid && !autostop_done && since(now, stall_start) >= 3000) {
+            autostop_done = 1;
+            autostop_at = now;
+            tm_emit('S', "arresto automatico dopo %llu ms di stallo: fermo la sessione video (ponte %d, server %d)", (unsigned long long)since(now, stall_start),
+                    (int)g_tm->relay_pid, (int)g_tm->server_pid);
+            kill((pid_t)g_tm->relay_pid, SIGTERM);
+        }
+        if (autostop_at && since(now, autostop_at) >= 1500) {
+            autostop_at = 0;
+            if (g_tm->server_pid) { tm_emit('S', "arresto automatico: SIGKILL al server %d", (int)g_tm->server_pid); kill((pid_t)g_tm->server_pid, SIGKILL); }
+            if (g_tm->relay_pid) { tm_emit('S', "arresto automatico: SIGKILL al ponte %d", (int)g_tm->relay_pid); kill((pid_t)g_tm->relay_pid, SIGKILL); }
         }
 
         tm_emit('T', "%s", line);

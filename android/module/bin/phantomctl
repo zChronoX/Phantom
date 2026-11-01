@@ -4,6 +4,8 @@
 #   phantomctl status | start | stop | restart
 #   phantomctl scrcpy on [profilo] [h264|h265] | off | profiles | status
 #   phantomctl stopsessions        ferma subito la sessione video scrcpy in corso
+#   phantomctl hz 60|120|auto|status   blocca la frequenza dello schermo (il cambio 120↔60 Hz è un sospettato del blocco) o la ripristina
+#   phantomctl vds gpu|default|status  display virtuali composti dalla GPU invece che dal display hardware (si applica al riavvio)
 #   phantomctl live [secondi]      mostra qualche secondo della scatola nera in tempo reale (stato del telefono, nessun video)
 #   phantomctl blackbox [righe]    ultime righe del registro su disco della scatola nera (e lo copia in Download)
 #   phantomctl captest [sec] [profilo] | status   cattura locale senza iPhone né Wi-Fi: il telefono cattura se stesso e butta il video
@@ -24,11 +26,12 @@ LOG=$DATA/probe.log
 CONF=$DATA/probe.conf
 
 mkdir -p "$DATA"
-[ -f "$CONF" ] || printf 'AUTOSTART=1\nVIDEO=0\nBITRATE=12000000\nSIZE=\nWIFI_LL=0\nSCRCPY=0\nSCRCPY_PROFILE=sw-low\nSCRCPY_CODEC=h264\nSCRCPY_OPTS=\nTELEMETRY=1\n' > "$CONF"
+[ -f "$CONF" ] || printf 'AUTOSTART=1\nVIDEO=0\nBITRATE=12000000\nSIZE=\nWIFI_LL=0\nSCRCPY=0\nSCRCPY_PROFILE=sw-low\nSCRCPY_CODEC=h264\nSCRCPY_OPTS=\nTELEMETRY=1\nAUTOSTOP=1\n' > "$CONF"
 . "$CONF"
 : "${SCRCPY_PROFILE:=sw-low}"
 : "${SCRCPY_CODEC:=h264}"
 : "${TELEMETRY:=1}"   # scatola nera: stato del telefono in tempo reale sulla porta 47804
+: "${AUTOSTOP:=1}"    # se durante una sessione video il telefono entra in stallo per 3 s, la scatola nera ferma la cattura
 
 running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
 
@@ -97,6 +100,7 @@ start() {
     [ "$VIDEO" = 1 ] && set -- "$@" --video
     [ -n "$SIZE" ] && set -- "$@" --size "$SIZE"
     [ "$TELEMETRY" = 1 ] && set -- "$@" --telemetry-port 47804
+    [ "$TELEMETRY" = 1 ] && [ "$AUTOSTOP" = 1 ] && set -- "$@" --tm-autostop
     if [ "${SCRCPY:-0}" = 1 ]; then
         if [ -f "$SJ" ] && [ -f "$SJ.version" ] && profile_load "$SCRCPY_PROFILE"; then
             set -- "$@" --scrcpy-port 47803 --scrcpy-jar "$SJ" --scrcpy-version "$(cat "$SJ.version")" --scrcpy-profile "$P_NAME"
@@ -133,6 +137,11 @@ find_nc() {
     return 1
 }
 
+# Le impostazioni di sistema passano da una pipe: i servizi non possono scrivere su file in /data/adb.
+hz_restore() {
+    if [ -z "$2" ] || [ "$2" = null ]; then settings delete system "$1" 2>&1 | cat; else settings put system "$1" "$2" 2>&1 | cat; fi
+}
+
 wifi_ip() { ip -4 -o addr show wlan0 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }'; }
 
 crash_warning() {
@@ -147,7 +156,8 @@ status() {
     if running; then echo "Sonda: ATTIVA (PID $(cat "$PIDF"))"; else echo "Sonda: ferma"; fi
     echo "Video di base: $([ "$VIDEO" = 1 ] && echo acceso || echo spento) · avvio automatico: $([ "$AUTOSTART" = 1 ] && echo sì || echo no)"
     echo "Wi-Fi bassa latenza: $([ "${WIFI_LL:-0}" = 1 ] && echo attiva || echo spenta)"
-    echo "Scatola nera (telemetria): $([ "$TELEMETRY" = 1 ] && echo "attiva · porta 47804" || echo spenta)"
+    echo "Scatola nera (telemetria): $([ "$TELEMETRY" = 1 ] && echo "attiva · porta 47804" || echo spenta) · arresto automatico in stallo: $([ "$AUTOSTOP" = 1 ] && echo sì || echo no)"
+    echo "Leve di prova: refresh $([ "${HZ_LOCK:-0}" != 0 ] && echo "bloccato a ${HZ_LOCK} Hz" || echo automatico) · display virtuali $([ -f "$MODDIR/system.prop" ] && echo "in GPU (dal riavvio)" || echo predefiniti)"
     if [ -f "$SJ.version" ]; then
         if [ "${SCRCPY:-0}" = 1 ]; then
             profile_load "$SCRCPY_PROFILE" && echo "scrcpy: ACCESO · profilo $P_NAME ($P_DESC) · $SCRCPY_CODEC · porta 47803 · server v$(cat "$SJ.version")" \
@@ -274,6 +284,45 @@ case "$1" in
         else
             echo "La sonda è ferma"
         fi ;;
+    hz)
+        case "$2" in
+            60 | 120)
+                if [ "${HZ_LOCK:-0}" = 0 ]; then # si ricordano i valori di prima, per ripristinarli
+                    setconf HZ_PREV_MIN "$(settings get system min_refresh_rate 2>/dev/null)"
+                    setconf HZ_PREV_PEAK "$(settings get system peak_refresh_rate 2>/dev/null)"
+                fi
+                settings put system min_refresh_rate "$2.0" 2>&1 | cat
+                settings put system peak_refresh_rate "$2.0" 2>&1 | cat
+                setconf HZ_LOCK "$2"
+                echo "Frequenza dello schermo BLOCCATA a $2 Hz (minima e massima). Per tornare normale: phantomctl hz auto" ;;
+            auto)
+                if [ "${HZ_LOCK:-0}" != 0 ]; then
+                    hz_restore min_refresh_rate "${HZ_PREV_MIN:-}"
+                    hz_restore peak_refresh_rate "${HZ_PREV_PEAK:-}"
+                fi
+                setconf HZ_LOCK 0
+                echo "Frequenza dello schermo di nuovo automatica." ;;
+            status | "")
+                echo "Frequenza bloccata da Phantom: $([ "${HZ_LOCK:-0}" != 0 ] && echo "sì, a ${HZ_LOCK} Hz" || echo no)"
+                echo "min_refresh_rate=$(settings get system min_refresh_rate 2>/dev/null) peak_refresh_rate=$(settings get system peak_refresh_rate 2>/dev/null)" ;;
+            *) echo "uso: phantomctl hz 60|120|auto|status"; exit 2 ;;
+        esac ;;
+    vds)
+        PROP=$MODDIR/system.prop
+        case "$2" in
+            gpu)
+                # Il modulo applica system.prop all'avvio, prima di SurfaceFlinger. Le due proprietà tolgono ai display virtuali
+                # (quello della cattura) la strada del display hardware (scrittura concorrente, «CWB») e li fanno comporre dalla GPU.
+                printf '# Phantom F0 · prova: display virtuali composti dalla GPU invece che dal display hardware\ndebug.sf.enable_hwc_vds=0\nro.surface_flinger.force_hwc_copy_for_virtual_displays=false\n' > "$PROP"
+                echo "Display virtuali in GPU: attivo dal PROSSIMO RIAVVIO. Riavvia il telefono, poi prova la cattura." ;;
+            default)
+                rm -f "$PROP"
+                echo "Display virtuali come da fabbrica: attivo dal PROSSIMO RIAVVIO." ;;
+            status | "")
+                echo "Impostato da Phantom: $([ -f "$PROP" ] && echo "display virtuali in GPU (dal riavvio)" || echo "predefinito")"
+                echo "In uso adesso: debug.sf.enable_hwc_vds=$(getprop debug.sf.enable_hwc_vds) force_hwc_copy_for_virtual_displays=$(getprop ro.surface_flinger.force_hwc_copy_for_virtual_displays)" ;;
+            *) echo "uso: phantomctl vds gpu|default|status"; exit 2 ;;
+        esac ;;
     live)
         # Qualche secondo di telemetria letta in locale: serve a vedere che la scatola nera funziona, senza avviare nessun video.
         if ! running; then echo "La sonda è ferma"; exit 1; fi
