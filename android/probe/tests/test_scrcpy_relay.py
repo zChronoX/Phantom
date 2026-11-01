@@ -129,8 +129,10 @@ class Probe:
             pass
         self.proc.wait()
         for pid in self.fake_pids():
-            if pid_alive(pid):
+            try:
                 os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # già terminato tra un controllo e l'altro
 
 
 class Stream:
