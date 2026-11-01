@@ -12,6 +12,10 @@ set_perm "$MODPATH/action.sh" 0 0 0755
 set_perm "$MODPATH/uninstall.sh" 0 0 0755
 
 mkdir -p /data/adb/phantom-f0
+# Un aggiornamento parte sempre con scrcpy spento e con il profilo più leggero: lo si accende a mano, un gradino alla volta.
+if [ -f /data/adb/phantom-f0/probe.conf ]; then
+    sed -i 's/^SCRCPY=1$/SCRCPY=0/; s/^SCRCPY_PROFILE=.*/SCRCPY_PROFILE=sw-low/' /data/adb/phantom-f0/probe.conf
+fi
 ui_print "- Phantom F0 installato."
 ui_print "- La sonda parte da sola al prossimo riavvio."
 ui_print "- Per avviarla subito: tocca \"Azione\" sul modulo."
