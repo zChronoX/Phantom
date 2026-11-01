@@ -1,0 +1,37 @@
+# Analisi: per ogni versione di scrcpy, quale API di cattura è la principale e quali parametri
+# dell'encoder imposta (priorità, latenza), più il formato dei pacchetti.
+name: Analisi scrcpy per versione
+
+on:
+  workflow_dispatch:
+
+jobs:
+  tags:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Tabella delle versioni
+        run: |
+          git clone --quiet --filter=blob:none --no-checkout https://github.com/Genymobile/scrcpy src
+          cd src
+          printf '%-9s %-10s %-9s %-8s %-8s %-8s %-9s\n' tag primaria PRIORITY LATENCY SESSION CONFIGBIT NOTE
+          for t in $(git tag | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' | sort -V | tail -50); do
+            files=$(git ls-tree -r --name-only "$t" server | grep -E '(ScreenCapture|ScreenEncoder|SurfaceEncoder|Streamer)\.java$' || true)
+            cap=$(echo "$files" | grep -E 'ScreenCapture\.java$|ScreenEncoder\.java$' | head -n 1)
+            enc=$(echo "$files" | grep -E 'SurfaceEncoder\.java$|ScreenEncoder\.java$' | head -n 1)
+            str=$(echo "$files" | grep -E 'Streamer\.java$' | head -n 1)
+            capsrc=$([ -n "$cap" ] && git show "$t:$cap" 2>/dev/null || true)
+            encsrc=$([ -n "$enc" ] && git show "$t:$enc" 2>/dev/null || true)
+            strsrc=$([ -n "$str" ] && git show "$t:$str" 2>/dev/null || true)
+            sc=$(echo "$capsrc" | grep -n 'using SurfaceControl API\|createDisplay()' | head -n 1 | cut -d: -f1)
+            dm=$(echo "$capsrc" | grep -n 'using DisplayManager API\|createVirtualDisplay(' | head -n 1 | cut -d: -f1)
+            if [ -z "$sc" ] && [ -z "$dm" ]; then prim="?"; elif [ -z "$dm" ]; then prim="SurfaceCtl"; elif [ -z "$sc" ]; then prim="DispMgr"; elif [ "$sc" -lt "$dm" ]; then prim="SurfaceCtl"; else prim="DispMgr"; fi
+            pr=$(echo "$encsrc" | grep -c 'KEY_PRIORITY' || true)
+            la=$(echo "$encsrc" | grep -c 'KEY_LATENCY' || true)
+            se=$(echo "$strsrc" | grep -c 'PACKET_FLAG_SESSION' || true)
+            cb=$(echo "$strsrc" | grep -o 'PACKET_FLAG_CONFIG = 1L << [0-9]*' | grep -o '[0-9]*$' | head -n 1)
+            printf '%-9s %-10s %-9s %-8s %-8s %-8s\n' "$t" "$prim" "$pr" "$la" "$se" "${cb:-?}"
+          done
+          echo "=== quando è cambiata la primaria (ScreenCapture) ==="
+          git log --format='%h %ad %s' --date=short -S'Display: using DisplayManager API' -- server | head -n 12
+          git log --format='%h %ad %s' --date=short -S'Display: using SurfaceControl API' -- server | head -n 12
