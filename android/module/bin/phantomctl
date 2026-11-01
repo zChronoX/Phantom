@@ -4,6 +4,9 @@
 #   phantomctl status | start | stop | restart
 #   phantomctl scrcpy on [profilo] [h264|h265] | off | profiles | status
 #   phantomctl stopsessions        ferma subito la sessione video scrcpy in corso
+#   phantomctl live [secondi]      mostra qualche secondo della scatola nera in tempo reale (stato del telefono, nessun video)
+#   phantomctl blackbox [righe]    ultime righe del registro su disco della scatola nera (e lo copia in Download)
+#   phantomctl captest [sec] [profilo] | status   cattura locale senza iPhone né Wi-Fi: il telefono cattura se stesso e butta il video
 #   phantomctl postmortem [deep]   rapporto su un blocco o un riavvio anomalo; «deep» legge anche i dump del watchdog e i tombstone
 #   phantomctl video on|off        flusso H.264 di base sulla porta 47802
 #   phantomctl autostart on|off    avvio della sonda all'accensione
@@ -21,10 +24,11 @@ LOG=$DATA/probe.log
 CONF=$DATA/probe.conf
 
 mkdir -p "$DATA"
-[ -f "$CONF" ] || printf 'AUTOSTART=1\nVIDEO=0\nBITRATE=12000000\nSIZE=\nWIFI_LL=0\nSCRCPY=0\nSCRCPY_PROFILE=sw-low\nSCRCPY_CODEC=h264\nSCRCPY_OPTS=\n' > "$CONF"
+[ -f "$CONF" ] || printf 'AUTOSTART=1\nVIDEO=0\nBITRATE=12000000\nSIZE=\nWIFI_LL=0\nSCRCPY=0\nSCRCPY_PROFILE=sw-low\nSCRCPY_CODEC=h264\nSCRCPY_OPTS=\nTELEMETRY=1\n' > "$CONF"
 . "$CONF"
 : "${SCRCPY_PROFILE:=sw-low}"
 : "${SCRCPY_CODEC:=h264}"
+: "${TELEMETRY:=1}"   # scatola nera: stato del telefono in tempo reale sulla porta 47804
 
 running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
 
@@ -92,6 +96,7 @@ start() {
     set -- --daemon --pidfile "$PIDF" --log "$LOG" --state-dir "$DATA" --bitrate "$BITRATE"
     [ "$VIDEO" = 1 ] && set -- "$@" --video
     [ -n "$SIZE" ] && set -- "$@" --size "$SIZE"
+    [ "$TELEMETRY" = 1 ] && set -- "$@" --telemetry-port 47804
     if [ "${SCRCPY:-0}" = 1 ]; then
         if [ -f "$SJ" ] && [ -f "$SJ.version" ] && profile_load "$SCRCPY_PROFILE"; then
             set -- "$@" --scrcpy-port 47803 --scrcpy-jar "$SJ" --scrcpy-version "$(cat "$SJ.version")" --scrcpy-profile "$P_NAME"
@@ -121,6 +126,13 @@ stop() {
     echo "Sonda fermata"
 }
 
+# nc di toybox (Android) oppure di busybox (SukiSU/KernelSU); stampa il comando da usare.
+find_nc() {
+    if command -v nc >/dev/null 2>&1; then echo nc; return 0; fi
+    if [ -x /data/adb/ksu/bin/busybox ]; then echo "/data/adb/ksu/bin/busybox nc"; return 0; fi
+    return 1
+}
+
 wifi_ip() { ip -4 -o addr show wlan0 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }'; }
 
 crash_warning() {
@@ -135,6 +147,7 @@ status() {
     if running; then echo "Sonda: ATTIVA (PID $(cat "$PIDF"))"; else echo "Sonda: ferma"; fi
     echo "Video di base: $([ "$VIDEO" = 1 ] && echo acceso || echo spento) · avvio automatico: $([ "$AUTOSTART" = 1 ] && echo sì || echo no)"
     echo "Wi-Fi bassa latenza: $([ "${WIFI_LL:-0}" = 1 ] && echo attiva || echo spenta)"
+    echo "Scatola nera (telemetria): $([ "$TELEMETRY" = 1 ] && echo "attiva · porta 47804" || echo spenta)"
     if [ -f "$SJ.version" ]; then
         if [ "${SCRCPY:-0}" = 1 ]; then
             profile_load "$SCRCPY_PROFILE" && echo "scrcpy: ACCESO · profilo $P_NAME ($P_DESC) · $SCRCPY_CODEC · porta 47803 · server v$(cat "$SJ.version")" \
@@ -253,7 +266,7 @@ case "$1" in
         if running; then
             # La sonda risponde a /stop dalla rete locale; in mancanza di rete si ricorre al segnale.
             # Il file del blocco può contenere il pid di una sessione vecchia: si agisce solo se è davvero la sonda.
-            if p=$(cat "$DATA/scrcpy.lock" 2>/dev/null) && [ -n "$p" ] && grep -q phantom-probe "/proc/$p/cmdline" 2>/dev/null; then
+            if p=$(cat "$DATA/scrcpy.lock" 2>/dev/null) && [ -n "$p" ] && grep -q '^phantom-probe' "/proc/$p/comm" 2>/dev/null; then
                 kill "$p" && echo "Sessione scrcpy (pid $p) fermata"
             else
                 echo "Nessuna sessione scrcpy attiva"
@@ -261,6 +274,50 @@ case "$1" in
         else
             echo "La sonda è ferma"
         fi ;;
+    live)
+        # Qualche secondo di telemetria letta in locale: serve a vedere che la scatola nera funziona, senza avviare nessun video.
+        if ! running; then echo "La sonda è ferma"; exit 1; fi
+        [ "$TELEMETRY" = 1 ] || { echo "La telemetria è spenta (TELEMETRY=0 in $CONF)"; exit 1; }
+        NC=$(find_nc) || { echo "Manca nc sul telefono: guarda la telemetria dall'app iPhone"; exit 1; }
+        n=${2:-4}
+        # shellcheck disable=SC2086  # $NC può essere «busybox nc»: va diviso in parole
+        timeout "$n" $NC 127.0.0.1 47804 2>&1 | head -n 40 | cut -c1-600 ;;
+    blackbox)
+        F=$DATA/blackbox.txt
+        if [ -f "$F" ]; then
+            cp "$F" /sdcard/Download/phantom-f0-blackbox.txt 2>/dev/null && echo "Copiato in Download/phantom-f0-blackbox.txt ($(wc -c < "$F") byte): allegalo alla chat."
+            echo "--- ultime righe ---"
+            tail -n "${2:-30}" "$F" | cut -c1-500
+        else
+            echo "(nessun registro: la scatola nera scrive su disco solo durante una sessione video o uno stallo)"
+        fi ;;
+    captest)
+        # Prova di cattura SENZA iPhone e senza Wi-Fi: il telefono si collega a se stesso (127.0.0.1) e butta via il video.
+        # Se così si blocca, il problema è la cattura dello schermo di questa ROM; se non si blocca, contano rete o app.
+        if [ "$2" = status ]; then
+            if [ -f "$DATA/captest.log" ]; then cat "$DATA/captest.log"; else echo "(nessuna prova locale eseguita)"; fi
+            exit 0
+        fi
+        secs=${2:-60}
+        case "$secs" in "" | *[!0-9]*) echo "uso: phantomctl captest [secondi] [profilo] | status"; exit 2 ;; esac
+        [ "$secs" -ge 3 ] && [ "$secs" -le 600 ] || { echo "durata da 3 a 600 secondi"; exit 2; }
+        prof=${3:-$SCRCPY_PROFILE}
+        profile_load "$prof" || { echo "Profilo «$prof» sconosciuto: vedi phantomctl scrcpy profiles"; exit 2; }
+        NC=$(find_nc) || { echo "Manca nc sul telefono: la prova locale non è possibile"; exit 1; }
+        sh "$MODDIR/bin/phantomctl" scrcpy on "$P_NAME" >/dev/null 2>&1
+        : > "$DATA/captest.log"
+        # La prova gira staccata da questo comando: si può uscire dall'app e usare il telefono.
+        setsid sh -c "
+            echo \"\$(date -u '+%Y-%m-%dT%H:%M:%SZ') INIZIO prova locale · profilo $P_NAME · $secs s\" >> '$DATA/captest.log'
+            timeout $secs $NC 127.0.0.1 47803 >/dev/null 2>&1
+            sleep 2
+            echo \"\$(date -u '+%Y-%m-%dT%H:%M:%SZ') FINE prova locale: il telefono NON si è bloccato\" >> '$DATA/captest.log'
+            tail -n 5 '$LOG' >> '$DATA/captest.log'
+        " </dev/null >/dev/null 2>&1 &
+        echo "PROVA LOCALE avviata: profilo $P_NAME, $secs secondi, senza iPhone né Wi-Fi."
+        echo "Esci da questa app e usa il telefono come quando si bloccava (apri la lista delle app e scorri su e giù)."
+        echo "Se il telefono si blocca: tieni premuto l'accensione, riavvia e apri il Post-mortem approfondito."
+        echo "Se dopo $secs secondi tutto va bene: phantomctl captest status (oppure il pulsante «Esito prova locale»)." ;;
     postmortem)
         case "$2" in
             deep)

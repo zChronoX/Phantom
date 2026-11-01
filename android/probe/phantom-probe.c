@@ -42,7 +42,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define PROBE_VERSION "0.4.0"
+#define PROBE_VERSION "0.5.0"
 #define UDP_MAGIC "PHP1"
 #define UDP_HDR 32          /* magic(4) seq(4) client_ns(8) server_mono_ns(8) server_suspend_ms(8) */
 #define WAKE_GAP_NS (30ull * 1000000000ull)
@@ -358,8 +358,9 @@ static void serve_http(int fd, const struct sockaddr_in *peer_sa) {
         pid_t pid = stop_sessions();
         char body[96];
         int bn = snprintf(body, sizeof body, "{\"stopped\":%s,\"pid\":%d}\n", pid > 0 ? "true" : "false", (int)pid);
-        logmsg("stop richiesto da %s: %s", peer, pid > 0 ? "sessione fermata" : "nessuna sessione attiva");
         http_reply(fd, "200 OK", "application/json", body, (size_t)bn);
+        /* Prima si risponde, poi si scrive il log (sincrono su disco): se il disco è fermo, l'iPhone riceve comunque la conferma. */
+        logmsg("stop richiesto da %s: %s", peer, pid > 0 ? "sessione fermata" : "nessuna sessione attiva");
     }
     else if (strncmp(path, "/ ", 2) == 0 || strncmp(path, "/clock ", 7) == 0 || strncmp(path, "/?", 2) == 0)
         http_reply(fd, "200 OK", "text/html; charset=utf-8", PAGE_HTML, sizeof(PAGE_HTML) - 1);
@@ -370,6 +371,10 @@ static void serve_http(int fd, const struct sockaddr_in *peer_sa) {
 /* Flusso H.264 Annex-B grezzo da screenrecord, riavviato da solo ogni 3 minuti
  * (limite di screenrecord). È la linea di base: niente bassa latenza, nessuna
  * ottimizzazione. Il nostro server Kotlin dovrà batterla di molto. */
+
+static void tm_relay_begin(pid_t server_pid);
+static void tm_relay_end(void);
+static void tm_relay_tick(uint64_t bytes_in, uint64_t bytes_out, uint64_t frames_in, uint64_t frames_out, uint64_t dropped, unsigned queue_kb);
 
 static void serve_video(int fd, const struct sockaddr_in *peer_sa) {
     char peer[64];
@@ -413,6 +418,7 @@ static void serve_video(int fd, const struct sockaddr_in *peer_sa) {
         }
         close(p[1]);
         if (pid < 0) { close(p[0]); break; }
+        tm_relay_begin(pid);
 
         int client_gone = 0;
         unsigned char buf[65536];
@@ -428,6 +434,7 @@ static void serve_video(int fd, const struct sockaddr_in *peer_sa) {
                 if (r <= 0) break; /* screenrecord è terminato */
                 if (send_all(fd, buf, (size_t)r) < 0) { client_gone = 1; break; }
                 total += (uint64_t)r;
+                tm_relay_tick(total, total, 0, 0, 0, 0);
             }
         }
         close(p[0]);
@@ -452,6 +459,7 @@ static void serve_video(int fd, const struct sockaddr_in *peer_sa) {
             logmsg("video: screenrecord riavviato (limite di 3 minuti)");
         }
     }
+    tm_relay_end();
     logmsg("video: client %s disconnesso, %.1f MB inviati", peer, (double)total / 1e6);
 }
 
@@ -497,16 +505,18 @@ static void fsync_state_dir(void) {
 
 /* ---- una sola sessione alla volta (flock: il kernel lo rilascia anche se il processo muore) */
 
+/* Si controlla il nome del processo (comm), non la riga di comando: leggere /proc/PID/cmdline di un processo
+ * incastrato nel kernel può restare in attesa a oltranza e bloccare anche chi vuole fermarlo. */
 static int is_probe_pid(pid_t pid) {
-    char p[64], buf[256];
-    snprintf(p, sizeof p, "/proc/%d/cmdline", (int)pid);
+    char p[64], buf[64];
+    snprintf(p, sizeof p, "/proc/%d/comm", (int)pid);
     int fd = open(p, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return 0;
     ssize_t n = read(fd, buf, sizeof buf - 1);
     close(fd);
     if (n <= 0) return 0;
     buf[n] = 0;
-    return strstr(buf, "phantom-probe") != NULL;
+    return strncmp(buf, "phantom-probe", 13) == 0;
 }
 
 static pid_t lock_holder_pid(int fd) {
@@ -586,6 +596,8 @@ static void marker_remove(void) {
     state_path(p, sizeof p, "session.marker");
     unlink(p);
 }
+
+#include "telemetry.h"
 
 /* ---- coda verso l'iPhone */
 
@@ -889,6 +901,7 @@ static void serve_scrcpy(int fd, const struct sockaddr_in *peer_sa) {
     logmsg("scrcpy: client %s connesso, profilo «%s»: avvio il server %s", peer, g_scrcpy_profile ? g_scrcpy_profile : "", g_scrcpy_ver ? g_scrcpy_ver : "?");
     pid_t child = spawn_scrcpy_server(scid, getpid());
     if (child < 0) { logmsg("scrcpy: fork del server fallita"); marker_remove(); return; }
+    tm_relay_begin(child);
 
     const char *reason = NULL;
     int reaped = 0;
@@ -898,6 +911,7 @@ static void serve_scrcpy(int fd, const struct sockaddr_in *peer_sa) {
     /* Il server impiega circa un secondo ad aprire il suo socket: si riprova fino a 6 s. */
     int early_close = 0;
     while (since(now_ms(), t0) < 6000 && !g_stop) {
+        tm_relay_tick(0, 0, 0, 0, 0, 0); /* segno di vita per la scatola nera durante l'avvio del server */
         up = connect_scrcpy_socket(scid);
         if (up >= 0) break;
         int st;
@@ -966,6 +980,7 @@ static void serve_scrcpy(int fd, const struct sockaddr_in *peer_sa) {
             now = now_ms(); /* dopo la lettura: gli istanti dei frame appena arrivati sono successivi al "now" di prima */
             sc_check_congestion(&s, now);
             if (s.head && sc_flush(&s, now) < 0) { reason = "errore di invio all'iPhone"; break; }
+            tm_relay_tick(s.bytes_in, s.bytes_out, s.frames_in, s.frames_out, s.dropped, (unsigned)(s.qbytes / 1024));
 
             /* Cane da guardia 1: l'iPhone ha dati in attesa ma non li accetta più. È il caso che può
              * congelare lo schermo del telefono: si chiude subito, così il server viene fermato. */
@@ -1022,6 +1037,7 @@ static void serve_scrcpy(int fd, const struct sockaddr_in *peer_sa) {
            peer, reason ? reason : "chiusura", (unsigned long long)s.frames_in, (unsigned long long)s.frames_out, (unsigned long long)s.dropped,
            (unsigned long long)s.drop_events, (double)s.bytes_out / 1e6);
     if (reaped) marker_remove(); /* senza marker = chiusura pulita; se il server non muore, il marker resta come segnale */
+    tm_relay_end();
     close(lock);
 }
 
@@ -1078,6 +1094,12 @@ static void usage(void) {
             "  --scrcpy-stall-server-ms N  chiude se il server tace per N ms (default 0 = mai)\n"
             "  --scrcpy-max-age-ms N       scarta i frame in coda da più di N ms (default 250)\n"
             "  --scrcpy-first-frame-ms N   attesa massima del primo frame (default 8000)\n"
+            "  --telemetry-port N scatola nera: stato del telefono in tempo reale su questa porta TCP (0 = spenta)\n"
+            "  --tm-hz N          campioni al secondo con client o sessione attivi (default 4)\n"
+            "  --tm-idle-ms N     intervallo a riposo (default 5000)\n"
+            "  --no-sysrq         non chiedere al kernel gli stack dei task bloccati\n"
+            "  --no-blackbox-disk non scrivere blackbox.txt nella cartella di stato\n"
+            "  --proc-root P / --sys-root P / --kmsg P / --sysrq-file P / --sysrq-mask P   percorsi alternativi (per i test)\n"
             "  --allow-any        accetta anche indirizzi pubblici (sconsigliato)\n"
             "  --log FILE         file di log (default stderr)\n"
             "  --pidfile FILE     scrive il PID\n"
@@ -1119,6 +1141,16 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--scrcpy-stall-server-ms")) { NEEDV(); g_stall_server_ms = atoi(v); }
         else if (!strcmp(a, "--scrcpy-max-age-ms")) { NEEDV(); g_max_age_ms = atoi(v); }
         else if (!strcmp(a, "--scrcpy-first-frame-ms")) { NEEDV(); g_first_frame_ms = atoi(v); }
+        else if (!strcmp(a, "--telemetry-port")) { NEEDV(); g_tm_port = atoi(v); }
+        else if (!strcmp(a, "--tm-hz")) { NEEDV(); g_tm_hz = atoi(v) > 0 ? atoi(v) : 4; }
+        else if (!strcmp(a, "--tm-idle-ms")) { NEEDV(); g_tm_idle_ms = atoi(v) > 0 ? atoi(v) : 5000; }
+        else if (!strcmp(a, "--no-sysrq")) g_tm_sysrq = 0;
+        else if (!strcmp(a, "--no-blackbox-disk")) g_tm_disk = 0;
+        else if (!strcmp(a, "--proc-root")) { NEEDV(); g_proc = v; }
+        else if (!strcmp(a, "--sys-root")) { NEEDV(); g_sys = v; }
+        else if (!strcmp(a, "--kmsg")) { NEEDV(); g_kmsg_path = v; }
+        else if (!strcmp(a, "--sysrq-file")) { NEEDV(); g_sysrq_path = v; }
+        else if (!strcmp(a, "--sysrq-mask")) { NEEDV(); g_sysrq_mask_path = v; }
         else if (!strcmp(a, "--version")) { printf("%s\n", PROBE_VERSION); return 0; }
         else { usage(); return 2; }
     }
@@ -1145,6 +1177,9 @@ int main(int argc, char **argv) {
         if ((scrcpy = listen_tcp(g_scrcpy_port)) < 0) { logmsg("errore: porta scrcpy %d: %s", g_scrcpy_port, strerror(errno)); return 1; }
     }
 
+    int telem = -1;
+    if (g_tm_port > 0 && (telem = listen_tcp(g_tm_port)) < 0) { logmsg("errore: porta telemetria %d: %s", g_tm_port, strerror(errno)); return 1; }
+
     if (daemonize) {
         pid_t p = fork();
         if (p < 0) return 1;
@@ -1167,13 +1202,32 @@ int main(int argc, char **argv) {
            PROBE_VERSION, g_udp_port, g_http_port, g_video ? "acceso" : "spento",
            g_scrcpy_port > 0 ? "acceso" : "spento", (unsigned long long)suspended_ms());
 
-    struct pollfd pf[4] = {{.fd = udp, .events = POLLIN}, {.fd = http, .events = POLLIN}, {.fd = -1, .events = POLLIN}, {.fd = -1, .events = POLLIN}};
-    int kind[4] = {0, 1, 0, 0}; /* 1 = http, 2 = video di base, 3 = scrcpy */
+    struct pollfd pf[5] = {{.fd = udp, .events = POLLIN}, {.fd = http, .events = POLLIN}, {.fd = -1, .events = POLLIN}, {.fd = -1, .events = POLLIN}, {.fd = -1, .events = POLLIN}};
+    int kind[5] = {0, 1, 0, 0, 0}; /* 1 = http, 2 = video di base, 3 = scrcpy, 4 = telemetria */
     int nfds = 2;
     if (video >= 0) { pf[nfds].fd = video; kind[nfds++] = 2; }
     if (scrcpy >= 0) { pf[nfds].fd = scrcpy; kind[nfds++] = 3; }
+    if (telem >= 0) { pf[nfds].fd = telem; kind[nfds++] = 4; }
+
+    /* Scatola nera: un processo a parte che campiona lo stato del telefono (vedi telemetry.h). */
+    pid_t blackbox = -1;
+    int listen_fds[5] = {udp, http, video, scrcpy, telem};
+    int respawns = 0;
+    uint64_t respawn_window = now_ms();
+    if (telem >= 0) {
+        if (tm_shared_init() < 0) { logmsg("telemetria: memoria condivisa non disponibile, la spengo"); close(telem); telem = -1; nfds--; }
+        else {
+            blackbox = tm_spawn(listen_fds, 5);
+            logmsg("telemetria: scatola nera avviata (pid %d), porta %d", (int)blackbox, g_tm_port);
+        }
+    }
     for (;;) {
-        if (poll(pf, (nfds_t)nfds, -1) < 0) {
+        if (blackbox > 0 && kill(blackbox, 0) != 0 && errno == ESRCH) { /* il processo della scatola nera è morto: lo si rilancia (al massimo 5 volte al minuto) */
+            if (since(now_ms(), respawn_window) > 60000) { respawn_window = now_ms(); respawns = 0; }
+            if (respawns++ < 5) { blackbox = tm_spawn(listen_fds, 5); logmsg("telemetria: scatola nera rilanciata (pid %d)", (int)blackbox); }
+            else blackbox = -1;
+        }
+        if (poll(pf, (nfds_t)nfds, 2000) < 0) {
             if (errno == EINTR) {
                 if (g_term) break;
                 continue;
@@ -1198,9 +1252,10 @@ int main(int argc, char **argv) {
             if (child == 0) {
                 signal(SIGTERM, SIG_DFL);
                 signal(SIGINT, SIG_DFL);
-                close(udp); close(http); if (video >= 0) close(video); if (scrcpy >= 0) close(scrcpy);
+                close(udp); close(http); if (video >= 0) close(video); if (scrcpy >= 0) close(scrcpy); if (telem >= 0) close(telem);
                 if (kind[i] == 1) serve_http(c, &peer);
                 else if (kind[i] == 2) serve_video(c, &peer);
+                else if (kind[i] == 4) serve_telemetry(c, &peer);
                 else serve_scrcpy(c, &peer);
                 close(c);
                 _exit(0);

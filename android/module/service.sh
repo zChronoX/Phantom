@@ -25,8 +25,12 @@ if [ -f "$DATA/session.marker" ]; then
         cat "$DATA/session.marker"
         sh "$MODDIR/bin/phantom-postmortem.sh"
         echo
+        echo
+        echo "=== Scatola nera: ultime 250 righe registrate su disco prima del blocco ==="
+        if [ -f "$DATA/blackbox.txt" ]; then tail -n 250 "$DATA/blackbox.txt" | cut -c1-700; else echo "(nessun registro)"; fi
         PHANTOM_NDUMPS=1 PHANTOM_DUMP_MAXKB=400 sh "$MODDIR/bin/phantom-deep.sh"
     } > "$REP" 2>&1
+    [ -f "$DATA/blackbox.txt" ] && cp "$DATA/blackbox.txt" /sdcard/Download/phantom-f0-blackbox.txt 2>/dev/null
     cp "$REP" "$DATA/crash-last.txt"
     cp "$REP" /sdcard/Download/phantom-f0-crash-last.txt 2>/dev/null
     rm -f "$DATA/session.marker"

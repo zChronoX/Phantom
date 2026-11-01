@@ -41,12 +41,16 @@ jobs:
       - name: Prova del ponte scrcpy (build statica)
         run: python3 android/probe/tests/test_scrcpy_relay.py android/probe/build/phantom-probe-x86_64
 
-      - name: Prova del ponte con i rilevatori di errori di memoria
+      - name: Prova della scatola nera (telemetria, build statica)
+        run: python3 android/probe/tests/test_telemetry.py android/probe/build/phantom-probe-x86_64
+
+      - name: Prova del ponte e della scatola nera con i rilevatori di errori di memoria
         run: |
           cd android/probe
           gcc -std=c11 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -Wno-unused-parameter \
             -o build/phantom-probe-asan phantom-probe.c
           ASAN_OPTIONS=detect_leaks=0 python3 tests/test_scrcpy_relay.py build/phantom-probe-asan
+          ASAN_OPTIONS=detect_leaks=0 python3 tests/test_telemetry.py build/phantom-probe-asan
 
       - name: Prova degli script del modulo
         run: android/module/tests/test_module.sh

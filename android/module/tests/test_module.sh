@@ -69,6 +69,7 @@ echo "profilo 1 (software, neutro)"
 $C scrcpy on 1 >/dev/null
 check "argomenti: porta e profilo" "args | grep -q -- '--scrcpy-port 47803 --scrcpy-jar .*scrcpy-server --scrcpy-version 5.0.1 --scrcpy-profile sw-low'"
 check "argomenti: cartella di stato" "args | grep -q -- \"--state-dir $PHANTOM_DATA\""
+check "argomenti: scatola nera sulla porta 47804" "args | grep -q -- '--telemetry-port 47804'"
 check "encoder software" "opts_of | grep -qx 'video_encoder=c2.android.avc.encoder'"
 check "max_size 1280, 30 fps, 4 Mbps" "opts_of | grep -qx 'max_size=1280' && opts_of | grep -qx 'max_fps=30' && opts_of | grep -qx 'video_bit_rate=4000000'"
 check "parametri neutri e keyframe ogni 2 s" "opts_of | grep -qx 'video_codec_options=i-frame-interval=2,priority:int=1,latency:int=0'"
@@ -113,6 +114,7 @@ check "senza porta scrcpy" "! args | grep -q -- '--scrcpy-port'"
 echo "guardia al riavvio dopo un blocco"
 $C scrcpy on 4 >/dev/null
 printf 'pid=999\nstart=1\nprofilo=hw-mid\nversione=5.0.1\nclient=1.2.3.4:5\nopzioni=max_fps=60 video_bit_rate=10000000\n' > "$PHANTOM_DATA/session.marker"
+printf 'T 100.000 e=1 | c u5 | PROVA-SCATOLA-NERA\nS 101.000 inizio: 5 task bloccati nel kernel\n' > "$PHANTOM_DATA/blackbox.txt"
 $C stop >/dev/null
 ( cd "$T" && sh "$PHANTOM_MODDIR/service.sh" ) >/dev/null 2>&1
 check "marker rimosso" "[ ! -f $PHANTOM_DATA/session.marker ]"
@@ -121,6 +123,7 @@ check "rapporto creato" "ls $PHANTOM_DATA/crash-2*.txt >/dev/null 2>&1 && [ -f $
 check "il rapporto contiene il marker" "grep -q 'profilo=hw-mid' $PHANTOM_DATA/crash-last.txt && grep -q 'max_fps=60' $PHANTOM_DATA/crash-last.txt"
 check "il rapporto contiene il post-mortem" "grep -q 'Marker della sessione interrotta' $PHANTOM_DATA/crash-last.txt && grep -q 'Ultime righe del log' $PHANTOM_DATA/crash-last.txt"
 check "il rapporto contiene il post-mortem approfondito" "grep -q 'post-mortem approfondito' $PHANTOM_DATA/crash-last.txt && grep -q 'waiting to lock' $PHANTOM_DATA/crash-last.txt"
+check "il rapporto contiene la scatola nera" "grep -q 'Scatola nera: ultime 250 righe' $PHANTOM_DATA/crash-last.txt && grep -q 'PROVA-SCATOLA-NERA' $PHANTOM_DATA/crash-last.txt && grep -q 'inizio: 5 task bloccati' $PHANTOM_DATA/crash-last.txt"
 check "il servizio ha scritto l'avviso" "grep -q 'ATTENZIONE' $PHANTOM_DATA/service.log"
 check "la sonda è ripartita senza scrcpy" "! args | grep -q -- '--scrcpy-port'"
 st=$($C status)
@@ -160,6 +163,45 @@ PHANTOM_DROPBOX="$T/vuoto" PHANTOM_TOMBSTONES="$T/vuoto" PHANTOM_ANR="$T/vuoto" 
 check "senza dump non si rompe e lo dice" "grep -q 'nessun dump del watchdog' $D && grep -q 'nessun tombstone' $D"
 $C postmortem nonsense >/dev/null 2>&1; rc=$?
 check "argomento sconosciuto rifiutato" "[ $rc -ne 0 ]"
+
+echo "scatola nera: comandi"
+mkdir -p "$T/bin"
+cat > "$T/bin/nc" <<'NC'
+#!/bin/sh
+echo "$@" >> "$PHANTOM_DATA/nc.calls"
+echo "H telemetria 1 sonda=prova"
+echo "T 1.000 e=1 | c u1 | finto"
+sleep 30
+NC
+chmod +x "$T/bin/nc"
+$C scrcpy on 1 >/dev/null
+out=$(PATH="$T/bin:$PATH" $C live 1 2>&1)
+check "live mostra le righe della telemetria" "echo \"\$out\" | grep -q 'H telemetria 1' && echo \"\$out\" | grep -q 'T 1.000'"
+check "live si collega alla porta 47804 in locale" "grep -qx '127.0.0.1 47804' $PHANTOM_DATA/nc.calls"
+out=$($C blackbox 5 2>&1)
+check "blackbox mostra le ultime righe del registro" "echo \"\$out\" | grep -q 'PROVA-SCATOLA-NERA'"
+rm -f "$PHANTOM_DATA/blackbox.txt"
+out=$($C blackbox 2>&1)
+check "blackbox senza registro lo dice" "echo \"\$out\" | grep -q 'nessun registro'"
+rm -f "$PHANTOM_DATA/nc.calls"
+out=$(PATH="$T/bin:$PATH" $C captest 3 4 2>&1)
+check "captest accende scrcpy col profilo scelto" "args | grep -q -- '--scrcpy-profile hw-mid'"
+check "captest spiega come proseguire" "echo \"\$out\" | grep -q 'PROVA LOCALE avviata' && echo \"\$out\" | grep -q 'Post-mortem approfondito'"
+check "captest parte staccato (il comando torna subito)" "grep -q 'INIZIO prova locale · profilo hw-mid · 3 s' $PHANTOM_DATA/captest.log"
+sleep 6
+check "captest si collega al ponte scrcpy in locale" "grep -qx '127.0.0.1 47803' $PHANTOM_DATA/nc.calls"
+check "captest scrive l'esito a fine prova" "grep -q 'FINE prova locale' $PHANTOM_DATA/captest.log"
+check "captest status mostra il registro" "$C captest status | grep -q 'FINE prova locale'"
+$C captest 1 >/dev/null 2>&1; rc=$?
+check "captest rifiuta durate troppo brevi" "[ $rc -ne 0 ]"
+$C captest 5 99 >/dev/null 2>&1; rc=$?
+check "captest rifiuta profili sconosciuti" "[ $rc -ne 0 ]"
+echo 'TELEMETRY=0' >> "$PHANTOM_DATA/probe.conf"
+$C restart >/dev/null
+check "con TELEMETRY=0 la porta di telemetria non viene richiesta" "! args | grep -q -- '--telemetry-port'"
+check "live lo dice chiaramente" "$C live 1 2>&1 | grep -q 'telemetria è spenta'"
+sed -i '/^TELEMETRY=0$/d' "$PHANTOM_DATA/probe.conf"
+$C restart >/dev/null
 
 echo "aiuto"
 check "senza argomenti stampa l'uso" "$C nonsense 2>&1 | grep -q 'phantomctl scrcpy on'"

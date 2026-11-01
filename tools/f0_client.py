@@ -6,6 +6,8 @@ Comandi:
   ping   HOST [--seconds 30]      RTT, jitter e perdita verso la sonda (UDP, come il Phantom vero)
   doze   HOST [--every 300]       raggiungibilità del telefono a schermo spento, per ore
   video  HOST                     apre il flusso video di base con ffplay (se installato)
+  telemetry HOST [--out F]        «scatola nera»: stato del telefono in tempo reale; se il POCO si blocca, l'ultima
+                                  riga e il momento in cui tace restano nel file (e si riconnette da sola)
 
 Esempi:
   python f0_client.py ping 192.168.1.50
@@ -27,7 +29,7 @@ import time
 import urllib.request
 from datetime import datetime
 
-UDP_PORT, HTTP_PORT, VIDEO_PORT = 47800, 47801, 47802
+UDP_PORT, HTTP_PORT, VIDEO_PORT, TELEMETRY_PORT = 47800, 47801, 47802, 47804
 MAGIC = b"PHP1"
 HDR = struct.Struct("<4sIQQQ")  # magic, seq, client_ns, server_mono_ns, server_suspend_ms
 
@@ -233,6 +235,69 @@ def cmd_video(a) -> int:
     return subprocess.call(cmd)
 
 
+# ------------------------------------------------------------ telemetria (scatola nera)
+
+def cmd_telemetry(a) -> int:
+    out = open(a.out, "a", encoding="utf-8", buffering=1) if a.out else None
+
+    def emit(line: str, show: bool = True) -> None:
+        stamp = datetime.now().astimezone().strftime("%H:%M:%S.%f")[:-3]
+        text = f"{stamp} {line}"
+        if out:
+            out.write(text + "\n")
+        if show:
+            print(text[:230], flush=True)
+
+    emit(f"# registrazione della telemetria da {a.host}:{TELEMETRY_PORT} (Ctrl+C per fermare)")
+    try:
+        while True:
+            try:
+                s = socket.create_connection((a.host, TELEMETRY_PORT), timeout=3)
+            except OSError as e:
+                emit(f"# telefono non raggiungibile: {e}")
+                time.sleep(1)
+                continue
+            emit("# collegato")
+            s.settimeout(1.0)
+            buf = b""
+            last_rx = time.monotonic()
+            warned = False
+            while True:
+                try:
+                    d = s.recv(65536)
+                except socket.timeout:
+                    if time.monotonic() - last_rx > 2 and not warned:
+                        warned = True
+                        emit(f"# NESSUN DATO da {time.monotonic() - last_rx:.1f} s: il telefono potrebbe essersi bloccato")
+                    continue
+                except OSError as e:
+                    emit(f"# connessione persa: {e}")
+                    break
+                if not d:
+                    emit("# connessione chiusa dal telefono")
+                    break
+                if warned:
+                    emit(f"# di nuovo dati dopo {time.monotonic() - last_rx:.1f} s")
+                warned = False
+                last_rx = time.monotonic()
+                buf += d
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    text = line.decode("utf-8", "replace")
+                    # a video: tutto tranne i campioni T ripetuti (uno al secondo); su file: tutto
+                    show = not a.quiet or text[:1] in "SDK"
+                    if text[:1] == "T" and show:
+                        show = int(time.monotonic()) != getattr(cmd_telemetry, "_last", None)
+                        if show:
+                            cmd_telemetry._last = int(time.monotonic())
+                    emit(text, show)
+            s.close()
+            time.sleep(1)
+    except KeyboardInterrupt:
+        emit("# fermato")
+        return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Phantom · fase 0 — client di test")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -245,6 +310,8 @@ def main() -> int:
     p.add_argument("--timeout", type=float, default=10, help="secondi di tentativi per ogni controllo"); p.add_argument("--csv")
     p.set_defaults(fn=cmd_doze)
     p = sub.add_parser("video"); p.add_argument("host"); p.set_defaults(fn=cmd_video)
+    p = sub.add_parser("telemetry"); p.add_argument("host"); p.add_argument("--out", help="file dove salvare tutte le righe")
+    p.add_argument("--quiet", action="store_true", help="a video solo stalli, task bloccati e messaggi del kernel"); p.set_defaults(fn=cmd_telemetry)
     a = ap.parse_args()
     return a.fn(a)
 
