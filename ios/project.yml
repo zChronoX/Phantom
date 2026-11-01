@@ -25,6 +25,8 @@ targets:
       path: PhantomF0/Info.plist
       properties:
         CFBundleDisplayName: Phantom F0
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         UIRequiresFullScreen: true
         UISupportedInterfaceOrientations:

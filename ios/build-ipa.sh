@@ -21,14 +21,19 @@ xcodebuild \
   -derivedDataPath "$OUT/dd" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
   CURRENT_PROJECT_VERSION="${BUILD_NUMBER:-1}" \
-  build 2>&1 | tee "$OUT/xcodebuild.log" | grep -E "error:|warning:|BUILD (SUCCEEDED|FAILED)" || true
+  build > "$OUT/xcodebuild.log" 2>&1 && XC_STATUS=0 || XC_STATUS=$?
+
+# Errori e avvisi sempre visibili nel log della build.
+grep -E "error:|warning:|BUILD (SUCCEEDED|FAILED)" "$OUT/xcodebuild.log" | sort -u | head -n 80 || true
 
 APP_PATH="$OUT/dd/Build/Products/Release-iphoneos/$APP_NAME.app"
-if [ ! -d "$APP_PATH" ]; then
-  echo "Build fallita: vedi $OUT/xcodebuild.log"
-  tail -n 60 "$OUT/xcodebuild.log"
+# Xcode crea la cartella .app anche quando la compilazione fallisce: si controlla l'eseguibile.
+if [ "$XC_STATUS" -ne 0 ] || [ ! -f "$APP_PATH/$APP_NAME" ]; then
+  echo "BUILD FALLITA (xcodebuild $XC_STATUS). Ultime righe del log:"
+  tail -n 80 "$OUT/xcodebuild.log"
   exit 1
 fi
+echo "Eseguibile: $(du -h "$APP_PATH/$APP_NAME" | cut -f1) · versione $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist") ($(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist"))"
 
 mkdir -p "$OUT/ipa/Payload"
 cp -R "$APP_PATH" "$OUT/ipa/Payload/"

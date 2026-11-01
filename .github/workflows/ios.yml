@@ -1,0 +1,27 @@
+# Build iOS su macOS (gratuita per i repository pubblici): serve a trovare subito gli
+# errori di compilazione. L'IPA si scarica dalla pagina dell'esecuzione, sezione Artifacts.
+name: iOS · Phantom F0
+
+on:
+  push:
+    branches: [main]
+    paths: ["ios/**", ".github/workflows/ios.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compila e crea l'IPA
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./ios/build-ipa.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PhantomF0-ipa
+          path: |
+            ios/build/*.ipa
+            ios/build/xcodebuild.log
