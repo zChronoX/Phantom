@@ -48,8 +48,8 @@ done
 command -v su >/dev/null && echo "su          $(command -v su)"
 
 section "Schermo"
-wm size 2>&1
-wm density 2>&1
+wm size 2>&1 | cat   # pipe: i servizi di sistema non possono scrivere su file in /data/adb
+wm density 2>&1 | cat
 dumpsys display 2>/dev/null | grep -m 10 -E "mActiveModeId|supportedModes|renderFrameRate|mDefaultModeId|DisplayDeviceInfo\{" | cut -c1-400
 dumpsys SurfaceFlinger 2>/dev/null | grep -m 6 -iE "refresh-rate|vsync-period|present offset|app phase|sf phase" | cut -c1-200
 

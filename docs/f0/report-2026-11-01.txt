@@ -1,0 +1,774 @@
+Phantom F0 · report del dispositivo
+generato: 2026-11-01 10:02:50 UTC
+
+=== Sistema ===
+ro.product.manufacturer              POCO
+ro.product.model                     21121210G
+ro.product.device                    ingres
+ro.product.name                      ingres
+ro.build.version.release             16
+ro.build.version.sdk                 36
+ro.build.version.security_patch      2025-10-01
+ro.lineage.version                   23.0-20251012-UNOFFICIAL-ingres
+ro.lineage.build.version             23.0
+ro.lineage.releasetype               UNOFFICIAL
+ro.build.display.id                  lineage_ingres-userdebug 16 BP2A.250605.031.A2 eng.androi release-keys
+ro.build.type                        user
+ro.build.flavor                      lineage_ingres-userdebug
+ro.vendor.build.fingerprint          Redmi/ingres/ingres:12/SKQ1.230401.001/OS2.0.2.0.ULJCNXM:user/release-keys
+ro.board.platform                    taro
+ro.soc.manufacturer                  QTI
+ro.soc.model                         SM8450
+ro.hardware                          qcom
+ro.product.cpu.abi                   arm64-v8a
+ro.hardware.egl                      adreno
+ro.hardware.vulkan                   adreno
+kernel                               5.10.240-gki-g12882784c7cc-dirty
+uptime                               142.26 s
+
+=== Root e SELinux ===
+utente      uid=0(root) gid=0(root) context=u:r:su:s0
+contesto    u:r:su:s0
+SELinux     Enforcing
+KernelSU/SukiSU presente (/data/adb/ksu)
+ksud        zakozako 3.1.8
+ksud        zakozako 3.1.8
+su          /system/bin/su
+
+=== Schermo ===
+cmd: Failure calling service window: Failed transaction (2147483646)
+cmd: Failure calling service window: Failed transaction (2147483646)
+  DisplayDeviceInfo{"Schermo incorporato": uniqueId="local:4630946545580055169", 1080 x 2400, modeId 2, renderFrameRate 120.00001, hasArrSupport false, frameRateCategoryRate FrameRateCategoryRate {normal=60.0, high=90.0}, supportedRefreshRates [60.000004, 120.00001], defaultModeId 2, userPreferredModeId -1, supportedModes [{id=1, width=1080, height=2400, fps=60.000004, vsync=60.000004, synthetic=f
+    mActiveModeId=2
+    mDefaultModeId=2
+    mAmbientLightSensor=SensorData{type= android.sensor.light, name= , refreshRateRange: [0.0, Infinity], supportedModes=[]}, mScreenOffBrightnessSensor=null, mProximitySensor=SensorData{type= null, name= null, refreshRateRange: [0.0, Infinity], supportedModes=[]}, mTempSensor=SensorData{type= SKIN, name= null, refreshRateRange: [0.0, Infinity], supportedModes=[]}, mRefreshRateLimitations= [], mDe
+    mBaseDisplayInfo=DisplayInfo{"Schermo incorporato", displayId 0, displayGroupId 0, FLAG_SECURE, FLAG_SUPPORTS_PROTECTED_BUFFERS, FLAG_TRUSTED, real 1080 x 2400, largest app 1080 x 2400, smallest app 1080 x 2400, appVsyncOff 4000000, presDeadline 16666666, mode 2, renderFrameRate 120.00001, hasArrSupport false, frameRateCategoryRate FrameRateCategoryRate {normal=60.0, high=90.0}, supportedRefre
+    mOverrideDisplayInfo=DisplayInfo{"Schermo incorporato", displayId 0, displayGroupId 0, FLAG_SECURE, FLAG_SUPPORTS_PROTECTED_BUFFERS, FLAG_TRUSTED, real 1080 x 2400, largest app 2400 x 2400, smallest app 1080 x 1080, appVsyncOff 4000000, presDeadline 16666666, mode 2, renderFrameRate 120.00001, hasArrSupport false, frameRateCategoryRate FrameRateCategoryRate {normal=60.0, high=90.0}, supportedR
+    mObserverTempSensor: SensorData{type= SKIN, name= null, refreshRateRange: [0.0, Infinity], supportedModes=[]}
+           app phase:      4000000 ns	         SF phase:     -7333333 ns
+     early app phase:      4000000 ns	   early SF phase:     -7333333 ns
+  GL early app phase:      4000000 ns	GL early SF phase:     -7333333 ns
+  peak-refresh-rate         : 120.00 Hz
+
+=== Encoder video dichiarati ===
+-- /vendor/etc/media_codecs_cape.xml
+<MediaCodec name="c2.qti.avc.encoder" type="video/avc">
+<Alias name="OMX.qcom.video.encoder.avc"/>
+<Limit name="size" min="128x128" max="4096x2176" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="1958400" />
+<Limit name="block-count" range="64-34816" />
+<Limit name="bitrate" range="1-100000000" />
+<Limit name="frame-rate" range="1-480" />
+<Limit name="complexity" range="0-100"  default="100" />
+<Limit name="concurrent-instances" max="16" />
+<Feature name="bitrate-modes" value="VBR,CBR" />
+<Feature name="intra-refresh" />
+<Feature name="video-minimum-quality" />
+<Limit name="performance-point-4096x2304" value="30" />
+<Limit name="performance-point-3840x2160" value="60" />
+<Limit name="performance-point-1920x1080" value="240" />
+<Limit name="performance-point-1280x720" value="480" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder" type="video/hevc">
+<Alias name="OMX.qcom.video.encoder.hevc"/>
+<Limit name="size" min="128x128" max="4096x2176" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="1958400" />
+<Limit name="block-count" range="64-34816" />
+<Limit name="bitrate" range="1-100000000" />
+<Limit name="frame-rate" range="1-480" />
+<Limit name="complexity" range="0-100"  default="100" />
+<Limit name="concurrent-instances" max="16" />
+<Feature name="bitrate-modes" value="VBR,CBR" />
+<Feature name="intra-refresh" />
+<Feature name="video-minimum-quality" />
+<Limit name="performance-point-4096x2304" value="30" />
+<Limit name="performance-point-3840x2160" value="60" />
+<Limit name="performance-point-1920x1080" value="240" />
+<Limit name="performance-point-1280x720" value="480" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder.cq" type="video/hevc">
+<Alias name="OMX.qcom.video.encoder.hevc.cq"/>
+<Limit name="size" min="128x128" max="512x512" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="20480" />
+<Limit name="bitrate" range="1-160000000" />
+<Limit name="frame-rate" range="1-20" />
+<Limit name="concurrent-instances" max="16" />
+<Limit name="quality" range="0-100" default="80" />
+<Feature name="bitrate-modes" value="CQ" />
+<Limit name="performance-point-512x512" value="2025" />
+</MediaCodec>
+-- /vendor/etc/media_codecs_diwali_v0.xml
+<MediaCodec name="c2.qti.avc.encoder" type="video/avc">
+<Alias name="OMX.qcom.video.encoder.avc"/>
+<Limit name="size" min="128x128" max="4096x4096" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="2211840" />
+<Limit name="block-count" range="64-34816" />
+<Limit name="bitrate" range="1-160000000" />
+<Limit name="frame-rate" range="1-480" />
+<Limit name="complexity" range="0-100"  default="100" />
+<Limit name="concurrent-instances" max="16" />
+<Feature name="bitrate-modes" value="VBR,CBR" />
+<Feature name="intra-refresh" />
+<Feature name="video-minimum-quality" />
+<Limit name="performance-point-1280x720" value="480" />
+<Limit name="performance-point-1920x1080" value="240" />
+<Limit name="performance-point-3840x2160" value="60" />
+<Limit name="performance-point-4096x2304" value="60" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder" type="video/hevc">
+<Alias name="OMX.qcom.video.encoder.hevc"/>
+<Limit name="size" min="128x128" max="4096x4096" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="2211840" />
+<Limit name="block-count" range="64-34816" />
+<Limit name="bitrate" range="1-160000000" />
+<Limit name="frame-rate" range="1-480" />
+<Limit name="complexity" range="0-100"  default="100" />
+<Limit name="concurrent-instances" max="16" />
+<Feature name="bitrate-modes" value="VBR,CBR" />
+<Feature name="intra-refresh" />
+<Feature name="video-minimum-quality" />
+<Limit name="performance-point-1280x720" value="480" />
+<Limit name="performance-point-1920x1080" value="240" />
+<Limit name="performance-point-3840x2160" value="60" />
+<Limit name="performance-point-4096x2304" value="60" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder.cq" type="video/hevc">
+<Alias name="OMX.qcom.video.encoder.hevc.cq"/>
+<Limit name="size" min="128x128" max="512x512" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="3916800" />
+<Limit name="bitrate" range="1-100000000" />
+<Limit name="frame-rate" range="1-480" />
+<Limit name="concurrent-instances" max="16" />
+<Limit name="quality" range="0-100" default="80" />
+<Feature name="bitrate-modes" value="CQ" />
+<Limit name="performance-point-512x512" value="3825" />
+</MediaCodec>
+-- /vendor/etc/media_codecs_diwali_v1.xml
+<MediaCodec name="c2.qti.avc.encoder" type="video/avc">
+<Alias name="OMX.qcom.video.encoder.avc"/>
+<Limit name="size" min="128x128" max="4096x4096" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="2211840" />
+<Limit name="block-count" range="64-34816" />
+<Limit name="bitrate" range="1-100000000" />
+<Limit name="frame-rate" range="1-480" />
+<Limit name="complexity" range="0-100"  default="100" />
+<Limit name="concurrent-instances" max="16" />
+<Feature name="bitrate-modes" value="VBR,CBR" />
+<Feature name="intra-refresh" />
+<Feature name="video-minimum-quality" />
+<Limit name="performance-point-1280x720" value="480" />
+<Limit name="performance-point-1920x1080" value="240" />
+<Limit name="performance-point-3840x2160" value="60" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder" type="video/hevc">
+<Alias name="OMX.qcom.video.encoder.hevc"/>
+<Limit name="size" min="128x128" max="4096x4096" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="2211840" />
+<Limit name="block-count" range="64-34816" />
+<Limit name="bitrate" range="1-100000000" />
+<Limit name="frame-rate" range="1-480" />
+<Limit name="complexity" range="0-100"  default="100" />
+<Limit name="concurrent-instances" max="16" />
+<Feature name="bitrate-modes" value="VBR,CBR" />
+<Feature name="intra-refresh" />
+<Feature name="video-minimum-quality" />
+<Limit name="performance-point-1280x720" value="480" />
+<Limit name="performance-point-1920x1080" value="240" />
+<Limit name="performance-point-3840x2160" value="60" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder.cq" type="video/hevc">
+<Alias name="OMX.qcom.video.encoder.hevc.cq"/>
+<Limit name="size" min="128x128" max="512x512" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="3916800" />
+<Limit name="bitrate" range="1-100000000" />
+<Limit name="frame-rate" range="1-480" />
+<Limit name="concurrent-instances" max="16" />
+<Limit name="quality" range="0-100" default="80" />
+<Feature name="bitrate-modes" value="CQ" />
+<Limit name="performance-point-512x512" value="3825" />
+</MediaCodec>
+-- /vendor/etc/media_codecs_diwali_v2.xml
+<MediaCodec name="c2.qti.avc.encoder" type="video/avc">
+<Alias name="OMX.qcom.video.encoder.avc"/>
+<Limit name="size" min="128x128" max="4096x4096" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="1105920" />
+<Limit name="block-count" range="64-34816" />
+<Limit name="bitrate" range="1-100000000" />
+<Limit name="frame-rate" range="1-240" />
+<Limit name="complexity" range="0-100"  default="100" />
+<Limit name="concurrent-instances" max="16" />
+<Feature name="bitrate-modes" value="VBR,CBR" />
+<Feature name="intra-refresh" />
+<Feature name="video-minimum-quality" />
+<Limit name="performance-point-1280x720" value="240" />
+<Limit name="performance-point-1920x1080" value="120" />
+<Limit name="performance-point-3840x2160" value="30" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder" type="video/hevc">
+<Alias name="OMX.qcom.video.encoder.hevc"/>
+<Limit name="size" min="128x128" max="4096x4096" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="1105920" />
+<Limit name="block-count" range="64-34816" />
+<Limit name="bitrate" range="1-100000000" />
+<Limit name="frame-rate" range="1-240" />
+<Limit name="complexity" range="0-100"  default="100" />
+<Limit name="concurrent-instances" max="16" />
+<Feature name="bitrate-modes" value="VBR,CBR" />
+<Feature name="intra-refresh" />
+<Feature name="video-minimum-quality" />
+<Limit name="performance-point-1280x720" value="240" />
+<Limit name="performance-point-1920x1080" value="120" />
+<Limit name="performance-point-3840x2160" value="30" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder.cq" type="video/hevc">
+<Alias name="OMX.qcom.video.encoder.hevc.cq"/>
+<Limit name="size" min="128x128" max="512x512" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="3916800" />
+<Limit name="bitrate" range="1-100000000" />
+<Limit name="frame-rate" range="1-240" />
+<Limit name="concurrent-instances" max="16" />
+<Limit name="quality" range="0-100" default="80" />
+<Feature name="bitrate-modes" value="CQ" />
+<Limit name="performance-point-512x512" value="3825" />
+</MediaCodec>
+-- /vendor/etc/media_codecs_performance_cape.xml
+<MediaCodec name="c2.qti.avc.encoder" type="video/avc" update="true">
+<Limit name="measured-frame-rate-320x240" range="405-892" />
+<Limit name="measured-frame-rate-720x480" range="256-564" />
+<Limit name="measured-frame-rate-1280x720" range="134-295" />
+<Limit name="measured-frame-rate-1920x1080" range="67-148" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="387-852" />
+<Limit name="measured-frame-rate-720x480" range="256-564" />
+<Limit name="measured-frame-rate-1280x720" range="133-293" />
+<Limit name="measured-frame-rate-1920x1080" range="64-141" />
+<Limit name="measured-frame-rate-3840x2160" range="17-38" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder.cq" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="372-819" />
+</MediaCodec>
+<MediaCodec name="c2.android.avc.encoder" type="video/avc" update="true">
+<Limit name="measured-frame-rate-320x240" range="216-476" /> <!-- SHOULDN'T HAVE TWEAKED N=266 v90%=3.2 -->
+<Limit name="measured-frame-rate-720x480" range="76-168" /> <!-- N=262 -->
+<Limit name="measured-frame-rate-1280x720" range="48-106" /> <!-- TWEAKED N=236 -->
+<Limit name="measured-frame-rate-1920x1080" range="26-58" /> <!-- N=288 v98%=2.0 -->
+</MediaCodec>
+<MediaCodec name="c2.android.vp8.encoder" type="video/x-vnd.on2.vp8" update="true">
+<Limit name="measured-frame-rate-320x180" range="189-416" /> <!-- SHOULDN'T HAVE TWEAKED N=214 -->
+<Limit name="measured-frame-rate-640x360" range="98-216" /> <!-- N=220 -->
+<Limit name="measured-frame-rate-1280x720" range="26-58" /> <!-- N=202 v98%=2.0 -->
+<Limit name="measured-frame-rate-1920x1080" range="20-44" /> <!-- N=212 v98%=1.5 -->
+</MediaCodec>
+<MediaCodec name="c2.android.vp9.encoder" type="video/x-vnd.on2.vp9" update="true">
+<Limit name="measured-frame-rate-320x180" range="116-260" /> <!-- v93%=1.3 -->
+<Limit name="measured-frame-rate-640x360" range="35-75" /> <!-- v95%=1.1 -->
+<Limit name="measured-frame-rate-1280x720" range="20-44" /> <!-- v95%=1.3 -->
+</MediaCodec>
+<MediaCodec name="c2.android.hevc.encoder" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="26-58" />
+<Limit name="measured-frame-rate-720x480" range="8-15" />
+</MediaCodec>
+<MediaCodec name="c2.android.av1.encoder" type="video/av01" update="true">
+<Limit name="measured-frame-rate-320x240" range="175-390" />
+<Limit name="measured-frame-rate-720x480" range="60-130" />
+<Limit name="measured-frame-rate-1280x720" range="20-35" />
+</MediaCodec>
+-- /vendor/etc/media_codecs_performance_diwali_v0.xml
+<MediaCodec name="c2.qti.avc.encoder" type="video/avc" update="true">
+<Limit name="measured-frame-rate-320x240" range="200-600" />
+<Limit name="measured-frame-rate-720x480" range="110-240" />
+<Limit name="measured-frame-rate-1280x720" range="65-150" />
+<Limit name="measured-frame-rate-1920x1080" range="35-80" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="51-726" />
+<Limit name="measured-frame-rate-720x480" range="165-210" />
+<Limit name="measured-frame-rate-1280x720" range="133-184" />
+<Limit name="measured-frame-rate-1920x1080" range="84-131" />
+<Limit name="measured-frame-rate-3840x2160" range="31-44" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder.cq" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="388-897" />
+</MediaCodec>
+<MediaCodec name="c2.android.avc.encoder" type="video/avc" update="true">
+<Limit name="measured-frame-rate-320x240" range="140-980" /> <!-- SHOULDN'T HAVE TWEAKED N=266 v90%=3.2 -->
+<Limit name="measured-frame-rate-720x480" range="47-90" /> <!-- N=262 -->
+<Limit name="measured-frame-rate-1280x720" range="30-200" /> <!-- TWEAKED N=236 -->
+<Limit name="measured-frame-rate-1920x1080" range="20-80" /> <!-- N=288 v98%=2.0 -->
+</MediaCodec>
+<MediaCodec name="c2.android.vp8.encoder" type="video/x-vnd.on2.vp8" update="true">
+<Limit name="measured-frame-rate-320x180" range="299-429" /> <!-- SHOULDN'T HAVE TWEAKED N=214 -->
+<Limit name="measured-frame-rate-640x360" range="75-350" /> <!-- N=220 -->
+<Limit name="measured-frame-rate-1280x720" range="24-85" /> <!-- N=202 v98%=2.0 -->
+<Limit name="measured-frame-rate-1920x1080" range="10-115" /> <!-- N=212 v98%=1.5 -->
+</MediaCodec>
+<MediaCodec name="c2.android.vp9.encoder" type="video/x-vnd.on2.vp9" update="true">
+<Limit name="measured-frame-rate-320x180" range="116-260" /> <!-- v93%=1.3 -->
+<Limit name="measured-frame-rate-640x360" range="35-75" /> <!-- v95%=1.1 -->
+<Limit name="measured-frame-rate-1280x720" range="20-20" /> <!-- v95%=1.3 -->
+</MediaCodec>
+<MediaCodec name="c2.android.hevc.encoder" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="38-47" />
+<Limit name="measured-frame-rate-720x480" range="8-15" />
+</MediaCodec>
+<MediaCodec name="c2.android.av1.encoder" type="video/av01" update="true">
+<Limit name="measured-frame-rate-320x240" range="175-390" />
+<Limit name="measured-frame-rate-720x480" range="60-130" />
+<Limit name="measured-frame-rate-1280x720" range="20-35" />
+</MediaCodec>
+-- /vendor/etc/media_codecs_performance_diwali_v1.xml
+<MediaCodec name="c2.qti.avc.encoder" type="video/avc" update="true">
+<Limit name="measured-frame-rate-320x240" range="200-600" />
+<Limit name="measured-frame-rate-720x480" range="110-240" />
+<Limit name="measured-frame-rate-1280x720" range="65-150" />
+<Limit name="measured-frame-rate-1920x1080" range="35-80" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="51-726" />
+<Limit name="measured-frame-rate-720x480" range="165-210" />
+<Limit name="measured-frame-rate-1280x720" range="133-184" />
+<Limit name="measured-frame-rate-1920x1080" range="84-131" />
+<Limit name="measured-frame-rate-3840x2160" range="31-44" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder.cq" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="388-897" />
+</MediaCodec>
+<MediaCodec name="c2.android.avc.encoder" type="video/avc" update="true">
+<Limit name="measured-frame-rate-320x240" range="140-980" /> <!-- SHOULDN'T HAVE TWEAKED N=266 v90%=3.2 -->
+<Limit name="measured-frame-rate-720x480" range="47-90" /> <!-- N=262 -->
+<Limit name="measured-frame-rate-1280x720" range="30-200" /> <!-- TWEAKED N=236 -->
+<Limit name="measured-frame-rate-1920x1080" range="20-80" /> <!-- N=288 v98%=2.0 -->
+</MediaCodec>
+<MediaCodec name="c2.android.vp8.encoder" type="video/x-vnd.on2.vp8" update="true">
+<Limit name="measured-frame-rate-320x180" range="299-429" /> <!-- SHOULDN'T HAVE TWEAKED N=214 -->
+<Limit name="measured-frame-rate-640x360" range="75-350" /> <!-- N=220 -->
+<Limit name="measured-frame-rate-1280x720" range="24-85" /> <!-- N=202 v98%=2.0 -->
+<Limit name="measured-frame-rate-1920x1080" range="10-115" /> <!-- N=212 v98%=1.5 -->
+</MediaCodec>
+<MediaCodec name="c2.android.vp9.encoder" type="video/x-vnd.on2.vp9" update="true">
+<Limit name="measured-frame-rate-320x180" range="116-260" /> <!-- v93%=1.3 -->
+<Limit name="measured-frame-rate-640x360" range="35-75" /> <!-- v95%=1.1 -->
+<Limit name="measured-frame-rate-1280x720" range="20-20" /> <!-- v95%=1.3 -->
+</MediaCodec>
+<MediaCodec name="c2.android.hevc.encoder" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="38-47" />
+<Limit name="measured-frame-rate-720x480" range="8-15" />
+</MediaCodec>
+<MediaCodec name="c2.android.av1.encoder" type="video/av01" update="true">
+<Limit name="measured-frame-rate-320x240" range="175-390" />
+<Limit name="measured-frame-rate-720x480" range="60-130" />
+<Limit name="measured-frame-rate-1280x720" range="20-35" />
+</MediaCodec>
+-- /vendor/etc/media_codecs_performance_diwali_v2.xml
+<MediaCodec name="c2.qti.avc.encoder" type="video/avc" update="true">
+<Limit name="measured-frame-rate-320x240" range="200-600" />
+<Limit name="measured-frame-rate-720x480" range="110-240" />
+<Limit name="measured-frame-rate-1280x720" range="65-150" />
+<Limit name="measured-frame-rate-1920x1080" range="35-80" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="51-726" />
+<Limit name="measured-frame-rate-720x480" range="165-210" />
+<Limit name="measured-frame-rate-1280x720" range="133-184" />
+<Limit name="measured-frame-rate-1920x1080" range="84-131" />
+<Limit name="measured-frame-rate-3840x2160" range="31-44" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder.cq" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="388-897" />
+</MediaCodec>
+<MediaCodec name="c2.android.avc.encoder" type="video/avc" update="true">
+<Limit name="measured-frame-rate-320x240" range="140-980" /> <!-- SHOULDN'T HAVE TWEAKED N=266 v90%=3.2 -->
+<Limit name="measured-frame-rate-720x480" range="47-90" /> <!-- N=262 -->
+<Limit name="measured-frame-rate-1280x720" range="30-200" /> <!-- TWEAKED N=236 -->
+<Limit name="measured-frame-rate-1920x1080" range="20-80" /> <!-- N=288 v98%=2.0 -->
+</MediaCodec>
+<MediaCodec name="c2.android.vp8.encoder" type="video/x-vnd.on2.vp8" update="true">
+<Limit name="measured-frame-rate-320x180" range="299-429" /> <!-- SHOULDN'T HAVE TWEAKED N=214 -->
+<Limit name="measured-frame-rate-640x360" range="75-350" /> <!-- N=220 -->
+<Limit name="measured-frame-rate-1280x720" range="24-85" /> <!-- N=202 v98%=2.0 -->
+<Limit name="measured-frame-rate-1920x1080" range="10-115" /> <!-- N=212 v98%=1.5 -->
+</MediaCodec>
+<MediaCodec name="c2.android.vp9.encoder" type="video/x-vnd.on2.vp9" update="true">
+<Limit name="measured-frame-rate-320x180" range="116-260" /> <!-- v93%=1.3 -->
+<Limit name="measured-frame-rate-640x360" range="35-75" /> <!-- v95%=1.1 -->
+<Limit name="measured-frame-rate-1280x720" range="20-20" /> <!-- v95%=1.3 -->
+</MediaCodec>
+<MediaCodec name="c2.android.hevc.encoder" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="38-47" />
+<Limit name="measured-frame-rate-720x480" range="8-15" />
+</MediaCodec>
+<MediaCodec name="c2.android.av1.encoder" type="video/av01" update="true">
+<Limit name="measured-frame-rate-320x240" range="175-390" />
+<Limit name="measured-frame-rate-720x480" range="60-130" />
+<Limit name="measured-frame-rate-1280x720" range="20-35" />
+</MediaCodec>
+-- /vendor/etc/media_codecs_performance_taro.xml
+<MediaCodec name="c2.qti.avc.encoder" type="video/avc" update="true">
+<Limit name="measured-frame-rate-320x240" range="240-530" />
+<Limit name="measured-frame-rate-720x480" range="109-240" />
+<Limit name="measured-frame-rate-1280x720" range="70-320" />
+<Limit name="measured-frame-rate-1920x1080" range="44-73" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="103-717" />
+<Limit name="measured-frame-rate-720x480" range="165-363" />
+<Limit name="measured-frame-rate-1280x720" range="133-292" />
+<Limit name="measured-frame-rate-1920x1080" range="84-184" />
+<Limit name="measured-frame-rate-3840x2160" range="31-68" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder.cq" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="340-748" />
+</MediaCodec>
+<MediaCodec name="c2.android.avc.encoder" type="video/avc" update="true">
+<Limit name="measured-frame-rate-320x240" range="300-670" /> <!-- SHOULDN'T HAVE TWEAKED N=266 v90%=3.2 -->
+<Limit name="measured-frame-rate-720x480" range="100-240" /> <!-- N=262 -->
+<Limit name="measured-frame-rate-1280x720" range="45-200" /> <!-- TWEAKED N=236 -->
+<Limit name="measured-frame-rate-1920x1080" range="40-80" /> <!-- N=288 v98%=2.0 -->
+</MediaCodec>
+<MediaCodec name="c2.android.vp8.encoder" type="video/x-vnd.on2.vp8" update="true">
+<Limit name="measured-frame-rate-320x180" range="180-400" /> <!-- SHOULDN'T HAVE TWEAKED N=214 -->
+<Limit name="measured-frame-rate-640x360" range="100-220" /> <!-- N=220 -->
+<Limit name="measured-frame-rate-1280x720" range="30-60" /> <!-- N=202 v98%=2.0 -->
+<Limit name="measured-frame-rate-1920x1080" range="20-30" /> <!-- N=212 v98%=1.5 -->
+</MediaCodec>
+<MediaCodec name="c2.android.vp9.encoder" type="video/x-vnd.on2.vp9" update="true">
+<Limit name="measured-frame-rate-320x180" range="170-390" /> <!-- v93%=1.3 -->
+<Limit name="measured-frame-rate-640x360" range="50-110" /> <!-- v95%=1.1 -->
+<Limit name="measured-frame-rate-1280x720" range="20-30" /> <!-- v95%=1.3 -->
+</MediaCodec>
+<MediaCodec name="c2.android.hevc.encoder" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="30-50" />
+<Limit name="measured-frame-rate-720x480" range="8-15" />
+</MediaCodec>
+<MediaCodec name="c2.android.av1.encoder" type="video/av01" update="true">
+<Limit name="measured-frame-rate-320x240" range="175-390" />
+<Limit name="measured-frame-rate-720x480" range="60-130" />
+<Limit name="measured-frame-rate-1280x720" range="20-35" />
+</MediaCodec>
+-- /vendor/etc/media_codecs_performance_ukee.xml
+<MediaCodec name="c2.qti.avc.encoder" type="video/avc" update="true">
+<Limit name="measured-frame-rate-320x240" range="289-636" />
+<Limit name="measured-frame-rate-720x480" range="216-476" />
+<Limit name="measured-frame-rate-1280x720" range="111-245" />
+<Limit name="measured-frame-rate-1920x1080" range="52-115" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="315-693" />
+<Limit name="measured-frame-rate-720x480" range="264-581" />
+<Limit name="measured-frame-rate-1280x720" range="136-300" />
+<Limit name="measured-frame-rate-1920x1080" range="54-119" />
+<Limit name="measured-frame-rate-3840x2160" range="16-36" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder.cq" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="399-878" />
+</MediaCodec>
+<MediaCodec name="c2.android.avc.encoder" type="video/avc" update="true">
+<Limit name="measured-frame-rate-320x240" range="210-463" /> <!-- SHOULDN'T HAVE TWEAKED N=266 v90%=3.2 -->
+<Limit name="measured-frame-rate-720x480" range="73-161" /> <!-- N=262 -->
+<Limit name="measured-frame-rate-1280x720" range="48-106" /> <!-- TWEAKED N=236 -->
+<Limit name="measured-frame-rate-1920x1080" range="25-56" /> <!-- N=288 v98%=2.0 -->
+</MediaCodec>
+<MediaCodec name="c2.android.vp8.encoder" type="video/x-vnd.on2.vp8" update="true">
+<Limit name="measured-frame-rate-320x180" range="217-478" /> <!-- SHOULDN'T HAVE TWEAKED N=214 -->
+<Limit name="measured-frame-rate-640x360" range="112-247" /> <!-- N=220 -->
+<Limit name="measured-frame-rate-1280x720" range="28-62" /> <!-- N=202 v98%=2.0 -->
+<Limit name="measured-frame-rate-1920x1080" range="19-42" /> <!-- N=212 v98%=1.5 -->
+</MediaCodec>
+<MediaCodec name="c2.android.vp9.encoder" type="video/x-vnd.on2.vp9" update="true">
+<Limit name="measured-frame-rate-320x180" range="116-260" /> <!-- v93%=1.3 -->
+<Limit name="measured-frame-rate-640x360" range="35-75" /> <!-- v95%=1.1 -->
+<Limit name="measured-frame-rate-1280x720" range="20-20" /> <!-- v95%=1.3 -->
+</MediaCodec>
+<MediaCodec name="c2.android.hevc.encoder" type="video/hevc" update="true">
+<Limit name="measured-frame-rate-320x240" range="30-66" />
+<Limit name="measured-frame-rate-720x480" range="8-15" />
+</MediaCodec>
+<MediaCodec name="c2.android.av1.encoder" type="video/av01" update="true">
+<Limit name="measured-frame-rate-320x240" range="175-390" />
+<Limit name="measured-frame-rate-720x480" range="60-130" />
+<Limit name="measured-frame-rate-1280x720" range="20-35" />
+</MediaCodec>
+-- /vendor/etc/media_codecs_taro.xml
+<MediaCodec name="c2.qti.avc.encoder" type="video/avc">
+<Alias name="OMX.qcom.video.encoder.avc"/>
+<Limit name="size" min="128x128" max="4096x2176" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="1958400" />
+<Limit name="block-count" range="64-34816" />
+<Limit name="bitrate" range="1-100000000" />
+<Limit name="frame-rate" range="1-480" />
+<Limit name="complexity" range="0-100"  default="100" />
+<Limit name="concurrent-instances" max="16" />
+<Feature name="bitrate-modes" value="VBR,CBR" />
+<Feature name="intra-refresh" />
+<Feature name="video-minimum-quality" />
+<Limit name="performance-point-4096x2304" value="30" />
+<Limit name="performance-point-3840x2160" value="60" />
+<Limit name="performance-point-1920x1080" value="240" />
+<Limit name="performance-point-1280x720" value="480" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder" type="video/hevc">
+<Alias name="OMX.qcom.video.encoder.hevc"/>
+<Limit name="size" min="128x128" max="4096x2176" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="1958400" />
+<Limit name="block-count" range="64-34816" />
+<Limit name="bitrate" range="1-100000000" />
+<Limit name="frame-rate" range="1-480" />
+<Limit name="complexity" range="0-100"  default="100" />
+<Limit name="concurrent-instances" max="16" />
+<Feature name="bitrate-modes" value="VBR,CBR" />
+<Feature name="intra-refresh" />
+<Feature name="video-minimum-quality" />
+<Limit name="performance-point-4096x2304" value="30" />
+<Limit name="performance-point-3840x2160" value="60" />
+<Limit name="performance-point-1920x1080" value="240" />
+<Limit name="performance-point-1280x720" value="480" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder.cq" type="video/hevc">
+<Alias name="OMX.qcom.video.encoder.hevc.cq"/>
+<Limit name="size" min="128x128" max="512x512" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="20480" />
+<Limit name="bitrate" range="1-160000000" />
+<Limit name="frame-rate" range="1-20" />
+<Limit name="concurrent-instances" max="16" />
+<Limit name="quality" range="0-100" default="80" />
+<Feature name="bitrate-modes" value="CQ" />
+<Limit name="performance-point-512x512" value="2025" />
+</MediaCodec>
+-- /vendor/etc/media_codecs_ukee.xml
+<MediaCodec name="c2.qti.avc.encoder" type="video/avc">
+<Alias name="OMX.qcom.video.encoder.avc"/>
+<Limit name="size" min="128x128" max="4096x2176" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="2088960" />
+<Limit name="block-count" range="64-34816" />
+<Limit name="bitrate" range="1-100000000" />
+<Limit name="frame-rate" range="1-480" />
+<Limit name="complexity" range="0-100"  default="100" />
+<Limit name="concurrent-instances" max="16" />
+<Feature name="bitrate-modes" value="VBR,CBR" />
+<Feature name="intra-refresh" />
+<Feature name="video-minimum-quality" />
+<Feature name="can-swap-width-height" required="true" />
+<Limit name="performance-point-4096x2176" value="30" />
+<Limit name="performance-point-3840x2160" value="60" />
+<Limit name="performance-point-1920x1080" value="240" />
+<Limit name="performance-point-1280x720" value="480" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder" type="video/hevc">
+<Alias name="OMX.qcom.video.encoder.hevc"/>
+<Limit name="size" min="128x128" max="4096x2176" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="2088960" />
+<Limit name="block-count" range="64-34816" />
+<Limit name="bitrate" range="1-100000000" />
+<Limit name="frame-rate" range="1-480" />
+<Limit name="complexity" range="0-100"  default="100" />
+<Limit name="concurrent-instances" max="16" />
+<Feature name="bitrate-modes" value="VBR,CBR" />
+<Feature name="intra-refresh" />
+<Feature name="video-minimum-quality" />
+<Feature name="can-swap-width-height" required="true" />
+<Limit name="performance-point-4096x2176" value="30" />
+<Limit name="performance-point-3840x2160" value="60" />
+<Limit name="performance-point-1920x1080" value="240" />
+<Limit name="performance-point-1280x720" value="480" />
+</MediaCodec>
+<MediaCodec name="c2.qti.hevc.encoder.cq" type="video/hevc">
+<Alias name="OMX.qcom.video.encoder.hevc.cq"/>
+<Limit name="size" min="128x128" max="512x512" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Limit name="blocks-per-second" min="64" max="20480" />
+<Limit name="bitrate" range="1-100000000" />
+<Limit name="frame-rate" range="1-20" />
+<Limit name="concurrent-instances" max="16" />
+<Limit name="quality" range="0-100" default="80" />
+<Feature name="bitrate-modes" value="CQ" />
+<Limit name="performance-point-512x512" value="2025" />
+</MediaCodec>
+-- /apex/com.android.media.swcodec/etc/media_codecs.xml
+<MediaCodec name="c2.android.avc.encoder" type="video/avc" variant="slow-cpu,!slow-cpu">
+<Alias name="OMX.google.h264.encoder" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="16x16" />
+<Variant name="!slow-cpu">
+<Limit name="size" min="16x16" max="2048x2048" />
+<Limit name="block-count" range="1-8192" /> <!-- max 2048x1024 -->
+<Limit name="blocks-per-second" range="1-245760" />
+<Limit name="bitrate" range="1-12000000" />
+</Variant>
+<Variant name="slow-cpu">
+<Limit name="size" min="16x16" max="1808x1808" />
+<Limit name="block-count" range="1-1620" />
+<Limit name="blocks-per-second" range="1-40500" />
+<Limit name="bitrate" range="1-10000000" />
+</Variant>
+<Feature name="intra-refresh" />
+<Feature name="qp-bounds" />
+<Feature name="bitrate-modes" value="VBR,CBR" />
+<Attribute name="software-codec" />
+</MediaCodec>
+<MediaCodec name="c2.android.vp8.encoder" type="video/x-vnd.on2.vp8" variant="slow-cpu,!slow-cpu">
+<Alias name="OMX.google.vp8.encoder" />
+<Limit name="alignment" value="1x1" />
+<Limit name="block-size" value="16x16" />
+<Variant name="!slow-cpu">
+<Limit name="size" min="2x2" max="2048x2048" />
+<Limit name="block-count" range="1-16384" />
+<Limit name="bitrate" range="1-40000000" />
+</Variant>
+<Variant name="slow-cpu">
+<Limit name="size" min="2x2" max="1280x1280" />
+<Limit name="block-count" range="1-3600" /> <!-- max 1280x720 -->
+<Limit name="bitrate" range="1-20000000" />
+</Variant>
+<Feature name="bitrate-modes" value="VBR,CBR" />
+<Feature name="qp-bounds" />
+<Attribute name="software-codec" />
+</MediaCodec>
+<MediaCodec name="c2.android.hevc.encoder" type="video/hevc" variant="!slow-cpu">
+<Limit name="size" min="2x2" max="512x512" />
+<Limit name="alignment" value="2x2" />
+<Limit name="block-size" value="8x8" />
+<Limit name="block-count" range="1-4096" /> <!-- max 512x512 -->
+<Limit name="blocks-per-second" range="1-259200" />
+<Limit name="frame-rate" range="1-300" />
+<Limit name="bitrate" range="1-10000000" />
+<Limit name="complexity" range="0-10"  default="0" />
+<Limit name="quality" range="0-100"  default="80" />
+<Feature name="bitrate-modes" value="VBR,CBR,CQ" />
+<Feature name="qp-bounds" />
+<Attribute name="software-codec" />
+</MediaCodec>
+<MediaCodec name="c2.android.vp9.encoder" type="video/x-vnd.on2.vp9" variant="!slow-cpu">
+<Alias name="OMX.google.vp9.encoder" />
+<Limit name="size" min="2x2" max="2048x2048" />
+<Limit name="alignment" value="1x1" />
+<Limit name="block-size" value="16x16" />
+<Limit name="block-count" range="1-3600" /> <!-- max 1280x720 -->
+<Limit name="bitrate" range="1-40000000" />
+<Feature name="bitrate-modes" value="VBR,CBR" />
+<Feature name="qp-bounds" />
+<Attribute name="software-codec" />
+</MediaCodec>
+<MediaCodec name="c2.android.av1.encoder" type="video/av01" enabled="false" minsdk="34" variant="slow-cpu,!slow-cpu">
+<Limit name="alignment" value="1x1" />
+<Limit name="block-size" value="16x16" />
+<Variant name="!slow-cpu">
+<Limit name="size" min="2x2" max="1920x1920" />
+<Limit name="block-count" range="1-8100" /> <!-- max 1920x1080 -->
+<Limit name="bitrate" range="1-20000000" />
+</Variant>
+<Variant name="slow-cpu">
+<Limit name="size" min="2x2" max="720x720" />
+<Limit name="block-count" range="1-1350" /> <!-- max 720x480 -->
+<Limit name="bitrate" range="1-5000000" />
+</Variant>
+<Limit name="quality" range="0-100"  default="80" />
+<Limit name="complexity" range="0-5"  default="0" />
+<Feature name="bitrate-modes" value="VBR,CBR,CQ" />
+<Feature name="qp-bounds" />
+<Attribute name="software-codec" />
+</MediaCodec>
+
+file con intra-refresh:  /vendor/etc/media_codecs_cape.xml /vendor/etc/media_codecs_diwali_v0.xml /vendor/etc/media_codecs_diwali_v1.xml /vendor/etc/media_codecs_diwali_v2.xml /vendor/etc/media_codecs_taro.xml /vendor/etc/media_codecs_ukee.xml /apex/com.android.media.swcodec/etc/media_codecs.xml 
+file con low-latency:    /vendor/etc/media_codecs_cape.xml /vendor/etc/media_codecs_diwali_v0.xml /vendor/etc/media_codecs_diwali_v1.xml /vendor/etc/media_codecs_diwali_v2.xml /vendor/etc/media_codecs_taro.xml /vendor/etc/media_codecs_ukee.xml /apex/com.android.media.swcodec/etc/media_codecs.xml 
+Codec2 vendor (servizi): vendor.qti.media.c2@1.0-service vendor.qti.media.c2audio@1.0-service 
+
+=== Prova di cattura con screenrecord (5 s, encoder hardware) ===
+--bit-rate RATE
+--time-limit TIME
+--display-id ID
+    see "dumpsys SurfaceFlinger --display-id" for valid display IDs.
+Time limit set to 5 seconds
+Display is 1080x2400 @120.00fps (orientation=ROTATION_0), layerStack=0
+Configuring recorder for 1080x2400 video/avc at 20.00Mbps
+Content area is 1080x2400 at offset x=0 y=0
+Time limit reached
+Encoder stopping; recorded 2 frames in 5 seconds
+Stopping encoder and muxer
+Executing: /system/bin/am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file:///data/adb/phantom-f0/cap.h264
+cmd: Failure calling service activity: Failed transaction (2147483646)
+codice di uscita 0, durata 5 s, byte catturati 29440
+
+=== Temperatura e batteria ===
+IsStatusOverride: false
+Thermal Status: 0
+	Temperature{mValue=34.3, mType=2, mName=battery, mStatus=0}
+	Temperature{mValue=58.7, mType=0, mName=CPU0, mStatus=0}
+	Temperature{mValue=61.8, mType=0, mName=CPU1, mStatus=0}
+	Temperature{mValue=62.1, mType=0, mName=CPU2, mStatus=0}
+	Temperature{mValue=68.3, mType=0, mName=CPU3, mStatus=0}
+	Temperature{mValue=69.3, mType=0, mName=CPU4, mStatus=0}
+  AC powered: false
+  USB powered: false
+  status: 3
+  health: 2
+  level: 53
+  temperature: 339
+  Capacity level: -1
+
+=== Doze e risparmio energetico ===
+  mLightEnabled=true  mDeepEnabled=true
+  mForceIdle=true
+  mScreenOn=true
+  mCharging=false
+  mState=IDLE_PENDING mLightState=IDLE
+risparmio energetico: 0
+Wi-Fi in sospensione: 2
+
+=== Rete ===
+lo 127.0.0.1
+wlan0 192.168.1.118
+Wi-Fi standard: 11ax
+RSSI: -61
+Link speed: 720Mbps
+Tx Link speed: 720Mbps
+Max Supported Tx Link speed: 1200Mbps
+Rx Link speed: 864Mbps
+Rx Link speed: 1200Mbps
+Frequency: 5180MHz
+Tailscale installato: 0
+
+=== Sonda Phantom ===
+Sonda: ATTIVA (PID 2412)
+Video di base: spento · avvio automatico: sì
+Indirizzi del telefono:
+  wlan0: 192.168.1.118
+Dall'iPhone (Safari):  http://192.168.1.118:47801
+Dal PC:                python f0_client.py ping 192.168.1.118
+Ultime righe del log:
+2026-11-01T10:01:03Z avvio: phantom-probe 0.1.0, udp 47800, http 47801, video spento, sospensione finora 0 ms
