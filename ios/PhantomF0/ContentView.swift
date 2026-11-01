@@ -63,6 +63,17 @@ struct ContentView: View {
                     }
                 }
 
+                Section("Video dal vivo") {
+                    NavigationLink {
+                        VideoScreen(host: host)
+                    } label: {
+                        Label("Guarda lo schermo del POCO", systemImage: "play.rectangle")
+                    }
+                    Text("Prima accendi il video nella WebUI del modulo sul POCO. Mostra lo schermo di Android dal vivo, con frame rate e banda.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section {
                     Text("Ogni 10 ms l'iPhone manda un pacchetto UDP alla sonda sul POCO, che lo rimanda indietro. Prova con e senza priorità voce, vicino e lontano dall'access point. Per test più puliti disattiva AirDrop (Ricezione disattivata).")
                         .font(.footnote)
