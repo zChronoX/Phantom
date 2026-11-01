@@ -3,3 +3,6 @@ dist/
 android/probe/webpage.h
 __pycache__/
 *.h264
+ios/build/
+ios/*.xcodeproj/
+ios/PhantomF0/Info.plist

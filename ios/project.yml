@@ -1,0 +1,38 @@
+# Progetto Xcode generato con XcodeGen (`xcodegen generate`), così non si modifica mai
+# un .xcodeproj a mano e la build in cloud (Codemagic) è riproducibile. Vedi ADR-003.
+name: PhantomF0
+options:
+  bundleIdPrefix: app.phantom
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+targets:
+  PhantomF0:
+    type: application
+    platform: iOS
+    sources:
+      - path: PhantomF0
+        excludes:
+          - Info.plist
+    scheme: {}
+    info:
+      path: PhantomF0/Info.plist
+      properties:
+        CFBundleDisplayName: Phantom F0
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        # Senza questa voce iOS blocca le connessioni verso la rete di casa.
+        NSLocalNetworkUsageDescription: Phantom si collega al tuo telefono Android sulla rete di casa per misurare la latenza.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.phantom.f0
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""

@@ -1,0 +1,44 @@
+# Sonda e modulo della fase 0: compilati su Linux (gratuito) a ogni modifica.
+# Il pacchetto phantom-f0.zip si scarica dalla pagina dell'esecuzione, sezione Artifacts.
+name: Android · Phantom F0
+
+on:
+  push:
+    branches: [main]
+    paths: ["android/**", "tools/**", ".github/workflows/android-f0.yml"]
+  pull_request:
+    paths: ["android/**", "tools/**"]
+  workflow_dispatch:
+
+jobs:
+  module:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Strumenti (zig, shellcheck)
+        run: pip install --quiet ziglang shellcheck-py
+
+      - name: Controllo degli script
+        run: |
+          cd android/module
+          shellcheck -s sh -e SC1090,SC1091 bin/phantomctl bin/phantom-report.sh service.sh action.sh uninstall.sh customize.sh
+
+      - name: Compila sonda e modulo
+        run: android/module/build.sh
+
+      - name: Prova della sonda (x86_64)
+        run: |
+          P=android/probe/build/phantom-probe-x86_64
+          printf '#!/bin/sh\necho test\n' > /tmp/getprop && chmod +x /tmp/getprop
+          $P --log /tmp/probe.log --pidfile /tmp/probe.pid --daemon --getprop /tmp/getprop
+          sleep 0.5
+          python3 tools/f0_client.py status 127.0.0.1
+          python3 tools/f0_client.py ping 127.0.0.1 --seconds 2 --interval 5
+          kill "$(cat /tmp/probe.pid)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phantom-f0
+          path: dist/phantom-f0.zip

@@ -1,0 +1,28 @@
+# Codemagic: build iOS su Mac M2 in cloud (500 minuti gratuiti al mese per account personali).
+# Produce un .ipa NON firmato da installare con Sideloadly e un Apple ID gratuito (vedi ADR-003).
+# Android, core e sonda si compilano invece su GitHub Actions, gratis su Linux.
+workflows:
+  ios-f0:
+    name: iOS · Phantom F0 (non firmata)
+    instance_type: mac_mini_m2
+    max_build_duration: 20
+    environment:
+      xcode: latest
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+      cancel_previous_builds: true
+    when:
+      changeset:
+        includes:
+          - "ios/"
+          - "codemagic.yaml"
+    scripts:
+      - name: Compila e crea l'IPA
+        script: ./ios/build-ipa.sh
+    artifacts:
+      - ios/build/*.ipa
+      - ios/build/xcodebuild.log
