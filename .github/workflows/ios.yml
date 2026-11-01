@@ -14,6 +14,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Test del parser scrcpy
+        run: ./ios/Tests/run-tests.sh
+
       - name: Compila e crea l'IPA
         env:
           BUILD_NUMBER: ${{ github.run_number }}

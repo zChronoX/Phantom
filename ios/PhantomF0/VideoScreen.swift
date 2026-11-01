@@ -21,7 +21,7 @@ final class SampleLayerView: UIView {
 }
 
 struct VideoLayer: UIViewRepresentable {
-    let client: VideoClient
+    let client: VideoSource
     func makeUIView(context: Context) -> SampleLayerView {
         let view = SampleLayerView()
         client.onSample = { [weak view] sb in
@@ -33,12 +33,17 @@ struct VideoLayer: UIViewRepresentable {
 }
 
 /// Tiene insieme il client video e lo stato osservabile dall'interfaccia.
-final class VideoModel: ObservableObject {
-    @Published var stats = VideoClient.Stats()
-    @Published var status = "Pronto"
-    let client = VideoClient()
+enum VideoMode: String {
+    case scrcpy, basic
+}
 
-    init() {
+final class VideoModel: ObservableObject {
+    @Published var stats = VideoStats()
+    @Published var status = "Pronto"
+    let client: VideoSource
+
+    init(mode: VideoMode) {
+        client = mode == .scrcpy ? ScrcpyClient() : VideoClient()
         client.onStats = { [weak self] s in self?.stats = s }
         client.onStatus = { [weak self] t in self?.status = t }
     }
@@ -49,7 +54,13 @@ final class VideoModel: ObservableObject {
 
 struct VideoScreen: View {
     let host: String
-    @StateObject private var model = VideoModel()
+    let mode: VideoMode
+    @StateObject private var model: VideoModel
+    init(host: String, mode: VideoMode) {
+        self.host = host
+        self.mode = mode
+        _model = StateObject(wrappedValue: VideoModel(mode: mode))
+    }
     @Environment(\.dismiss) private var dismiss
     @State private var showOverlay = true
 
@@ -98,6 +109,13 @@ struct VideoScreen: View {
                         stat("Frame", "\(model.stats.frames)")
                         stat("Intervallo medio", String(format: "%.1f ms", model.stats.meanGapMs))
                         stat("Pausa max", String(format: "%.0f ms", model.stats.maxGapMs))
+                    }
+                    if mode == .scrcpy {
+                        GridRow {
+                            stat("Codec", model.stats.codec)
+                            stat("Ritardo extra p50", String(format: "%.1f ms", model.stats.excessP50Ms))
+                            stat("Ritardo extra p95", String(format: "%.1f ms", model.stats.excessP95Ms))
+                        }
                     }
                 }
             }

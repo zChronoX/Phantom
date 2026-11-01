@@ -4,26 +4,40 @@ import CoreMedia
 import VideoToolbox
 import QuartzCore
 
+/// Statistiche mostrate in sovrimpressione, uguali per le due sorgenti video.
+struct VideoStats {
+    var connected = false
+    var fps = 0.0
+    var kbps = 0.0
+    var frames = 0
+    var width = 0
+    var height = 0
+    var meanGapMs = 0.0
+    var maxGapMs = 0.0
+    var codec = ""
+    /// Ritardo di arrivo oltre il migliore osservato nelle ultime centinaia di frame (ms).
+    /// Non è la latenza totale: misura solo quanto i frame si accumulano o arrivano a scatti.
+    var excessP50Ms = 0.0
+    var excessP95Ms = 0.0
+}
+
+protocol VideoSource: AnyObject {
+    var onSample: ((CMSampleBuffer) -> Void)? { get set }
+    var onStats: ((VideoStats) -> Void)? { get set }
+    var onStatus: ((String) -> Void)? { get set }
+    func start(host: String)
+    func stop()
+}
+
 /// Riceve il flusso H.264 (Annex-B) dalla sonda sul POCO (TCP 47802), lo spezza in
 /// unità NAL e ne costruisce dei CMSampleBuffer pronti per la decodifica hardware.
 ///
 /// È la linea di base della fase 0: il video arriva da `screenrecord`, non ancora
 /// dalla pipeline ottimizzata di Phantom. Serve a vedere lo schermo dal vivo sull'iPhone
 /// e a misurare frame rate, banda e regolarità dei frame col vero percorso di decodifica.
-final class VideoClient {
-    struct Stats {
-        var connected = false
-        var fps = 0.0
-        var kbps = 0.0
-        var frames = 0
-        var width = 0
-        var height = 0
-        var meanGapMs = 0.0
-        var maxGapMs = 0.0
-    }
-
+final class VideoClient: VideoSource {
     var onSample: ((CMSampleBuffer) -> Void)?
-    var onStats: ((Stats) -> Void)?
+    var onStats: ((VideoStats) -> Void)?
     var onStatus: ((String) -> Void)?
 
     private let queue = DispatchQueue(label: "app.phantom.f0.video", qos: .userInteractive)
@@ -34,7 +48,7 @@ final class VideoClient {
     private var pps: Data?
     private var formatDesc: CMVideoFormatDescription?
 
-    private var stats = Stats()
+    private var stats = VideoStats()
     private var windowStart = CACurrentMediaTime()
     private var bytesInWindow = 0
     private var framesInWindow = 0
@@ -43,7 +57,9 @@ final class VideoClient {
 
     // MARK: - Ciclo di vita
 
-    func start(host: String, port: UInt16 = 47802) {
+    func start(host: String) { connect(host: host, port: 47802) }
+
+    private func connect(host: String, port: UInt16) {
         let h = host.trimmingCharacters(in: .whitespaces)
         guard !h.isEmpty, let p = NWEndpoint.Port(rawValue: port) else {
             onStatus?("Indirizzo IP del POCO mancante")
@@ -91,7 +107,7 @@ final class VideoClient {
         queue.async {
             self.buffer.removeAll(keepingCapacity: true)
             self.sps = nil; self.pps = nil; self.formatDesc = nil
-            self.stats = Stats()
+            self.stats = VideoStats()
             self.windowStart = CACurrentMediaTime()
             self.bytesInWindow = 0; self.framesInWindow = 0
             self.lastFrameTime = 0; self.gaps.removeAll()

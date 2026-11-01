@@ -21,6 +21,8 @@ workflows:
           - "ios/"
           - "codemagic.yaml"
     scripts:
+      - name: Test del parser scrcpy
+        script: ./ios/Tests/run-tests.sh
       - name: Compila e crea l'IPA
         script: ./ios/build-ipa.sh
       - name: Prepara gli artifacts

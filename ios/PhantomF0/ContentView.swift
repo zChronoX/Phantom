@@ -7,6 +7,7 @@ struct ContentView: View {
     @AppStorage("seconds") private var seconds = 120.0
     @AppStorage("size") private var size = 64
     @AppStorage("voice") private var voice = true
+    @AppStorage("videoMode") private var videoMode = VideoMode.scrcpy.rawValue
     @State private var copied = false
 
     var body: some View {
@@ -64,12 +65,16 @@ struct ContentView: View {
                 }
 
                 Section("Video dal vivo") {
+                    Picker("Sorgente", selection: $videoMode) {
+                        Text("scrcpy (bassa latenza)").tag(VideoMode.scrcpy.rawValue)
+                        Text("Base (screenrecord)").tag(VideoMode.basic.rawValue)
+                    }
                     NavigationLink {
-                        VideoScreen(host: host)
+                        VideoScreen(host: host, mode: VideoMode(rawValue: videoMode) ?? .scrcpy)
                     } label: {
                         Label("Guarda lo schermo del POCO", systemImage: "play.rectangle")
                     }
-                    Text("Prima accendi il video nella WebUI del modulo sul POCO. Mostra lo schermo di Android dal vivo, con frame rate e banda.")
+                    Text("Prima accendi il video nella WebUI del modulo sul POCO: «scrcpy ON» per la bassa latenza, «Accendi video» per la sorgente base. Mostra lo schermo di Android dal vivo, con frame rate e banda.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

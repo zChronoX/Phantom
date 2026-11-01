@@ -33,6 +33,9 @@ jobs:
       - name: Compila sonda e modulo
         run: android/module/build.sh
 
+      - name: Prova del ponte scrcpy
+        run: python3 android/probe/tests/test_scrcpy_relay.py android/probe/build/phantom-probe-x86_64
+
       - name: Prova della sonda (x86_64)
         run: |
           P=android/probe/build/phantom-probe-x86_64
