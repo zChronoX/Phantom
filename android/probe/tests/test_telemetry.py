@@ -397,6 +397,29 @@ def test_psi_stall():
         p.close()
 
 
+def test_proc_snapshot():
+    ph = Phone()
+    p = Probe(ph)
+    try:
+        c = p.client()
+        wait_for(lambda: len(c.of("T")) >= 3, 5)
+        r = ph.root
+        # un thread di surfaceflinger fermo in attesa di una fence nel kernel, e uno che aspetta tranquillo
+        write(f"{r}/proc/100/task/101/stat", "101 (RenderEngine) S 1 100 100 0 -1 0 0 0 0 0 0 0 0 0 20 0 3 0 1 0 0\n")
+        write(f"{r}/proc/100/task/101/wchan", "dma_fence_default_wait\n")
+        write(f"{r}/proc/100/task/101/stack", "[<0>] __switch_to+0x1c/0x28\n[<0>] dma_fence_default_wait+0x120/0x1a0\n[<0>] sync_file_ioctl+0x80/0x1c0\n[<0>] __arm64_sys_ioctl+0x90/0xc0\n")
+        write(f"{r}/proc/100/task/102/stat", "102 (binder:100_1) S 1 100 100 0 -1 0 0 0 0 0 0 0 0 0 20 0 3 0 1 0 0\n")
+        write(f"{r}/proc/100/task/102/wchan", "binder_thread_read\n")
+        ph.add_dstate()
+        ph.set_blocked(5)
+        check(wait_for(lambda: c.has("D", "proc sf 100/101(RenderEngine) S wchan=dma_fence_default_wait"), 6), "lo stallo include i thread di surfaceflinger che non aspettano tranquilli")
+        check(c.has("D", "stack=dma_fence_default_wait<sync_file_ioctl<__arm64_sys_ioctl"), "con lo stack del kernel (dove aspetta la fence)")
+        check(not c.has("D", "proc sf 100/102"), "senza i thread che aspettano su binder")
+        c.close()
+    finally:
+        p.close()
+
+
 def test_key_process_blocked():
     ph = Phone()
     p = Probe(ph)

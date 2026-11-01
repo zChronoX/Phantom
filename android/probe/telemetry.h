@@ -682,8 +682,37 @@ static void tm_proc_threads(pid_t pid, int *nthreads, int *ndisk, char *detail, 
     closedir(d);
 }
 
+/* Thread di un processo chiave con il loro punto di attesa nel kernel e lo stack: dice dove sono fermi SurfaceFlinger,
+ * il composer o il server di cattura. all=0 salta i thread che aspettano tranquilli (epoll, binder, futex, poll). */
+static void tm_proc_snapshot(const char *label, pid_t pid, int all) {
+    if (pid <= 0) return;
+    char tp[300];
+    snprintf(tp, sizeof tp, "%s/%d/task", g_proc, (int)pid);
+    DIR *d = opendir(tp);
+    if (!d) return;
+    struct dirent *e;
+    int n = 0;
+    while ((e = readdir(d)) && n < 60) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        char td[400], st, wc[64], cm[32], stack[300];
+        snprintf(td, sizeof td, "%s/%.20s", tp, e->d_name);
+        g_stage_task = "psnap:stato";
+        if (!tm_task_state(td, &st, cm, sizeof cm)) continue;
+        tm_task_wchan(td, wc, sizeof wc);
+        int idle = st == 'S' && (strcmp(wc, "do_epoll_wait") == 0 || strcmp(wc, "binder_thread_read") == 0 || strcmp(wc, "futex_wait_queue_me") == 0 ||
+                                 strcmp(wc, "do_sys_poll") == 0 || strcmp(wc, "pipe_read") == 0 || strcmp(wc, "__arm64_sys_nanosleep") == 0 || wc[0] == 0);
+        if (!all && idle) continue;
+        g_stage_task = "psnap:stack";
+        tm_task_stack(td, stack, sizeof stack);
+        tm_emit('D', "proc %s %d/%s(%s) %c wchan=%s stack=%s", label, (int)pid, e->d_name, cm, st, wc[0] ? wc : "-", stack[0] ? stack : "-");
+        n++;
+    }
+    closedir(d);
+}
+
 /* Istantanea di tutti i task bloccati nel kernel (stato D) nel sistema, con stack. */
 static void tm_deep_snapshot(const char *why) {
+    static uint64_t last_proc = 0;
     DIR *d = opendir(g_proc);
     if (!d) return;
     int found = 0, with_stack = 0;
@@ -714,6 +743,14 @@ static void tm_deep_snapshot(const char *why) {
     }
     closedir(d);
     if (found == 0) tm_emit('D', "%s nessun task in stato D trovato", why);
+    /* i processi chiave dello schermo e della cattura, al massimo ogni 5 s */
+    if (!last_proc || since(now_ms(), last_proc) >= 5000) {
+        last_proc = now_ms();
+        tm_proc_snapshot("sf", g_watch[0].pid, 0);
+        tm_proc_snapshot("hwc", g_watch[2].pid, 0);
+        tm_proc_snapshot("swc", g_watch[3].pid, 0);
+        tm_proc_snapshot("srv", g_tm ? (pid_t)g_tm->server_pid : 0, 1);
+    }
 }
 
 static void tm_task_sample(void) {
