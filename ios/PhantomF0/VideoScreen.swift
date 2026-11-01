@@ -56,13 +56,17 @@ struct VideoScreen: View {
     let host: String
     let mode: VideoMode
     @StateObject private var model: VideoModel
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var showOverlay = true
+    /// Impedisce una seconda connessione se SwiftUI chiama onAppear più di una volta.
+    @State private var running = false
+
     init(host: String, mode: VideoMode) {
         self.host = host
         self.mode = mode
         _model = StateObject(wrappedValue: VideoModel(mode: mode))
     }
-    @Environment(\.dismiss) private var dismiss
-    @State private var showOverlay = true
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -77,10 +81,36 @@ struct VideoScreen: View {
                     .transition(.opacity)
             }
         }
+        .navigationBarBackButtonHidden(true)
+        .toolbar(.hidden, for: .navigationBar)
         .statusBarHidden()
         .onTapGesture { withAnimation { showOverlay.toggle() } }
-        .onAppear { model.start(host: host) }
-        .onDisappear { model.stop() }
+        .onAppear { begin() }
+        .onDisappear { end() }
+        // Quando l'app va in background iOS la sospende e smette di leggere: il flusso va chiuso subito,
+        // altrimenti i buffer del POCO si riempiono e il server può bloccare lo schermo del telefono.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { end() } else if phase == .active { begin() }
+        }
+    }
+
+    private func begin() {
+        guard !running else { return }
+        running = true
+        UIApplication.shared.isIdleTimerDisabled = true
+        model.start(host: host)
+    }
+
+    private func end() {
+        guard running else { return }
+        running = false
+        UIApplication.shared.isIdleTimerDisabled = false
+        model.stop()
+    }
+
+    private func reconnect() {
+        end()
+        begin()
     }
 
     private var overlay: some View {
@@ -90,6 +120,11 @@ struct VideoScreen: View {
                     Label("Chiudi", systemImage: "chevron.left")
                 }
                 Spacer()
+                if !model.stats.connected {
+                    Button { reconnect() } label: {
+                        Label("Riconnetti", systemImage: "arrow.clockwise")
+                    }
+                }
                 Circle()
                     .fill(model.stats.connected ? .green : .orange)
                     .frame(width: 10, height: 10)
@@ -119,7 +154,7 @@ struct VideoScreen: View {
                     }
                 }
             }
-            Text("Tocca lo schermo per mostrare o nascondere i dati.")
+            Text("Tocca lo schermo per mostrare o nascondere i dati. Se il POCO non risponde, chiudi questa schermata.")
                 .font(.caption2).foregroundStyle(.white.opacity(0.6))
         }
     }

@@ -25,7 +25,7 @@ jobs:
       - name: Controllo degli script
         run: |
           cd android/module
-          shellcheck -s sh -e SC1090,SC1091 bin/phantomctl bin/phantom-report.sh service.sh action.sh uninstall.sh customize.sh
+          shellcheck -s sh -e SC1090,SC1091 bin/phantomctl bin/phantom-postmortem.sh bin/phantom-report.sh service.sh action.sh uninstall.sh customize.sh
 
       - name: Scarica il server di scrcpy (Apache 2.0)
         env:
@@ -35,8 +35,21 @@ jobs:
       - name: Compila sonda e modulo
         run: android/module/build.sh
 
-      - name: Prova del ponte scrcpy
+      - name: Controllo del pacchetto finale
+        run: android/module/tests/test_package.sh
+
+      - name: Prova del ponte scrcpy (build statica)
         run: python3 android/probe/tests/test_scrcpy_relay.py android/probe/build/phantom-probe-x86_64
+
+      - name: Prova del ponte con i rilevatori di errori di memoria
+        run: |
+          cd android/probe
+          gcc -std=c11 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -Wno-unused-parameter \
+            -o build/phantom-probe-asan phantom-probe.c
+          ASAN_OPTIONS=detect_leaks=0 python3 tests/test_scrcpy_relay.py build/phantom-probe-asan
+
+      - name: Prova degli script del modulo
+        run: android/module/tests/test_module.sh
 
       - name: Prova della sonda (x86_64)
         run: |

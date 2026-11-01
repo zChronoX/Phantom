@@ -15,3 +15,5 @@ mkdir -p /data/adb/phantom-f0
 ui_print "- Phantom F0 installato."
 ui_print "- La sonda parte da sola al prossimo riavvio."
 ui_print "- Per avviarla subito: tocca \"Azione\" sul modulo."
+ui_print "- Se il telefono si è bloccato: WebUI › Post-mortem."
+ui_print "- Video scrcpy: parti dal profilo 1 della scala nella WebUI."

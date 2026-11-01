@@ -34,13 +34,15 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <stddef.h>
+#include <sys/file.h>
+#include <sys/prctl.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
-#define PROBE_VERSION "0.3.0"
+#define PROBE_VERSION "0.4.0"
 #define UDP_MAGIC "PHP1"
 #define UDP_HDR 32          /* magic(4) seq(4) client_ns(8) server_mono_ns(8) server_suspend_ms(8) */
 #define WAKE_GAP_NS (30ull * 1000000000ull)
@@ -60,6 +62,12 @@ static const char *g_scrcpy_sock = NULL; /* solo per i test: socket UNIX su file
 static const char *g_scrcpy_opts[MAX_SCRCPY_OPTS];
 static int g_scrcpy_nopts = 0;
 static int g_allow_any = 0;
+static const char *g_state_dir = "/data/adb/phantom-f0"; /* marker e blocco di sessione */
+static const char *g_scrcpy_profile = "";
+static int g_stall_client_ms = 1500;  /* l'iPhone non accetta dati da tanto: si chiude la sessione */
+static int g_stall_server_ms = 0;     /* 0 = spento: uno schermo fermo non produce frame */
+static int g_max_age_ms = 250;        /* un frame più vecchio di così in coda viene scartato */
+static int g_first_frame_ms = 8000;   /* tempo massimo per il primo frame dopo l'avvio del server */
 static long g_bitrate = 12000000;
 static const char *g_size = NULL;
 static const char *g_screenrecord = "/system/bin/screenrecord";
@@ -103,6 +111,9 @@ static void logmsg(const char *fmt, ...) {
 
 static void put_u64(unsigned char *p, uint64_t v) { for (int i = 0; i < 8; i++) p[i] = (unsigned char)(v >> (8 * i)); }
 static uint32_t get_u32(const unsigned char *p) { uint32_t v = 0; for (int i = 3; i >= 0; i--) v = (v << 8) | p[i]; return v; }
+
+static pid_t stop_sessions(void);
+static pid_t active_session_pid(void);
 
 static int send_all(int fd, const void *buf, size_t len) {
     const char *p = buf;
@@ -272,13 +283,16 @@ static void serve_status(int fd) {
     getprop("ro.build.version.sdk", sdk, sizeof sdk);
     getprop("ro.lineage.version", rom, sizeof rom);
     getprop("ro.soc.model", soc, sizeof soc);
-    char body[1024];
+    char body[1280];
+    pid_t sess = g_scrcpy_port > 0 ? active_session_pid() : 0;
     int n = snprintf(body, sizeof body,
                      "{\"probe\":\"%s\",\"uptime_s\":%.1f,\"suspended_ms\":%llu,\"video\":%s,"
+                     "\"scrcpy\":{\"enabled\":%s,\"active\":%s,\"pid\":%d,\"profile\":\"%s\"},"
                      "\"ports\":{\"udp\":%d,\"http\":%d,\"video\":%d},"
                      "\"device\":{\"model\":\"%s\",\"codename\":\"%s\",\"android\":\"%s\",\"sdk\":\"%s\",\"lineage\":\"%s\",\"soc\":\"%s\"}}\n",
                      PROBE_VERSION, (double)(now_ns(CLOCK_MONOTONIC) - g_start_mono) / 1e9,
                      (unsigned long long)suspended_ms(), g_video ? "true" : "false",
+                     g_scrcpy_port > 0 ? "true" : "false", sess > 0 ? "true" : "false", (int)sess, g_scrcpy_profile ? g_scrcpy_profile : "",
                      g_udp_port, g_http_port, g_video_port, model, device, release, sdk, rom, soc);
     http_reply(fd, "200 OK", "application/json", body, (size_t)n);
 }
@@ -339,6 +353,14 @@ static void serve_http(int fd, const struct sockaddr_in *peer_sa) {
     const char *path = req + 4;
     if (strncmp(path, "/ws ", 4) == 0) serve_websocket(fd, req, peer);
     else if (strncmp(path, "/status ", 8) == 0) serve_status(fd);
+    else if (strncmp(path, "/stop ", 6) == 0) {
+        /* Interruttore d'emergenza: ferma la sessione video scrcpy attiva (libera lo schermo del telefono). */
+        pid_t pid = stop_sessions();
+        char body[96];
+        int bn = snprintf(body, sizeof body, "{\"stopped\":%s,\"pid\":%d}\n", pid > 0 ? "true" : "false", (int)pid);
+        logmsg("stop richiesto da %s: %s", peer, pid > 0 ? "sessione fermata" : "nessuna sessione attiva");
+        http_reply(fd, "200 OK", "application/json", body, (size_t)bn);
+    }
     else if (strncmp(path, "/ ", 2) == 0 || strncmp(path, "/clock ", 7) == 0 || strncmp(path, "/?", 2) == 0)
         http_reply(fd, "200 OK", "text/html; charset=utf-8", PAGE_HTML, sizeof(PAGE_HTML) - 1);
     else http_reply(fd, "404 Not Found", "text/plain", "non trovato\n", 12);
@@ -355,6 +377,10 @@ static void serve_video(int fd, const struct sockaddr_in *peer_sa) {
     signal(SIGCHLD, SIG_DFL);
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    /* Se l'iPhone smette di leggere, screenrecord si bloccherebbe e con lui lo schermo del telefono:
+     * dopo 1,5 s senza progressi l'invio fallisce e la sessione si chiude. */
+    struct timeval snd_to = {1, 500000};
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd_to, sizeof snd_to);
     logmsg("video: client %s connesso (bitrate %ld, dimensione %s)", peer, g_bitrate, g_size ? g_size : "nativa");
 
     int quick_failures = 0;
@@ -379,6 +405,7 @@ static void serve_video(int fd, const struct sockaddr_in *peer_sa) {
         uint64_t t0 = now_ns(CLOCK_MONOTONIC);
         pid_t pid = fork();
         if (pid == 0) {
+            prctl(PR_SET_PDEATHSIG, SIGKILL); /* mai uno screenrecord orfano */
             dup2(p[1], 1);
             close(p[0]); close(p[1]); close(fd);
             execv(g_screenrecord, argv);
@@ -406,7 +433,15 @@ static void serve_video(int fd, const struct sockaddr_in *peer_sa) {
         close(p[0]);
         kill(pid, SIGINT);
         int st = 0;
-        waitpid(pid, &st, 0);
+        {
+            int done = 0;
+            for (int w = 0; w < 100 && !done; w++) { /* fino a 2 s, poi SIGKILL */
+                pid_t wr = waitpid(pid, &st, WNOHANG);
+                done = (wr == pid) || (wr < 0 && errno == ECHILD);
+                if (!done) usleep(20000);
+            }
+            if (!done) { kill(pid, SIGKILL); waitpid(pid, &st, 0); }
+        }
         if (client_gone) break;
         if (now_ns(CLOCK_MONOTONIC) - t0 < 2000000000ull) {
             logmsg("video: screenrecord terminato subito (stato %d)", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
@@ -422,6 +457,327 @@ static void serve_video(int fd, const struct sockaddr_in *peer_sa) {
 
 
 /* ------------------------------------------------------------ ponte scrcpy */
+/*
+ * Una sessione = una connessione TCP dell'iPhone, servita da un processo figlio che:
+ *   1. prende il blocco di sessione (una sola alla volta: la nuova sostituisce la vecchia);
+ *   2. scrive il marker (se il telefono si blocca, al riavvio resta come prova);
+ *   3. avvia il server di scrcpy e ne inoltra il flusso SENZA MAI BLOCCARSI: legge sempre dal
+ *      server; se l'iPhone non sta al passo scarta i frame vecchi fino al prossimo keyframe; se
+ *      smette del tutto di leggere chiude la sessione.
+ *
+ * Perché: se chi riceve il flusso si ferma, il server smette di svuotare l'encoder, la coda
+ * dell'encoder si riempie e SurfaceFlinger (che la alimenta) può restare in attesa: lo schermo di
+ * tutto il telefono si congela. Qui lo si impedisce a monte, in modo indipendente da cosa
+ * l'abbia causato (app sospesa, Wi-Fi in difficoltà, errore dell'app).
+ */
+
+#define SC_HANDSHAKE 69u             /* byte fittizio (1) + nome del dispositivo (64) + id del codec (4) */
+#define SC_MAX_RECORD (8u << 20)     /* un pacchetto più grande di 8 MB indica un flusso non valido */
+
+static volatile sig_atomic_t g_stop = 0;
+static void on_stop(int sig) { (void)sig; g_stop = 1; }
+
+static uint64_t now_ms(void) { return now_ns(CLOCK_MONOTONIC) / 1000000ull; }
+/* Differenza tra due istanti che non va mai sotto zero: un istante letto un attimo dopo "now" non deve
+ * trasformarsi in un tempo enorme (con i numeri senza segno farebbe scartare frame e chiudere sessioni sane). */
+static uint64_t since(uint64_t now, uint64_t t) { return now > t ? now - t : 0; }
+static uint32_t be32(const unsigned char *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+
+static void set_nonblock(int fd) {
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl >= 0) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+}
+
+static void state_path(char *out, size_t n, const char *name) { snprintf(out, n, "%s/%s", g_state_dir, name); }
+
+static void fsync_state_dir(void) {
+    int d = open(g_state_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (d >= 0) { fsync(d); close(d); }
+}
+
+/* ---- una sola sessione alla volta (flock: il kernel lo rilascia anche se il processo muore) */
+
+static int is_probe_pid(pid_t pid) {
+    char p[64], buf[256];
+    snprintf(p, sizeof p, "/proc/%d/cmdline", (int)pid);
+    int fd = open(p, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    return strstr(buf, "phantom-probe") != NULL;
+}
+
+static pid_t lock_holder_pid(int fd) {
+    char b[32] = {0};
+    ssize_t r = pread(fd, b, sizeof b - 1, 0);
+    return r > 0 ? (pid_t)atoi(b) : 0;
+}
+
+/* Restituisce il descrittore del blocco (da tenere per tutta la sessione) oppure -1. */
+static int session_lock(void) {
+    char p[300];
+    state_path(p, sizeof p, "scrcpy.lock");
+    int fd = open(p, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0) { logmsg("scrcpy: impossibile aprire %s: %s", p, strerror(errno)); return -1; }
+    for (int i = 0; i < 100; i++) { /* fino a 5 s */
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+            char b[32];
+            int n = snprintf(b, sizeof b, "%d\n", (int)getpid());
+            if (ftruncate(fd, 0) == 0) { ssize_t w = pwrite(fd, b, (size_t)n, 0); (void)w; }
+            return fd;
+        }
+        if (i == 0 || i == 50) {
+            pid_t other = lock_holder_pid(fd);
+            if (other > 1 && is_probe_pid(other)) {
+                logmsg("scrcpy: sessione precedente ancora attiva (pid %d): %s", (int)other, i == 0 ? "la fermo" : "la termino con la forza");
+                kill(other, i == 0 ? SIGTERM : SIGKILL);
+            }
+        }
+        usleep(50000);
+    }
+    close(fd);
+    return -1;
+}
+
+/* Ferma la sessione scrcpy attiva (se c'è). Restituisce il pid fermato oppure 0. */
+static pid_t stop_sessions(void) {
+    char p[300];
+    state_path(p, sizeof p, "scrcpy.lock");
+    int fd = open(p, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return 0;
+    pid_t pid = 0;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) { /* qualcuno la tiene: la sessione è attiva */
+        pid = lock_holder_pid(fd);
+        if (pid > 1 && is_probe_pid(pid)) kill(pid, SIGTERM); else pid = 0;
+    }
+    close(fd);
+    return pid;
+}
+
+static pid_t active_session_pid(void) {
+    char p[300];
+    state_path(p, sizeof p, "scrcpy.lock");
+    int fd = open(p, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return 0;
+    pid_t pid = 0;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) pid = lock_holder_pid(fd);
+    close(fd);
+    return pid;
+}
+
+/* ---- marker: esiste solo mentre una sessione è in corso; se resta dopo un riavvio, la sessione è finita male */
+
+static void marker_write(const char *text) {
+    char p[300];
+    state_path(p, sizeof p, "session.marker");
+    int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_SYNC | O_CLOEXEC, 0600);
+    if (fd < 0) return;
+    ssize_t w = write(fd, text, strlen(text));
+    (void)w;
+    fsync(fd);
+    close(fd);
+    fsync_state_dir();
+}
+
+static void marker_remove(void) {
+    char p[300];
+    state_path(p, sizeof p, "session.marker");
+    unlink(p);
+}
+
+/* ---- coda verso l'iPhone */
+
+struct rec {
+    struct rec *next;
+    size_t len, sent;
+    uint64_t t_ms;   /* quando è arrivato dal server */
+    int kind;        /* 0 = mai scartare (handshake, sessione, configurazione), 1 = keyframe, 2 = delta */
+    unsigned char data[];
+};
+
+struct sc_session {
+    int fd, up;
+    struct rec *head, *tail;
+    size_t qbytes;
+    int dropping;
+    uint64_t last_progress_ms;
+    /* parser del flusso del server */
+    unsigned char hs[SC_HANDSHAKE];
+    size_t hs_have;
+    int hs_done;
+    unsigned char hdr[12];
+    size_t hdr_have;
+    struct rec *cur;
+    size_t cur_have;
+    /* contatori */
+    uint64_t bytes_in, bytes_out, frames_in, frames_out, dropped, drop_events, keyframes;
+    uint64_t max_age_ms, max_blocked_ms;
+    int got_frame;
+    uint64_t last_server_ms;
+};
+
+static struct rec *rec_new(size_t len, int kind) {
+    struct rec *r = malloc(sizeof *r + len);
+    if (!r) return NULL;
+    r->next = NULL;
+    r->len = len;
+    r->sent = 0;
+    r->t_ms = now_ms();
+    r->kind = kind;
+    return r;
+}
+
+static void q_push(struct sc_session *s, struct rec *r) {
+    if (!s->head) s->last_progress_ms = now_ms(); /* la coda era vuota: da qui si misura lo stallo */
+    r->next = NULL;
+    if (s->tail) s->tail->next = r; else s->head = r;
+    s->tail = r;
+    s->qbytes += r->len;
+}
+
+/* Scarta i frame in coda che non sono ancora iniziati a partire. Restituisce quanti. */
+static unsigned q_drop_unsent(struct sc_session *s) {
+    unsigned n = 0;
+    struct rec *prev = NULL, *r = s->head;
+    while (r) {
+        struct rec *next = r->next;
+        if (r->kind != 0 && r->sent == 0) {
+            if (prev) prev->next = next; else s->head = next;
+            if (s->tail == r) s->tail = prev;
+            s->qbytes -= r->len;
+            free(r);
+            n++;
+        } else {
+            prev = r;
+        }
+        r = next;
+    }
+    return n;
+}
+
+static void q_free_all(struct sc_session *s) {
+    while (s->head) { struct rec *r = s->head; s->head = r->next; free(r); }
+    s->tail = NULL;
+    s->qbytes = 0;
+    free(s->cur);
+    s->cur = NULL;
+}
+
+static void sc_deliver(struct sc_session *s, struct rec *r) {
+    if (r->kind == 0) { q_push(s, r); return; }
+    s->frames_in++;
+    s->got_frame = 1;
+    if (r->kind == 1) {
+        s->keyframes++;
+        if (s->dropping) {
+            s->dropping = 0;
+            logmsg("scrcpy: keyframe ricevuto, l'invio riprende (frame scartati finora: %llu)", (unsigned long long)s->dropped);
+        }
+        q_push(s, r);
+        return;
+    }
+    if (s->dropping) { s->dropped++; free(r); return; }
+    q_push(s, r);
+}
+
+/* Interpreta i byte del server e mette in coda i pacchetti completi. -1 = flusso non valido. */
+static int sc_feed(struct sc_session *s, const unsigned char *p, size_t n) {
+    while (n > 0) {
+        if (!s->hs_done) {
+            size_t take = SC_HANDSHAKE - s->hs_have;
+            if (take > n) take = n;
+            memcpy(s->hs + s->hs_have, p, take);
+            s->hs_have += take; p += take; n -= take;
+            if (s->hs_have == SC_HANDSHAKE) {
+                struct rec *r = rec_new(SC_HANDSHAKE, 0);
+                if (!r) return -1;
+                memcpy(r->data, s->hs, SC_HANDSHAKE);
+                q_push(s, r);
+                s->hs_done = 1;
+            }
+            continue;
+        }
+        if (!s->cur) {
+            size_t take = 12 - s->hdr_have;
+            if (take > n) take = n;
+            memcpy(s->hdr + s->hdr_have, p, take);
+            s->hdr_have += take; p += take; n -= take;
+            if (s->hdr_have < 12) continue;
+            s->hdr_have = 0;
+            if (s->hdr[0] & 0x80) { /* pacchetto di sessione: 12 byte, senza dati */
+                struct rec *r = rec_new(12, 0);
+                if (!r) return -1;
+                memcpy(r->data, s->hdr, 12);
+                q_push(s, r);
+                continue;
+            }
+            uint32_t size = be32(s->hdr + 8);
+            if (size > SC_MAX_RECORD) { logmsg("scrcpy: pacchetto da %u byte: flusso non valido", size); return -1; }
+            int kind = (s->hdr[0] & 0x40) ? 0 : (s->hdr[0] & 0x20) ? 1 : 2;
+            struct rec *r = rec_new(12 + (size_t)size, kind);
+            if (!r) return -1;
+            memcpy(r->data, s->hdr, 12);
+            if (size == 0) { sc_deliver(s, r); continue; }
+            s->cur = r;
+            s->cur_have = 12;
+            continue;
+        }
+        size_t take = s->cur->len - s->cur_have;
+        if (take > n) take = n;
+        memcpy(s->cur->data + s->cur_have, p, take);
+        s->cur_have += take; p += take; n -= take;
+        if (s->cur_have == s->cur->len) {
+            struct rec *r = s->cur;
+            s->cur = NULL;
+            r->t_ms = now_ms();
+            sc_deliver(s, r);
+        }
+    }
+    return 0;
+}
+
+/* Se il primo frame in coda è più vecchio del limite, l'iPhone non sta al passo: via i frame
+ * vecchi (un'immagine in ritardo vale meno di nessuna) fino al prossimo keyframe. */
+static void sc_check_congestion(struct sc_session *s, uint64_t now) {
+    for (struct rec *r = s->head; r; r = r->next) {
+        if (r->kind == 0) continue;
+        uint64_t age = since(now, r->t_ms);
+        if (age > s->max_age_ms) s->max_age_ms = age;
+        if (!s->dropping && age > (uint64_t)g_max_age_ms) {
+            unsigned n = q_drop_unsent(s);
+            s->dropped += n;
+            s->drop_events++;
+            s->dropping = 1;
+            logmsg("scrcpy: l'iPhone non sta al passo (frame in coda da %llu ms): scartati %u frame, attendo un keyframe", (unsigned long long)age, n);
+        }
+        break; /* la coda è in ordine di arrivo: basta il primo */
+    }
+}
+
+/* Invia quanto il socket accetta, senza mai attendere. -1 = errore del client. */
+static int sc_flush(struct sc_session *s, uint64_t now) {
+    while (s->head) {
+        struct rec *r = s->head;
+        ssize_t w = send(s->fd, r->data + r->sent, r->len - r->sent, MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+            return -1;
+        }
+        r->sent += (size_t)w;
+        s->qbytes -= (size_t)w;
+        s->bytes_out += (uint64_t)w;
+        s->last_progress_ms = now;
+        if (r->sent < r->len) return 0; /* il socket è pieno */
+        s->head = r->next;
+        if (!s->head) s->tail = NULL;
+        if (r->kind != 0) s->frames_out++;
+        free(r);
+    }
+    return 0;
+}
 
 static int connect_scrcpy_socket(unsigned scid) {
     int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -444,89 +800,229 @@ static int connect_scrcpy_socket(unsigned scid) {
     return s;
 }
 
-static void serve_scrcpy(int fd, const struct sockaddr_in *peer_sa) {
-    char peer[64];
-    addr_str(peer_sa, peer, sizeof peer);
-    signal(SIGCHLD, SIG_DFL);
-    int one = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-
-    unsigned scid = (unsigned)getpid() & 0x7fffffffu; /* unico per connessione */
-    char scid_arg[32], ver_arg[64];
+static pid_t spawn_scrcpy_server(unsigned scid, pid_t session_pid) {
+    char scid_arg[32];
     snprintf(scid_arg, sizeof scid_arg, "scid=%08x", scid);
-    snprintf(ver_arg, sizeof ver_arg, "%s", g_scrcpy_ver ? g_scrcpy_ver : "");
-
-    char *argv[16 + MAX_SCRCPY_OPTS];
+    char *argv[24 + MAX_SCRCPY_OPTS];
     int a = 0;
     argv[a++] = (char *)"app_process";
     argv[a++] = (char *)"/";
     argv[a++] = (char *)"com.genymobile.scrcpy.Server";
-    argv[a++] = ver_arg;
+    argv[a++] = (char *)(g_scrcpy_ver ? g_scrcpy_ver : "");
     argv[a++] = scid_arg;
-    argv[a++] = (char *)"log_level=info";
+    /* Valori di base; le opzioni passate dopo (--scrcpy-opt) li sostituiscono. */
+    argv[a++] = (char *)"log_level=debug";           /* l'esito dell'avvio finisce nel log sincronizzato */
     argv[a++] = (char *)"tunnel_forward=true";
     argv[a++] = (char *)"audio=false";
     argv[a++] = (char *)"control=false";
+    argv[a++] = (char *)"cleanup=false";             /* niente secondo processo di pulizia: non cambiamo impostazioni */
+    argv[a++] = (char *)"downsize_on_error=false";   /* prove ripetibili: niente ridimensionamenti di nascosto */
     for (int i = 0; i < g_scrcpy_nopts; i++) argv[a++] = (char *)g_scrcpy_opts[i];
     argv[a] = NULL;
 
-    logmsg("scrcpy: client %s connesso, avvio il server %s (%s)", peer, ver_arg, scid_arg);
     pid_t child = fork();
-    if (child < 0) { logmsg("scrcpy: fork fallita"); return; }
+    if (child < 0) return -1;
     if (child == 0) {
-        setenv("CLASSPATH", g_scrcpy_jar, 1);
+        /* Se questo processo muore, il server muore con lui: mai un server orfano che tiene lo schermo agganciato. */
+        prctl(PR_SET_PDEATHSIG, SIGKILL);
+        if (getppid() != session_pid) _exit(1);
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
+        signal(SIGCHLD, SIG_DFL);
+        int dn = open("/dev/null", O_RDONLY);
+        if (dn >= 0) { dup2(dn, 0); if (dn > 2) close(dn); }
         dup2(g_log_fd, 1);
         dup2(g_log_fd, 2);
-        close(fd);
+        setenv("CLASSPATH", g_scrcpy_jar, 1);
         execv(g_app_process, argv);
         _exit(127);
     }
+    return child;
+}
+
+/* Aspetta la fine del processo per un tempo limitato. Restituisce 1 se è terminato. */
+static int wait_exit(pid_t pid, int ms) {
+    for (int i = 0; i <= ms / 20; i++) {
+        int st;
+        pid_t r = waitpid(pid, &st, WNOHANG);
+        if (r == pid || (r < 0 && errno == ECHILD)) return 1;
+        usleep(20000);
+    }
+    return 0;
+}
+
+static void serve_scrcpy(int fd, const struct sockaddr_in *peer_sa) {
+    char peer[64];
+    addr_str(peer_sa, peer, sizeof peer);
+    signal(SIGCHLD, SIG_DFL);
+    signal(SIGTERM, on_stop);
+    signal(SIGINT, on_stop);
+
+    /* Socket verso l'iPhone: senza Nagle, buffer di invio piccoli (la coda la gestiamo noi) e non bloccante. */
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    int sb = 131072;
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sb, sizeof sb);
+    int lw = 32768;
+    setsockopt(fd, IPPROTO_TCP, TCP_NOTSENT_LOWAT, &lw, sizeof lw);
+    int ka = 5, ki = 2, kc = 3;
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one); /* un iPhone sparito dal Wi-Fi si scopre in circa 11 s */
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &ka, sizeof ka);
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &ki, sizeof ki);
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &kc, sizeof kc);
+    set_nonblock(fd);
+
+    int lock = session_lock();
+    if (lock < 0) { logmsg("scrcpy: non riesco a prendere il blocco di sessione, chiudo %s", peer); return; }
+
+    char marker[1024];
+    snprintf(marker, sizeof marker, "pid=%d\nstart=%ld\nprofilo=%s\nversione=%s\nclient=%s\nopzioni=", (int)getpid(), (long)time(NULL),
+             g_scrcpy_profile ? g_scrcpy_profile : "", g_scrcpy_ver ? g_scrcpy_ver : "", peer);
+    for (int i = 0; i < g_scrcpy_nopts; i++) {
+        size_t l = strlen(marker);
+        snprintf(marker + l, sizeof marker - l, "%s%s", i ? " " : "", g_scrcpy_opts[i]);
+    }
+    strncat(marker, "\n", sizeof marker - strlen(marker) - 1);
+    marker_write(marker);
+
+    unsigned scid = (unsigned)getpid() & 0x7fffffffu;
+    logmsg("scrcpy: client %s connesso, profilo «%s»: avvio il server %s", peer, g_scrcpy_profile ? g_scrcpy_profile : "", g_scrcpy_ver ? g_scrcpy_ver : "?");
+    pid_t child = spawn_scrcpy_server(scid, getpid());
+    if (child < 0) { logmsg("scrcpy: fork del server fallita"); marker_remove(); return; }
+
+    const char *reason = NULL;
+    int reaped = 0;
+    int up = -1;
+    uint64_t t0 = now_ms();
 
     /* Il server impiega circa un secondo ad aprire il suo socket: si riprova fino a 6 s. */
-    int up = -1;
-    uint64_t t0 = now_ns(CLOCK_MONOTONIC);
-    while (now_ns(CLOCK_MONOTONIC) - t0 < 6000000000ull) {
+    int early_close = 0;
+    while (since(now_ms(), t0) < 6000 && !g_stop) {
         up = connect_scrcpy_socket(scid);
         if (up >= 0) break;
         int st;
         if (waitpid(child, &st, WNOHANG) == child) {
-            logmsg("scrcpy: il server è terminato subito (stato %d); vedi il log sopra", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
-            return;
+            logmsg("scrcpy: il server è terminato subito (stato %d); vedi le righe «[server]» qui sopra", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+            reason = "il server è terminato subito";
+            reaped = 1;
+            break;
         }
-        usleep(50000);
+        /* Nell'attesa si controlla anche che l'iPhone sia ancora lì: una connessione abbandonata subito non deve tenere acceso il server. */
+        struct pollfd pc = {.fd = fd, .events = POLLIN, .revents = 0};
+        if (poll(&pc, 1, 50) > 0) {
+            char tmp[16];
+            ssize_t r = recv(fd, tmp, sizeof tmp, MSG_DONTWAIT);
+            if ((pc.revents & (POLLERR | POLLHUP)) || r == 0) {
+                reason = "l'iPhone ha chiuso prima dell'avvio del server";
+                early_close = 1;
+                break;
+            }
+        }
     }
-    if (up < 0) {
-        logmsg("scrcpy: il server non ha aperto il socket entro 6 s");
-        kill(child, SIGKILL);
-        waitpid(child, NULL, 0);
-        return;
-    }
-    logmsg("scrcpy: server pronto dopo %.0f ms", (double)(now_ns(CLOCK_MONOTONIC) - t0) / 1e6);
 
-    unsigned char buf[65536];
-    uint64_t total = 0;
-    struct pollfd pf[2] = {{.fd = up, .events = POLLIN}, {.fd = fd, .events = POLLIN}};
-    for (;;) {
-        if (poll(pf, 2, -1) < 0) { if (errno == EINTR) continue; break; }
-        if (pf[0].revents & (POLLIN | POLLHUP | POLLERR)) {
-            ssize_t r = read(up, buf, sizeof buf);
-            if (r <= 0) break; /* il server ha chiuso */
-            if (send_all(fd, buf, (size_t)r) < 0) break;
-            total += (uint64_t)r;
+    struct sc_session s;
+    memset(&s, 0, sizeof s);
+    s.fd = fd;
+    s.up = up;
+    uint64_t t_start = now_ms();
+
+    if (up >= 0) {
+        set_nonblock(up);
+        logmsg("scrcpy: server pronto dopo %llu ms", (unsigned long long)since(t_start, t0));
+        s.last_server_ms = t_start;
+        s.last_progress_ms = t_start;
+        uint64_t last_stats = t_start, prev_out = 0, prev_in = 0, prev_frames = 0;
+        unsigned char buf[65536];
+        struct pollfd pf[2];
+
+        for (;;) {
+            if (g_stop) { reason = "arresto richiesto"; break; }
+            pf[0].fd = up; pf[0].events = POLLIN; pf[0].revents = 0;
+            pf[1].fd = fd; pf[1].events = POLLIN | (s.head ? POLLOUT : 0); pf[1].revents = 0;
+            int pr = poll(pf, 2, 100);
+            if (pr < 0 && errno != EINTR) { reason = "errore di poll"; break; }
+            uint64_t now = now_ms();
+
+            if (pr > 0) {
+                if (pf[1].revents & (POLLERR | POLLHUP)) { reason = "l'iPhone ha chiuso la connessione"; break; }
+                if (pf[1].revents & POLLIN) {
+                    char tmp[256];
+                    ssize_t r = recv(fd, tmp, sizeof tmp, MSG_DONTWAIT); /* l'iPhone non invia nulla: 0 = ha chiuso */
+                    if (r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) { reason = "l'iPhone ha chiuso la connessione"; break; }
+                }
+                if (pf[0].revents & (POLLIN | POLLHUP | POLLERR)) {
+                    ssize_t r = read(up, buf, sizeof buf);
+                    if (r == 0) { reason = "il server ha chiuso il flusso"; break; }
+                    if (r < 0) {
+                        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) { reason = "errore di lettura dal server"; break; }
+                    } else {
+                        s.bytes_in += (uint64_t)r;
+                        s.last_server_ms = now;
+                        if (sc_feed(&s, buf, (size_t)r) < 0) { reason = "flusso del server non valido"; break; }
+                    }
+                }
+            }
+
+            now = now_ms(); /* dopo la lettura: gli istanti dei frame appena arrivati sono successivi al "now" di prima */
+            sc_check_congestion(&s, now);
+            if (s.head && sc_flush(&s, now) < 0) { reason = "errore di invio all'iPhone"; break; }
+
+            /* Cane da guardia 1: l'iPhone ha dati in attesa ma non li accetta più. È il caso che può
+             * congelare lo schermo del telefono: si chiude subito, così il server viene fermato. */
+            if (s.head) {
+                uint64_t blocked = since(now, s.last_progress_ms);
+                if (blocked > s.max_blocked_ms) s.max_blocked_ms = blocked;
+                if (blocked > (uint64_t)g_stall_client_ms) { reason = "l'iPhone ha smesso di leggere"; break; }
+            }
+            /* Cane da guardia 2: nessun frame entro un tempo ragionevole dall'avvio (cattura non partita). */
+            if (!s.got_frame && since(now, t_start) > (uint64_t)g_first_frame_ms) { reason = "nessun frame entro il tempo limite"; break; }
+            /* Un server silenzioso può essere uno schermo fermo (non produce frame): solo per i test si può forzare la chiusura. */
+            if (g_stall_server_ms > 0 && s.got_frame && since(now, s.last_server_ms) > (uint64_t)g_stall_server_ms) { reason = "il server non produce più dati"; break; }
+
+            int st;
+            if (waitpid(child, &st, WNOHANG) == child) {
+                reaped = 1;
+                logmsg("scrcpy: il server è terminato (stato %d)", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+                reason = "il server è terminato";
+                break;
+            }
+
+            if (since(now, last_stats) >= 5000) {
+                double dt = (double)since(now, last_stats) / 1000.0;
+                logmsg("scrcpy: %llu s · in %.1f Mbps · out %.1f Mbps · %.0f fps · coda %zu KB · età max %llu ms · client fermo max %llu ms · scartati %llu · silenzio server %llu ms",
+                       (unsigned long long)(since(now, t_start) / 1000), (double)(s.bytes_in - prev_in) * 8 / 1e6 / dt,
+                       (double)(s.bytes_out - prev_out) * 8 / 1e6 / dt, (double)(s.frames_out - prev_frames) / dt,
+                       s.qbytes / 1024, (unsigned long long)s.max_age_ms, (unsigned long long)s.max_blocked_ms,
+                       (unsigned long long)s.dropped, (unsigned long long)since(now, s.last_server_ms));
+                last_stats = now; prev_in = s.bytes_in; prev_out = s.bytes_out; prev_frames = s.frames_out;
+                s.max_age_ms = 0; s.max_blocked_ms = 0;
+            }
         }
-        if (pf[1].revents & (POLLIN | POLLHUP | POLLERR)) {
-            char c[256];
-            ssize_t r = recv(fd, c, sizeof c, MSG_DONTWAIT);
-            if (r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) break; /* l'iPhone ha chiuso */
-            /* i dati dal client non servono (controllo spento): si scartano */
+        close(up);
+    } else if (!reaped && !g_stop && !early_close) {
+        reason = "il server non ha aperto il socket entro 6 s";
+        logmsg("scrcpy: %s", reason);
+    }
+
+    /* Chiusura: prima l'iPhone e il flusso (sblocca subito chi scrive), poi il server, con garbo e poi con la forza. */
+    shutdown(fd, SHUT_RDWR);
+    q_free_all(&s);
+    if (!reaped) {
+        kill(child, SIGTERM);
+        if (!wait_exit(child, 1500)) {
+            logmsg("scrcpy: il server non si ferma con SIGTERM: lo uccido");
+            kill(child, SIGKILL);
+            if (!wait_exit(child, 2000)) logmsg("scrcpy: ATTENZIONE: il server (pid %d) non risponde nemmeno a SIGKILL", (int)child);
+            else reaped = 1;
+        } else {
+            reaped = 1;
         }
     }
-    close(up);
-    kill(child, SIGTERM);
-    usleep(200000);
-    kill(child, SIGKILL);
-    waitpid(child, NULL, 0);
-    logmsg("scrcpy: client %s disconnesso, %.1f MB inoltrati", peer, (double)total / 1e6);
+    logmsg("scrcpy: sessione con %s conclusa (%s) · frame ricevuti %llu, inviati %llu, scartati %llu in %llu eventi · %.1f MB inviati",
+           peer, reason ? reason : "chiusura", (unsigned long long)s.frames_in, (unsigned long long)s.frames_out, (unsigned long long)s.dropped,
+           (unsigned long long)s.drop_events, (double)s.bytes_out / 1e6);
+    if (reaped) marker_remove(); /* senza marker = chiusura pulita; se il server non muore, il marker resta come segnale */
+    close(lock);
 }
 
 /* -------------------------------------------------------------------- UDP */
@@ -560,6 +1056,9 @@ static void handle_udp(int fd) {
 
 /* ------------------------------------------------------------------- main */
 
+static volatile sig_atomic_t g_term = 0;
+static void on_term(int sig) { (void)sig; g_term = 1; }
+
 static void usage(void) {
     fprintf(stderr,
             "phantom-probe %s — sonda della fase 0 di Phantom\n\n"
@@ -573,6 +1072,12 @@ static void usage(void) {
             "  --scrcpy-jar FILE  scrcpy-server (il file jar)\n"
             "  --scrcpy-version V versione di scrcpy-server, richiesta come primo argomento\n"
             "  --scrcpy-opt K=V   opzione per il server (ripetibile, es. video_codec=h265)\n"
+            "  --scrcpy-profile N nome del profilo (solo per log e marker)\n"
+            "  --state-dir DIR    dove tenere marker e blocco di sessione (default /data/adb/phantom-f0)\n"
+            "  --scrcpy-stall-client-ms N  chiude se l'iPhone non accetta dati per N ms (default 1500)\n"
+            "  --scrcpy-stall-server-ms N  chiude se il server tace per N ms (default 0 = mai)\n"
+            "  --scrcpy-max-age-ms N       scarta i frame in coda da più di N ms (default 250)\n"
+            "  --scrcpy-first-frame-ms N   attesa massima del primo frame (default 8000)\n"
             "  --allow-any        accetta anche indirizzi pubblici (sconsigliato)\n"
             "  --log FILE         file di log (default stderr)\n"
             "  --pidfile FILE     scrive il PID\n"
@@ -608,12 +1113,18 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--scrcpy-opt")) { NEEDV(); if (g_scrcpy_nopts < MAX_SCRCPY_OPTS) g_scrcpy_opts[g_scrcpy_nopts++] = v; }
         else if (!strcmp(a, "--app-process")) { NEEDV(); g_app_process = v; }
         else if (!strcmp(a, "--scrcpy-socket")) { NEEDV(); g_scrcpy_sock = v; }
+        else if (!strcmp(a, "--scrcpy-profile")) { NEEDV(); g_scrcpy_profile = v; }
+        else if (!strcmp(a, "--state-dir")) { NEEDV(); g_state_dir = v; }
+        else if (!strcmp(a, "--scrcpy-stall-client-ms")) { NEEDV(); g_stall_client_ms = atoi(v); }
+        else if (!strcmp(a, "--scrcpy-stall-server-ms")) { NEEDV(); g_stall_server_ms = atoi(v); }
+        else if (!strcmp(a, "--scrcpy-max-age-ms")) { NEEDV(); g_max_age_ms = atoi(v); }
+        else if (!strcmp(a, "--scrcpy-first-frame-ms")) { NEEDV(); g_first_frame_ms = atoi(v); }
         else if (!strcmp(a, "--version")) { printf("%s\n", PROBE_VERSION); return 0; }
         else { usage(); return 2; }
     }
 
     if (g_log_path) {
-        int fd = open(g_log_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+        int fd = open(g_log_path, O_WRONLY | O_CREAT | O_APPEND | O_SYNC | O_CLOEXEC, 0644); /* O_SYNC: se il telefono si blocca, le righe già scritte restano */
         if (fd < 0) { perror("log"); return 1; }
         g_log_fd = fd;
     }
@@ -649,6 +1160,8 @@ int main(int argc, char **argv) {
 
     signal(SIGPIPE, SIG_IGN);
     signal(SIGCHLD, SIG_IGN); /* i figli che servono le connessioni vengono raccolti dal kernel */
+    signal(SIGTERM, on_term);
+    signal(SIGINT, on_term);
     g_start_mono = now_ns(CLOCK_MONOTONIC);
     logmsg("avvio: phantom-probe %s, udp %d, http %d, video %s, scrcpy %s, sospensione finora %llu ms",
            PROBE_VERSION, g_udp_port, g_http_port, g_video ? "acceso" : "spento",
@@ -660,7 +1173,14 @@ int main(int argc, char **argv) {
     if (video >= 0) { pf[nfds].fd = video; kind[nfds++] = 2; }
     if (scrcpy >= 0) { pf[nfds].fd = scrcpy; kind[nfds++] = 3; }
     for (;;) {
-        if (poll(pf, (nfds_t)nfds, -1) < 0) { if (errno == EINTR) continue; logmsg("errore: poll: %s", strerror(errno)); return 1; }
+        if (poll(pf, (nfds_t)nfds, -1) < 0) {
+            if (errno == EINTR) {
+                if (g_term) break;
+                continue;
+            }
+            logmsg("errore: poll: %s", strerror(errno));
+            return 1;
+        }
         if (pf[0].revents & POLLIN) handle_udp(udp);
         for (int i = 1; i < nfds; i++) {
             if (!(pf[i].revents & POLLIN)) continue;
@@ -676,6 +1196,8 @@ int main(int argc, char **argv) {
             }
             pid_t child = fork();
             if (child == 0) {
+                signal(SIGTERM, SIG_DFL);
+                signal(SIGINT, SIG_DFL);
                 close(udp); close(http); if (video >= 0) close(video); if (scrcpy >= 0) close(scrcpy);
                 if (kind[i] == 1) serve_http(c, &peer);
                 else if (kind[i] == 2) serve_video(c, &peer);
@@ -686,4 +1208,13 @@ int main(int argc, char **argv) {
             close(c);
         }
     }
+
+    /* Arresto richiesto (phantomctl stop): ferma la sessione scrcpy in modo ordinato e, se siamo il capogruppo,
+     * anche gli screenrecord del video di base. */
+    logmsg("arresto richiesto: fermo le sessioni");
+    signal(SIGTERM, SIG_IGN);
+    stop_sessions();
+    if (getpgrp() == getpid()) kill(0, SIGTERM);
+    usleep(300000);
+    return 0;
 }

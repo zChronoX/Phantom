@@ -55,36 +55,67 @@ final class VideoClient: VideoSource {
     private var lastFrameTime = 0.0
     private var gaps: [Double] = []
 
+    // Tutto lo stato di questa classe si tocca SOLO dalla coda `queue`.
+    private var generation = 0
+
+    /// Ogni connessione ha una "generazione": i callback di una connessione vecchia vengono ignorati e la
+    /// connessione vecchia viene chiusa, mai abbandonata (una connessione non letta riempirebbe i buffer del
+    /// POCO e potrebbe bloccare lo schermo del telefono).
+    private func report(_ text: String) {
+        let cb = onStatus
+        DispatchQueue.main.async { cb?(text) }
+    }
+
     // MARK: - Ciclo di vita
 
-    func start(host: String) { connect(host: host, port: 47802) }
+    func start(host: String) {
+        queue.async { self.connect(host: host, port: 47802) }
+    }
+
+    func stop() {
+        queue.async {
+            self.generation &+= 1
+            self.teardown()
+            self.stats.connected = false
+            self.publish()
+        }
+    }
+
+    private func teardown() {
+        connection?.stateUpdateHandler = nil
+        connection?.cancel()
+        connection = nil
+    }
 
     private func connect(host: String, port: UInt16) {
+        teardown()
         let h = host.trimmingCharacters(in: .whitespaces)
         guard !h.isEmpty, let p = NWEndpoint.Port(rawValue: port) else {
-            onStatus?("Indirizzo IP del POCO mancante")
+            report("Indirizzo IP del POCO mancante")
             return
         }
+        generation &+= 1
+        let gen = generation
+        resetState()
         let params = NWParameters.tcp
         if let tcp = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             tcp.noDelay = true
         }
         let conn = NWConnection(host: NWEndpoint.Host(h), port: p, using: params)
         connection = conn
-        resetState()
-        onStatus?("Connessione a \(h):\(port)…")
+        report("Connessione a \(h):\(port)…")
         conn.stateUpdateHandler = { [weak self] state in
-            guard let self = self else { return }
+            guard let self = self, self.generation == gen else { return }
             switch state {
             case .ready:
                 self.stats.connected = true
                 self.publish()
-                self.onStatus?("Connesso. In attesa dei frame… (accendi il video nella WebUI del POCO)")
-                self.receive()
+                self.report("Connesso. In attesa dei frame… (accendi il video nella WebUI del POCO)")
+                self.receive(on: conn, generation: gen)
             case .waiting(let error):
-                self.onStatus?("In attesa della rete: \(error.localizedDescription)")
+                self.report("In attesa della rete: \(error.localizedDescription)")
             case .failed(let error):
-                self.onStatus?("Connessione fallita: \(error.localizedDescription)")
+                self.report("Connessione fallita: \(error.localizedDescription)")
                 self.stats.connected = false
                 self.publish()
             case .cancelled:
@@ -96,43 +127,34 @@ final class VideoClient: VideoSource {
         conn.start(queue: queue)
     }
 
-    func stop() {
-        connection?.cancel()
-        connection = nil
-        stats.connected = false
-        publish()
-    }
-
     private func resetState() {
-        queue.async {
-            self.buffer.removeAll(keepingCapacity: true)
-            self.sps = nil; self.pps = nil; self.formatDesc = nil
-            self.stats = VideoStats()
-            self.windowStart = CACurrentMediaTime()
-            self.bytesInWindow = 0; self.framesInWindow = 0
-            self.lastFrameTime = 0; self.gaps.removeAll()
-        }
+        buffer.removeAll(keepingCapacity: true)
+        sps = nil; pps = nil; formatDesc = nil
+        stats = VideoStats()
+        windowStart = CACurrentMediaTime()
+        bytesInWindow = 0; framesInWindow = 0
+        lastFrameTime = 0; gaps.removeAll()
     }
 
     // MARK: - Rete
 
-    private func receive() {
-        connection?.receive(minimumIncompleteLength: 1, maximumLength: 262144) { [weak self] data, _, isComplete, error in
-            guard let self = self else { return }
+    private func receive(on conn: NWConnection, generation gen: Int) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 262144) { [weak self] data, _, isComplete, error in
+            guard let self = self, self.generation == gen else { return }
             if let data = data, !data.isEmpty {
                 self.bytesInWindow += data.count
                 self.buffer.append(data)
                 self.parse()
             }
             if let error = error {
-                self.onStatus?("Flusso interrotto: \(error.localizedDescription)")
+                self.report("Flusso interrotto: \(error.localizedDescription)")
                 return
             }
             if isComplete {
-                self.onStatus?("Flusso chiuso dal telefono")
+                self.report("Flusso chiuso dal telefono")
                 return
             }
-            self.receive()
+            self.receive(on: conn, generation: gen)
         }
     }
 

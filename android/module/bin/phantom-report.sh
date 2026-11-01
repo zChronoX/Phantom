@@ -4,7 +4,7 @@
 # Va eseguito come root, con lo schermo acceso (contiene una prova di cattura di 5 secondi).
 # Non raccoglie nomi di reti Wi-Fi, numeri, account o contenuti personali.
 
-DATA=/data/adb/phantom-f0
+DATA=${PHANTOM_DATA:-/data/adb/phantom-f0}
 REPORT=$DATA/report.txt
 mkdir -p "$DATA"
 

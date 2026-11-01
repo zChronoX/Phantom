@@ -57,6 +57,12 @@
   </div>
 
   <div class="card">
+    <button id="bstopvideo" class="sec">Ferma la sessione video sul POCO</button>
+    <p class="verdict" id="stopmsg"></p>
+    <pre>Emergenza: se il POCO si blocca mentre guardi il video dall'app, apri questa pagina in Safari e tocca il pulsante. La sonda ferma la sessione e libera lo schermo del telefono.</pre>
+  </div>
+
+  <div class="card">
     <pre>Il telefono Android rimanda indietro ogni messaggio. L'iPhone misura il tempo di andata e ritorno (RTT) ogni 20 ms. Fai il test vicino e lontano dal router e, se puoi, con l'iPhone collegato a un altro access point.
 
 Per la misura al rallentatore apri <a href="/clock">/clock</a> sul telefono Android: mostra un orologio al millisecondo da filmare insieme allo schermo che lo riceve.</pre>
@@ -165,6 +171,12 @@ jitter ${s.jitter.toFixed(2)} ms · picchi >50 ms: ${s.spikes}`;
     };
   }
 
+  $("bstopvideo").onclick = () => {
+    $("stopmsg").textContent = "Richiesta inviata…";
+    fetch("/stop").then(r => r.json())
+      .then(j => { $("stopmsg").textContent = j.stopped ? "Sessione fermata sul POCO" : "Nessuna sessione video attiva"; })
+      .catch(() => { $("stopmsg").textContent = "Il POCO non risponde"; });
+  };
   $("b30").onclick = () => start(30);
   $("b120").onclick = () => start(120);
   $("bstop").onclick = stop;

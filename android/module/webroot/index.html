@@ -29,10 +29,19 @@
   <div class="label">Video di base (porta 47802, solo rete locale)</div>
   <button data-cmd="video on">Accendi video</button>
   <button data-cmd="video off">Spegni video</button>
-  <div class="label">Video a bassa latenza (server scrcpy, porta 47803, solo rete locale)</div>
-  <button data-cmd="scrcpy on h264">scrcpy ON · H.264</button>
-  <button data-cmd="scrcpy on h265">scrcpy ON · H.265</button>
-  <button data-cmd="scrcpy off">scrcpy OFF</button>
+  <div class="label">Video a bassa latenza (scrcpy) · scala di prova: parti dall'1 e sali solo se il precedente va bene</div>
+  <button data-cmd="scrcpy on 1">1 · software leggero</button>
+  <button data-cmd="scrcpy on 2">2 · hardware leggero</button>
+  <button data-cmd="scrcpy on 3">3 · leggero tempo reale</button>
+  <button data-cmd="scrcpy on 4">4 · medio 60 fps</button>
+  <button data-cmd="scrcpy on 5">5 · pieno 60 fps</button>
+  <button data-cmd="scrcpy on 6">6 · massimo 120 fps</button>
+  <button data-cmd="scrcpy on 7">7 · massimo tempo reale</button>
+  <button data-cmd="scrcpy off" class="main">scrcpy OFF</button>
+  <button data-cmd="stopsessions" class="main">Ferma la sessione</button>
+  <button data-cmd="scrcpy profiles">Elenco profili</button>
+  <div class="label">Se il telefono si è bloccato e l'hai riavviato</div>
+  <button data-cmd="postmortem" class="main">Post-mortem</button>
   <div class="label">Wi-Fi di Android (spegnila dopo i test: consuma più batteria)</div>
   <button data-cmd="wifi on">Bassa latenza ON</button>
   <button data-cmd="wifi off">Bassa latenza OFF</button>

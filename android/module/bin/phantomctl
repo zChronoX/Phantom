@@ -2,24 +2,29 @@
 # phantomctl · comandi della sonda F0 di Phantom (da eseguire come root).
 #
 #   phantomctl status | start | stop | restart
+#   phantomctl scrcpy on [profilo] [h264|h265] | off | profiles | status
+#   phantomctl stopsessions        ferma subito la sessione video scrcpy in corso
+#   phantomctl postmortem          rapporto su un blocco o un riavvio anomalo
 #   phantomctl video on|off        flusso H.264 di base sulla porta 47802
 #   phantomctl autostart on|off    avvio della sonda all'accensione
 #   phantomctl doze on|off         forza il Doze profondo (per test rapidi) o lo ripristina
 #   phantomctl wifi on|off|status  modalità Wi-Fi a bassa latenza e alte prestazioni di Android
-#   phantomctl scrcpy on [h264|h265] | off | status   video a bassa latenza (server scrcpy, porta 47803)
 #   phantomctl report              report completo del dispositivo
 #   phantomctl log [righe]
 
 MODDIR=${PHANTOM_MODDIR:-/data/adb/modules/phantom_f0}
-DATA=/data/adb/phantom-f0
+DATA=${PHANTOM_DATA:-/data/adb/phantom-f0}
 BIN=$MODDIR/bin/phantom-probe
+SJ=$MODDIR/bin/scrcpy-server
 PIDF=$DATA/probe.pid
 LOG=$DATA/probe.log
 CONF=$DATA/probe.conf
 
 mkdir -p "$DATA"
-[ -f "$CONF" ] || printf 'AUTOSTART=1\nVIDEO=0\nBITRATE=12000000\nSIZE=\nWIFI_LL=0\nSCRCPY=0\nSCRCPY_CODEC=h264\nSCRCPY_FPS=120\nSCRCPY_BITRATE=20000000\nSCRCPY_SIZE=\nSCRCPY_OPTS=\n' > "$CONF"
+[ -f "$CONF" ] || printf 'AUTOSTART=1\nVIDEO=0\nBITRATE=12000000\nSIZE=\nWIFI_LL=0\nSCRCPY=0\nSCRCPY_PROFILE=sw-low\nSCRCPY_CODEC=h264\nSCRCPY_OPTS=\n' > "$CONF"
 . "$CONF"
+: "${SCRCPY_PROFILE:=sw-low}"
+: "${SCRCPY_CODEC:=h264}"
 
 running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
 
@@ -30,27 +35,73 @@ setconf() {
     . "$CONF"
 }
 
+# ---- profili scrcpy: una scala dal più leggero al più pesante, per trovare con precisione cosa fa bloccare il telefono.
+# Il suffisso -rt (tempo reale) riattiva priorità e latenza «tempo reale» che scrcpy 4+ imposta di suo
+# sull'encoder (novità della versione 4.0): sospettate di far impazzire l'encoder Qualcomm di questa ROM.
+# Senza suffisso i parametri sono neutri, come nelle versioni precedenti.
+#  1 sw-low      encoder software, nessun driver video del telefono        (verifica cattura + rete)
+#  2 hw-low      encoder hardware, parametri neutri, carico basso          (aggiunge il driver video)
+#  3 hw-low-rt   come 2 ma con i parametri «tempo reale»                   (isola i parametri aggressivi)
+#  4 hw-mid      864×1920, 60 fps, 10 Mbps, neutro
+#  5 hw-high     1080×2400, 60 fps, 16 Mbps, neutro
+#  6 hw-max      1080×2400, 120 fps, 20 Mbps, neutro                       (il carico che si era bloccato)
+#  7 hw-max-rt   come 6 ma «tempo reale»                                   (la configurazione esatta del blocco)
+profile_load() {
+    P_ENC=""; P_SIZE=""; P_FPS=60; P_BR=8000000; P_NEUTRAL=1
+    name="$1"
+    case "$name" in
+        1) name=sw-low ;; 2) name=hw-low ;; 3) name=hw-low-rt ;; 4) name=hw-mid ;;
+        5) name=hw-high ;; 6) name=hw-max ;; 7) name=hw-max-rt ;;
+    esac
+    base="${name%-rt}"
+    [ "$base" != "$name" ] && P_NEUTRAL=0
+    case "$base" in
+        sw-low)
+            [ "$P_NEUTRAL" = 0 ] && return 1  # l'encoder software non ha una variante «tempo reale»
+            P_ENC=c2.android.avc.encoder; P_SIZE=1280; P_FPS=30; P_BR=4000000; P_DESC="software · 576×1280 · 30 fps · 4 Mbps" ;;
+        hw-low)  P_SIZE=1280; P_FPS=30; P_BR=4000000; P_DESC="hardware · 576×1280 · 30 fps · 4 Mbps" ;;
+        hw-mid)  P_SIZE=1920; P_FPS=60; P_BR=10000000; P_DESC="hardware · 864×1920 · 60 fps · 10 Mbps" ;;
+        hw-high) P_FPS=60; P_BR=16000000; P_DESC="hardware · 1080×2400 · 60 fps · 16 Mbps" ;;
+        hw-max)  P_FPS=120; P_BR=20000000; P_DESC="hardware · 1080×2400 · 120 fps · 20 Mbps" ;;
+        *) return 1 ;;
+    esac
+    P_NAME=$name
+    if [ "$P_NEUTRAL" = 1 ]; then P_DESC="$P_DESC · parametri neutri"; else P_DESC="$P_DESC · tempo reale"; fi
+    return 0
+}
+
+# Opzioni per il server scrcpy, una per riga (nessuna contiene spazi).
+profile_opts() {
+    echo "video_codec=$SCRCPY_CODEC"
+    echo "max_fps=$P_FPS"
+    echo "video_bit_rate=$P_BR"
+    [ -n "$P_SIZE" ] && echo "max_size=$P_SIZE"
+    [ -n "$P_ENC" ] && echo "video_encoder=$P_ENC"
+    if [ "$P_NEUTRAL" = 1 ]; then
+        # Keyframe ogni 2 s (invece di 10) e senza priorità/latenza «tempo reale» che scrcpy imposta di suo.
+        echo "video_codec_options=i-frame-interval=2,priority:int=1,latency:int=0"
+    else
+        echo "video_codec_options=i-frame-interval=2"
+    fi
+}
+
 start() {
     if running; then echo "Sonda già attiva (PID $(cat "$PIDF"))"; return 0; fi
     # Il log non deve crescere all'infinito durante i test di più ore.
     [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 1048576 ] && mv "$LOG" "$LOG.1"
-    set -- --daemon --pidfile "$PIDF" --log "$LOG" --bitrate "$BITRATE"
+    set -- --daemon --pidfile "$PIDF" --log "$LOG" --state-dir "$DATA" --bitrate "$BITRATE"
     [ "$VIDEO" = 1 ] && set -- "$@" --video
     [ -n "$SIZE" ] && set -- "$@" --size "$SIZE"
-    SJ=$MODDIR/bin/scrcpy-server
     if [ "${SCRCPY:-0}" = 1 ]; then
-        if [ -f "$SJ" ] && [ -f "$SJ.version" ]; then
-            set -- "$@" --scrcpy-port 47803 --scrcpy-jar "$SJ" --scrcpy-version "$(cat "$SJ.version")" \
-                --scrcpy-opt "video_codec=${SCRCPY_CODEC:-h264}" \
-                --scrcpy-opt "max_fps=${SCRCPY_FPS:-120}" \
-                --scrcpy-opt "video_bit_rate=${SCRCPY_BITRATE:-20000000}"
-            [ -n "${SCRCPY_SIZE:-}" ] && set -- "$@" --scrcpy-opt "max_size=$SCRCPY_SIZE"
-            # Opzioni extra scritte a mano in probe.conf, separate da spazio (es. "video_encoder=c2.qti.avc.encoder").
+        if [ -f "$SJ" ] && [ -f "$SJ.version" ] && profile_load "$SCRCPY_PROFILE"; then
+            set -- "$@" --scrcpy-port 47803 --scrcpy-jar "$SJ" --scrcpy-version "$(cat "$SJ.version")" --scrcpy-profile "$P_NAME"
+            for o in $(profile_opts); do set -- "$@" --scrcpy-opt "$o"; done
+            # Opzioni extra scritte a mano in probe.conf (SCRCPY_OPTS="a=1 b=2"), applicate per ultime.
             set -f
             for o in ${SCRCPY_OPTS:-}; do set -- "$@" --scrcpy-opt "$o"; done
             set +f
         else
-            echo "scrcpy acceso ma manca il server in $SJ: reinstalla il modulo scaricato da GitHub Actions"
+            echo "scrcpy è acceso ma manca il server in $SJ oppure il profilo «$SCRCPY_PROFILE» non è valido: non lo avvio"
         fi
     fi
     "$BIN" "$@"
@@ -59,31 +110,47 @@ start() {
 }
 
 stop() {
-    running && kill "$(cat "$PIDF")" 2>/dev/null
+    if running; then
+        pid=$(cat "$PIDF")
+        kill "$pid" 2>/dev/null   # la sonda ferma da sola le sessioni scrcpy e il server
+        i=0
+        while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+    fi
     rm -f "$PIDF"
     echo "Sonda fermata"
 }
 
 wifi_ip() { ip -4 -o addr show wlan0 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }'; }
 
+crash_warning() {
+    if [ -f "$DATA/crash-last.txt" ]; then
+        echo "⚠ L'ultima sessione scrcpy NON è finita in modo pulito: il telefono si è probabilmente bloccato."
+        echo "  scrcpy è stato spento per sicurezza. Rapporto: $DATA/crash-last.txt"
+        sed -n '/^profilo=/p;/^opzioni=/p' "$DATA/crash-last.txt" | head -n 2 | sed 's/^/  /'
+    fi
+}
+
 status() {
     if running; then echo "Sonda: ATTIVA (PID $(cat "$PIDF"))"; else echo "Sonda: ferma"; fi
     echo "Video di base: $([ "$VIDEO" = 1 ] && echo acceso || echo spento) · avvio automatico: $([ "$AUTOSTART" = 1 ] && echo sì || echo no)"
     echo "Wi-Fi bassa latenza: $([ "${WIFI_LL:-0}" = 1 ] && echo attiva || echo spenta)"
-    if [ -f "$MODDIR/bin/scrcpy-server.version" ]; then
+    if [ -f "$SJ.version" ]; then
         if [ "${SCRCPY:-0}" = 1 ]; then
-            echo "scrcpy: ACCESO ($SCRCPY_CODEC, $SCRCPY_FPS fps, $((SCRCPY_BITRATE / 1000000)) Mbps, porta 47803) · server v$(cat "$MODDIR/bin/scrcpy-server.version")"
+            profile_load "$SCRCPY_PROFILE" && echo "scrcpy: ACCESO · profilo $P_NAME ($P_DESC) · $SCRCPY_CODEC · porta 47803 · server v$(cat "$SJ.version")" \
+                || echo "scrcpy: ACCESO ma profilo «$SCRCPY_PROFILE» non valido"
         else
-            echo "scrcpy: spento · server v$(cat "$MODDIR/bin/scrcpy-server.version")"
+            echo "scrcpy: spento · server v$(cat "$SJ.version")"
         fi
     else
         echo "scrcpy: server non incluso in questo pacchetto"
     fi
+    crash_warning
     echo "Indirizzi del telefono:"
     ip -4 -o addr show 2>/dev/null | awk '$2 != "lo" { split($4, a, "/"); print "  " $2 ": " a[1] }'
     ipw=$(wifi_ip)
     if [ -n "$ipw" ]; then
-        echo "Dall'iPhone (Safari):  http://$ipw:47801"
+        echo "Dall'iPhone (Safari):  http://$ipw:47801   (emergenza: http://$ipw:47801/stop)"
         echo "Dal PC:                python f0_client.py ping $ipw"
         [ "$VIDEO" = 1 ] && echo "Video dal PC:          python f0_client.py video $ipw"
         [ "${SCRCPY:-0}" = 1 ] && echo "Video scrcpy:          app iPhone → porta 47803"
@@ -147,16 +214,58 @@ case "$1" in
         esac ;;
     scrcpy)
         case "$2" in
+            profiles)
+                for n in 1 2 3 4 5 6 7; do
+                    profile_load "$n"
+                    echo "$n  $P_NAME$([ "$P_NAME" = "$SCRCPY_PROFILE" ] && [ "${SCRCPY:-0}" = 1 ] && echo '  ← attivo')"
+                    echo "     $P_DESC"
+                done
+                echo "Si parte dall'1 e si sale di un gradino solo se il precedente ha funzionato bene per almeno un minuto."
+                echo "Qualsiasi profilo hardware accetta anche il suffisso -rt (es. hw-mid-rt)." ;;
             on)
-                if [ ! -f "$MODDIR/bin/scrcpy-server" ]; then echo "Il server scrcpy non è incluso: usa il pacchetto compilato da GitHub Actions."; exit 1; fi
-                [ -n "$3" ] && { case "$3" in h264 | h265) setconf SCRCPY_CODEC "$3" ;; *) echo "codec: h264 o h265"; exit 2 ;; esac; }
-                setconf SCRCPY 1 ;;
-            off) setconf SCRCPY 0 ;;
-            status | "") ;;
-            *) echo "uso: phantomctl scrcpy on [h264|h265] | off | status"; exit 2 ;;
-        esac
-        stop >/dev/null; start
-        status | sed -n '3,6p' ;;
+                if [ ! -f "$SJ" ]; then echo "Il server scrcpy non è incluso: usa il pacchetto compilato da GitHub Actions."; exit 1; fi
+                prof="${3:-$SCRCPY_PROFILE}"
+                if ! profile_load "$prof"; then echo "Profilo «$prof» sconosciuto: vedi phantomctl scrcpy profiles"; exit 2; fi
+                case "$4" in
+                    "") ;;
+                    h264 | h265) setconf SCRCPY_CODEC "$4" ;;
+                    *) echo "codec: h264 o h265"; exit 2 ;;
+                esac
+                if [ "$SCRCPY_CODEC" = h265 ] && [ "$P_ENC" = c2.android.avc.encoder ]; then
+                    echo "Il profilo $P_NAME usa l'encoder software H.264: H.265 non è disponibile qui."; exit 2
+                fi
+                if [ -f "$DATA/crash-last.txt" ]; then
+                    crash_warning
+                    echo "  (avviso letto: lo cancello; i rapporti restano in $DATA)"
+                    rm -f "$DATA/crash-last.txt"
+                fi
+                setconf SCRCPY_PROFILE "$P_NAME"
+                setconf SCRCPY 1
+                stop >/dev/null; start
+                echo "scrcpy ACCESO · profilo $P_NAME ($P_DESC) · $SCRCPY_CODEC"
+                echo "Se il POCO si blocca: chiudi l'app Phantom F0 sull'iPhone oppure apri http://$(wifi_ip):47801/stop in Safari." ;;
+            off) setconf SCRCPY 0; stop >/dev/null; start; echo "scrcpy spento" ;;
+            status | "") status | sed -n '/^scrcpy:/p'; crash_warning ;;
+            *) echo "uso: phantomctl scrcpy on [profilo] [h264|h265] | off | profiles | status"; exit 2 ;;
+        esac ;;
+    stopsessions)
+        ipw=$(wifi_ip)
+        if running; then
+            # La sonda risponde a /stop dalla rete locale; in mancanza di rete si ricorre al segnale.
+            # Il file del blocco può contenere il pid di una sessione vecchia: si agisce solo se è davvero la sonda.
+            if p=$(cat "$DATA/scrcpy.lock" 2>/dev/null) && [ -n "$p" ] && grep -q phantom-probe "/proc/$p/cmdline" 2>/dev/null; then
+                kill "$p" && echo "Sessione scrcpy (pid $p) fermata"
+            else
+                echo "Nessuna sessione scrcpy attiva"
+            fi
+        else
+            echo "La sonda è ferma"
+        fi ;;
+    postmortem)
+        OUT=$DATA/postmortem.txt
+        sh "$MODDIR/bin/phantom-postmortem.sh" > "$OUT" 2>&1
+        cp "$OUT" /sdcard/Download/phantom-f0-postmortem.txt 2>/dev/null && echo "Salvato anche in Download/phantom-f0-postmortem.txt"
+        cat "$OUT" ;;
     report) PHANTOM_MODDIR=$MODDIR sh "$MODDIR/bin/phantom-report.sh" ;;
     log) tail -n "${2:-50}" "$LOG" ;;
     *) sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;

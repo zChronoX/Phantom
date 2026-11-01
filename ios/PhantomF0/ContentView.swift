@@ -9,6 +9,7 @@ struct ContentView: View {
     @AppStorage("voice") private var voice = true
     @AppStorage("videoMode") private var videoMode = VideoMode.scrcpy.rawValue
     @State private var copied = false
+    @State private var remoteMessage = ""
 
     var body: some View {
         NavigationStack {
@@ -74,9 +75,18 @@ struct ContentView: View {
                     } label: {
                         Label("Guarda lo schermo del POCO", systemImage: "play.rectangle")
                     }
-                    Text("Prima accendi il video nella WebUI del modulo sul POCO: «scrcpy ON» per la bassa latenza, «Accendi video» per la sorgente base. Mostra lo schermo di Android dal vivo, con frame rate e banda.")
+                    Text("Prima accendi il video nella WebUI del modulo sul POCO: un profilo della scala scrcpy per la bassa latenza, «Accendi video» per la sorgente base. Mostra lo schermo di Android dal vivo, con frame rate e banda.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    Button("Ferma la sessione video sul POCO") {
+                        remoteMessage = "Richiesta inviata…"
+                        RemoteControl.stopSessions(host: host) { remoteMessage = $0 }
+                    }
+                    if !remoteMessage.isEmpty {
+                        Text(remoteMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Section {
