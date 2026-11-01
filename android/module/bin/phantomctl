@@ -120,5 +120,5 @@ case "$1" in
         esac ;;
     report) PHANTOM_MODDIR=$MODDIR sh "$MODDIR/bin/phantom-report.sh" ;;
     log) tail -n "${2:-50}" "$LOG" ;;
-    *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
