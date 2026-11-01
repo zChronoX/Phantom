@@ -5,6 +5,7 @@
 #   phantomctl video on|off        flusso H.264 di base sulla porta 47802
 #   phantomctl autostart on|off    avvio della sonda all'accensione
 #   phantomctl doze on|off         forza il Doze profondo (per test rapidi) o lo ripristina
+#   phantomctl wifi on|off|status  modalità Wi-Fi a bassa latenza e alte prestazioni di Android
 #   phantomctl report              report completo del dispositivo
 #   phantomctl log [righe]
 
@@ -16,7 +17,7 @@ LOG=$DATA/probe.log
 CONF=$DATA/probe.conf
 
 mkdir -p "$DATA"
-[ -f "$CONF" ] || printf 'AUTOSTART=1\nVIDEO=0\nBITRATE=12000000\nSIZE=\n' > "$CONF"
+[ -f "$CONF" ] || printf 'AUTOSTART=1\nVIDEO=0\nBITRATE=12000000\nSIZE=\nWIFI_LL=0\n' > "$CONF"
 . "$CONF"
 
 running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
@@ -51,6 +52,7 @@ wifi_ip() { ip -4 -o addr show wlan0 2>/dev/null | awk '{ split($4, a, "/"); pri
 status() {
     if running; then echo "Sonda: ATTIVA (PID $(cat "$PIDF"))"; else echo "Sonda: ferma"; fi
     echo "Video di base: $([ "$VIDEO" = 1 ] && echo acceso || echo spento) · avvio automatico: $([ "$AUTOSTART" = 1 ] && echo sì || echo no)"
+    echo "Wi-Fi bassa latenza: $([ "${WIFI_LL:-0}" = 1 ] && echo attiva || echo spenta)"
     echo "Indirizzi del telefono:"
     ip -4 -o addr show 2>/dev/null | awk '$2 != "lo" { split($4, a, "/"); print "  " $2 ": " a[1] }'
     ipw=$(wifi_ip)
@@ -98,7 +100,25 @@ case "$1" in
                 echo "Doze normale ripristinato." ;;
             *) echo "uso: phantomctl doze on|off"; exit 2 ;;
         esac ;;
+    wifi)
+        # Le uscite di `cmd` passano da una pipe: i servizi di sistema non possono scrivere su file in /data/adb.
+        case "$2" in
+            on)
+                cmd wifi force-low-latency-mode enabled 2>&1 | cat
+                cmd wifi force-hi-perf-mode enabled 2>&1 | cat
+                setconf WIFI_LL 1
+                echo "Wi-Fi bassa latenza ATTIVA: niente risparmio energetico sulla radio finché non la spegni o riavvii." ;;
+            off)
+                cmd wifi force-low-latency-mode disabled 2>&1 | cat
+                cmd wifi force-hi-perf-mode disabled 2>&1 | cat
+                setconf WIFI_LL 0
+                echo "Wi-Fi bassa latenza spenta: comportamento normale." ;;
+            status | "")
+                echo "Wi-Fi bassa latenza (impostata da Phantom): $([ "${WIFI_LL:-0}" = 1 ] && echo attiva || echo spenta)"
+                dumpsys wifi 2>/dev/null | grep -m 8 -iE "low.?latency|hi.?perf|power.?save" | cut -c1-160 ;;
+            *) echo "uso: phantomctl wifi on|off|status"; exit 2 ;;
+        esac ;;
     report) PHANTOM_MODDIR=$MODDIR sh "$MODDIR/bin/phantom-report.sh" ;;
     log) tail -n "${2:-50}" "$LOG" ;;
-    *) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
