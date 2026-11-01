@@ -179,7 +179,7 @@ final class VideoClient {
                             parameterSetCount: 2,
                             parameterSetPointers: pp.baseAddress!,
                             parameterSetSizes: ss.baseAddress!,
-                            NALUnitHeaderLength: 4,
+                            nalUnitHeaderLength: 4,
                             formatDescriptionOut: &fmt)
                     }
                 }
