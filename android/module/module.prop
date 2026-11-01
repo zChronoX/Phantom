@@ -1,6 +1,6 @@
 id=phantom_f0
 name=Phantom F0
-version=v0.2.0
-versionCode=3
+version=v0.3.0
+versionCode=4
 author=Phantom
 description=Sonda della fase 0 di Phantom: test di rete, Doze e video di base. Tocca "Azione" per stato e report, oppure apri la WebUI.

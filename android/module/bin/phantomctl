@@ -6,6 +6,7 @@
 #   phantomctl autostart on|off    avvio della sonda all'accensione
 #   phantomctl doze on|off         forza il Doze profondo (per test rapidi) o lo ripristina
 #   phantomctl wifi on|off|status  modalità Wi-Fi a bassa latenza e alte prestazioni di Android
+#   phantomctl scrcpy on [h264|h265] | off | status   video a bassa latenza (server scrcpy, porta 47803)
 #   phantomctl report              report completo del dispositivo
 #   phantomctl log [righe]
 
@@ -17,7 +18,7 @@ LOG=$DATA/probe.log
 CONF=$DATA/probe.conf
 
 mkdir -p "$DATA"
-[ -f "$CONF" ] || printf 'AUTOSTART=1\nVIDEO=0\nBITRATE=12000000\nSIZE=\nWIFI_LL=0\n' > "$CONF"
+[ -f "$CONF" ] || printf 'AUTOSTART=1\nVIDEO=0\nBITRATE=12000000\nSIZE=\nWIFI_LL=0\nSCRCPY=0\nSCRCPY_CODEC=h264\nSCRCPY_FPS=120\nSCRCPY_BITRATE=20000000\nSCRCPY_SIZE=\nSCRCPY_OPTS=\n' > "$CONF"
 . "$CONF"
 
 running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
@@ -36,6 +37,22 @@ start() {
     set -- --daemon --pidfile "$PIDF" --log "$LOG" --bitrate "$BITRATE"
     [ "$VIDEO" = 1 ] && set -- "$@" --video
     [ -n "$SIZE" ] && set -- "$@" --size "$SIZE"
+    SJ=$MODDIR/bin/scrcpy-server
+    if [ "${SCRCPY:-0}" = 1 ]; then
+        if [ -f "$SJ" ] && [ -f "$SJ.version" ]; then
+            set -- "$@" --scrcpy-port 47803 --scrcpy-jar "$SJ" --scrcpy-version "$(cat "$SJ.version")" \
+                --scrcpy-opt "video_codec=${SCRCPY_CODEC:-h264}" \
+                --scrcpy-opt "max_fps=${SCRCPY_FPS:-120}" \
+                --scrcpy-opt "video_bit_rate=${SCRCPY_BITRATE:-20000000}"
+            [ -n "${SCRCPY_SIZE:-}" ] && set -- "$@" --scrcpy-opt "max_size=$SCRCPY_SIZE"
+            # Opzioni extra scritte a mano in probe.conf, separate da spazio (es. "video_encoder=c2.qti.avc.encoder").
+            set -f
+            for o in ${SCRCPY_OPTS:-}; do set -- "$@" --scrcpy-opt "$o"; done
+            set +f
+        else
+            echo "scrcpy acceso ma manca il server in $SJ: reinstalla il modulo scaricato da GitHub Actions"
+        fi
+    fi
     "$BIN" "$@"
     sleep 1
     if running; then echo "Sonda avviata"; else echo "Avvio fallito. Ultime righe del log:"; tail -n 5 "$LOG"; return 1; fi
@@ -53,6 +70,15 @@ status() {
     if running; then echo "Sonda: ATTIVA (PID $(cat "$PIDF"))"; else echo "Sonda: ferma"; fi
     echo "Video di base: $([ "$VIDEO" = 1 ] && echo acceso || echo spento) · avvio automatico: $([ "$AUTOSTART" = 1 ] && echo sì || echo no)"
     echo "Wi-Fi bassa latenza: $([ "${WIFI_LL:-0}" = 1 ] && echo attiva || echo spenta)"
+    if [ -f "$MODDIR/bin/scrcpy-server.version" ]; then
+        if [ "${SCRCPY:-0}" = 1 ]; then
+            echo "scrcpy: ACCESO ($SCRCPY_CODEC, $SCRCPY_FPS fps, $((SCRCPY_BITRATE / 1000000)) Mbps, porta 47803) · server v$(cat "$MODDIR/bin/scrcpy-server.version")"
+        else
+            echo "scrcpy: spento · server v$(cat "$MODDIR/bin/scrcpy-server.version")"
+        fi
+    else
+        echo "scrcpy: server non incluso in questo pacchetto"
+    fi
     echo "Indirizzi del telefono:"
     ip -4 -o addr show 2>/dev/null | awk '$2 != "lo" { split($4, a, "/"); print "  " $2 ": " a[1] }'
     ipw=$(wifi_ip)
@@ -60,6 +86,7 @@ status() {
         echo "Dall'iPhone (Safari):  http://$ipw:47801"
         echo "Dal PC:                python f0_client.py ping $ipw"
         [ "$VIDEO" = 1 ] && echo "Video dal PC:          python f0_client.py video $ipw"
+        [ "${SCRCPY:-0}" = 1 ] && echo "Video scrcpy:          app iPhone → porta 47803"
     fi
     echo "Ultime righe del log:"
     tail -n 6 "$LOG" 2>/dev/null
@@ -118,7 +145,19 @@ case "$1" in
                 dumpsys wifi 2>/dev/null | grep -m 8 -iE "low.?latency|hi.?perf|power.?save" | cut -c1-160 ;;
             *) echo "uso: phantomctl wifi on|off|status"; exit 2 ;;
         esac ;;
+    scrcpy)
+        case "$2" in
+            on)
+                if [ ! -f "$MODDIR/bin/scrcpy-server" ]; then echo "Il server scrcpy non è incluso: usa il pacchetto compilato da GitHub Actions."; exit 1; fi
+                [ -n "$3" ] && { case "$3" in h264 | h265) setconf SCRCPY_CODEC "$3" ;; *) echo "codec: h264 o h265"; exit 2 ;; esac; }
+                setconf SCRCPY 1 ;;
+            off) setconf SCRCPY 0 ;;
+            status | "") ;;
+            *) echo "uso: phantomctl scrcpy on [h264|h265] | off | status"; exit 2 ;;
+        esac
+        stop >/dev/null; start
+        status | sed -n '3,6p' ;;
     report) PHANTOM_MODDIR=$MODDIR sh "$MODDIR/bin/phantom-report.sh" ;;
     log) tail -n "${2:-50}" "$LOG" ;;
-    *) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

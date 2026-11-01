@@ -6,3 +6,5 @@ __pycache__/
 ios/build/
 ios/*.xcodeproj/
 ios/PhantomF0/Info.plist
+android/module/bin/scrcpy-server
+android/module/bin/scrcpy-server.version

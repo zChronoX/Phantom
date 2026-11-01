@@ -25,6 +25,11 @@ jobs:
           cd android/module
           shellcheck -s sh -e SC1090,SC1091 bin/phantomctl bin/phantom-report.sh service.sh action.sh uninstall.sh customize.sh
 
+      - name: Scarica il server di scrcpy (Apache 2.0)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tools/fetch_scrcpy.sh
+
       - name: Compila sonda e modulo
         run: android/module/build.sh
 

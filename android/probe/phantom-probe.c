@@ -33,12 +33,14 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <stddef.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
-#define PROBE_VERSION "0.1.0"
+#define PROBE_VERSION "0.3.0"
 #define UDP_MAGIC "PHP1"
 #define UDP_HDR 32          /* magic(4) seq(4) client_ns(8) server_mono_ns(8) server_suspend_ms(8) */
 #define WAKE_GAP_NS (30ull * 1000000000ull)
@@ -47,6 +49,16 @@ static int g_udp_port = 47800;
 static int g_http_port = 47801;
 static int g_video_port = 47802;
 static int g_video = 0;
+/* Ponte verso il server di scrcpy (progetto open source, Apache 2.0): ogni connessione TCP avvia
+ * il suo server via app_process e ne inoltra il flusso. Spento se g_scrcpy_port == 0. */
+static int g_scrcpy_port = 0;
+static const char *g_scrcpy_jar = NULL;
+static const char *g_scrcpy_ver = NULL;
+static const char *g_app_process = "/system/bin/app_process";
+static const char *g_scrcpy_sock = NULL; /* solo per i test: socket UNIX su file invece dell'astratto */
+#define MAX_SCRCPY_OPTS 32
+static const char *g_scrcpy_opts[MAX_SCRCPY_OPTS];
+static int g_scrcpy_nopts = 0;
 static int g_allow_any = 0;
 static long g_bitrate = 12000000;
 static const char *g_size = NULL;
@@ -408,6 +420,115 @@ static void serve_video(int fd, const struct sockaddr_in *peer_sa) {
     logmsg("video: client %s disconnesso, %.1f MB inviati", peer, (double)total / 1e6);
 }
 
+
+/* ------------------------------------------------------------ ponte scrcpy */
+
+static int connect_scrcpy_socket(unsigned scid) {
+    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s < 0) return -1;
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sun_family = AF_UNIX;
+    socklen_t len;
+    if (g_scrcpy_sock) {
+        snprintf(sa.sun_path, sizeof sa.sun_path, "%s", g_scrcpy_sock);
+        len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + strlen(sa.sun_path) + 1);
+    } else {
+        char name[64];
+        int n = snprintf(name, sizeof name, "scrcpy_%08x", scid);
+        sa.sun_path[0] = 0; /* socket astratto: il nome inizia con un byte nullo */
+        memcpy(sa.sun_path + 1, name, (size_t)n);
+        len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + (size_t)n);
+    }
+    if (connect(s, (struct sockaddr *)&sa, len) < 0) { close(s); return -1; }
+    return s;
+}
+
+static void serve_scrcpy(int fd, const struct sockaddr_in *peer_sa) {
+    char peer[64];
+    addr_str(peer_sa, peer, sizeof peer);
+    signal(SIGCHLD, SIG_DFL);
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+
+    unsigned scid = (unsigned)getpid() & 0x7fffffffu; /* unico per connessione */
+    char scid_arg[32], ver_arg[64];
+    snprintf(scid_arg, sizeof scid_arg, "scid=%08x", scid);
+    snprintf(ver_arg, sizeof ver_arg, "%s", g_scrcpy_ver ? g_scrcpy_ver : "");
+
+    char *argv[16 + MAX_SCRCPY_OPTS];
+    int a = 0;
+    argv[a++] = (char *)"app_process";
+    argv[a++] = (char *)"/";
+    argv[a++] = (char *)"com.genymobile.scrcpy.Server";
+    argv[a++] = ver_arg;
+    argv[a++] = scid_arg;
+    argv[a++] = (char *)"log_level=info";
+    argv[a++] = (char *)"tunnel_forward=true";
+    argv[a++] = (char *)"audio=false";
+    argv[a++] = (char *)"control=false";
+    for (int i = 0; i < g_scrcpy_nopts; i++) argv[a++] = (char *)g_scrcpy_opts[i];
+    argv[a] = NULL;
+
+    logmsg("scrcpy: client %s connesso, avvio il server %s (%s)", peer, ver_arg, scid_arg);
+    pid_t child = fork();
+    if (child < 0) { logmsg("scrcpy: fork fallita"); return; }
+    if (child == 0) {
+        setenv("CLASSPATH", g_scrcpy_jar, 1);
+        dup2(g_log_fd, 1);
+        dup2(g_log_fd, 2);
+        close(fd);
+        execv(g_app_process, argv);
+        _exit(127);
+    }
+
+    /* Il server impiega circa un secondo ad aprire il suo socket: si riprova fino a 6 s. */
+    int up = -1;
+    uint64_t t0 = now_ns(CLOCK_MONOTONIC);
+    while (now_ns(CLOCK_MONOTONIC) - t0 < 6000000000ull) {
+        up = connect_scrcpy_socket(scid);
+        if (up >= 0) break;
+        int st;
+        if (waitpid(child, &st, WNOHANG) == child) {
+            logmsg("scrcpy: il server è terminato subito (stato %d); vedi il log sopra", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+            return;
+        }
+        usleep(50000);
+    }
+    if (up < 0) {
+        logmsg("scrcpy: il server non ha aperto il socket entro 6 s");
+        kill(child, SIGKILL);
+        waitpid(child, NULL, 0);
+        return;
+    }
+    logmsg("scrcpy: server pronto dopo %.0f ms", (double)(now_ns(CLOCK_MONOTONIC) - t0) / 1e6);
+
+    unsigned char buf[65536];
+    uint64_t total = 0;
+    struct pollfd pf[2] = {{.fd = up, .events = POLLIN}, {.fd = fd, .events = POLLIN}};
+    for (;;) {
+        if (poll(pf, 2, -1) < 0) { if (errno == EINTR) continue; break; }
+        if (pf[0].revents & (POLLIN | POLLHUP | POLLERR)) {
+            ssize_t r = read(up, buf, sizeof buf);
+            if (r <= 0) break; /* il server ha chiuso */
+            if (send_all(fd, buf, (size_t)r) < 0) break;
+            total += (uint64_t)r;
+        }
+        if (pf[1].revents & (POLLIN | POLLHUP | POLLERR)) {
+            char c[256];
+            ssize_t r = recv(fd, c, sizeof c, MSG_DONTWAIT);
+            if (r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) break; /* l'iPhone ha chiuso */
+            /* i dati dal client non servono (controllo spento): si scartano */
+        }
+    }
+    close(up);
+    kill(child, SIGTERM);
+    usleep(200000);
+    kill(child, SIGKILL);
+    waitpid(child, NULL, 0);
+    logmsg("scrcpy: client %s disconnesso, %.1f MB inoltrati", peer, (double)total / 1e6);
+}
+
 /* -------------------------------------------------------------------- UDP */
 
 static void handle_udp(int fd) {
@@ -448,12 +569,18 @@ static void usage(void) {
             "  --video-port N     default 47802\n"
             "  --bitrate BPS      bitrate del video (default 12000000)\n"
             "  --size WxH         risoluzione del video (default nativa)\n"
+            "  --scrcpy-port N    ponte verso il server di scrcpy su questa porta TCP (0 = spento)\n"
+            "  --scrcpy-jar FILE  scrcpy-server (il file jar)\n"
+            "  --scrcpy-version V versione di scrcpy-server, richiesta come primo argomento\n"
+            "  --scrcpy-opt K=V   opzione per il server (ripetibile, es. video_codec=h265)\n"
             "  --allow-any        accetta anche indirizzi pubblici (sconsigliato)\n"
             "  --log FILE         file di log (default stderr)\n"
             "  --pidfile FILE     scrive il PID\n"
             "  --daemon           va in background\n"
             "  --screenrecord P   percorso di screenrecord (per i test)\n"
-            "  --getprop P        percorso di getprop (per i test)\n",
+            "  --getprop P        percorso di getprop (per i test)\n"
+            "  --app-process P    percorso di app_process (per i test)\n"
+            "  --scrcpy-socket P  socket UNIX su file al posto di quello astratto (per i test)\n",
             PROBE_VERSION);
 }
 
@@ -475,6 +602,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--daemon")) daemonize = 1;
         else if (!strcmp(a, "--screenrecord")) { NEEDV(); g_screenrecord = v; }
         else if (!strcmp(a, "--getprop")) { NEEDV(); g_getprop = v; }
+        else if (!strcmp(a, "--scrcpy-port")) { NEEDV(); g_scrcpy_port = atoi(v); }
+        else if (!strcmp(a, "--scrcpy-jar")) { NEEDV(); g_scrcpy_jar = v; }
+        else if (!strcmp(a, "--scrcpy-version")) { NEEDV(); g_scrcpy_ver = v; }
+        else if (!strcmp(a, "--scrcpy-opt")) { NEEDV(); if (g_scrcpy_nopts < MAX_SCRCPY_OPTS) g_scrcpy_opts[g_scrcpy_nopts++] = v; }
+        else if (!strcmp(a, "--app-process")) { NEEDV(); g_app_process = v; }
+        else if (!strcmp(a, "--scrcpy-socket")) { NEEDV(); g_scrcpy_sock = v; }
         else if (!strcmp(a, "--version")) { printf("%s\n", PROBE_VERSION); return 0; }
         else { usage(); return 2; }
     }
@@ -495,6 +628,12 @@ int main(int argc, char **argv) {
     int video = -1;
     if (g_video && (video = listen_tcp(g_video_port)) < 0) { logmsg("errore: porta video %d: %s", g_video_port, strerror(errno)); return 1; }
 
+    int scrcpy = -1;
+    if (g_scrcpy_port > 0) {
+        if (!g_scrcpy_jar || !g_scrcpy_ver) { logmsg("errore: --scrcpy-port richiede --scrcpy-jar e --scrcpy-version"); return 1; }
+        if ((scrcpy = listen_tcp(g_scrcpy_port)) < 0) { logmsg("errore: porta scrcpy %d: %s", g_scrcpy_port, strerror(errno)); return 1; }
+    }
+
     if (daemonize) {
         pid_t p = fork();
         if (p < 0) return 1;
@@ -511,11 +650,15 @@ int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
     signal(SIGCHLD, SIG_IGN); /* i figli che servono le connessioni vengono raccolti dal kernel */
     g_start_mono = now_ns(CLOCK_MONOTONIC);
-    logmsg("avvio: phantom-probe %s, udp %d, http %d, video %s, sospensione finora %llu ms",
-           PROBE_VERSION, g_udp_port, g_http_port, g_video ? "acceso" : "spento", (unsigned long long)suspended_ms());
+    logmsg("avvio: phantom-probe %s, udp %d, http %d, video %s, scrcpy %s, sospensione finora %llu ms",
+           PROBE_VERSION, g_udp_port, g_http_port, g_video ? "acceso" : "spento",
+           g_scrcpy_port > 0 ? "acceso" : "spento", (unsigned long long)suspended_ms());
 
-    struct pollfd pf[3] = {{.fd = udp, .events = POLLIN}, {.fd = http, .events = POLLIN}, {.fd = video, .events = POLLIN}};
-    int nfds = video >= 0 ? 3 : 2;
+    struct pollfd pf[4] = {{.fd = udp, .events = POLLIN}, {.fd = http, .events = POLLIN}, {.fd = -1, .events = POLLIN}, {.fd = -1, .events = POLLIN}};
+    int kind[4] = {0, 1, 0, 0}; /* 1 = http, 2 = video di base, 3 = scrcpy */
+    int nfds = 2;
+    if (video >= 0) { pf[nfds].fd = video; kind[nfds++] = 2; }
+    if (scrcpy >= 0) { pf[nfds].fd = scrcpy; kind[nfds++] = 3; }
     for (;;) {
         if (poll(pf, (nfds_t)nfds, -1) < 0) { if (errno == EINTR) continue; logmsg("errore: poll: %s", strerror(errno)); return 1; }
         if (pf[0].revents & POLLIN) handle_udp(udp);
@@ -533,8 +676,10 @@ int main(int argc, char **argv) {
             }
             pid_t child = fork();
             if (child == 0) {
-                close(udp); close(http); if (video >= 0) close(video);
-                if (i == 1) serve_http(c, &peer); else serve_video(c, &peer);
+                close(udp); close(http); if (video >= 0) close(video); if (scrcpy >= 0) close(scrcpy);
+                if (kind[i] == 1) serve_http(c, &peer);
+                else if (kind[i] == 2) serve_video(c, &peer);
+                else serve_scrcpy(c, &peer);
                 close(c);
                 _exit(0);
             }

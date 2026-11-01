@@ -10,6 +10,13 @@ cp -r META-INF webroot module.prop customize.sh service.sh action.sh uninstall.s
 mkdir -p stage/bin
 cp bin/phantomctl bin/phantom-report.sh stage/bin/
 cp ../probe/build/phantom-probe-arm64 stage/bin/phantom-probe
+# Il server di scrcpy è scaricato da tools/fetch_scrcpy.sh (in CI); se manca, il modulo funziona senza.
+if [ -f bin/scrcpy-server ] && [ -f bin/scrcpy-server.version ]; then
+  cp bin/scrcpy-server bin/scrcpy-server.version stage/bin/
+  echo "incluso scrcpy-server v$(cat bin/scrcpy-server.version)"
+else
+  echo "scrcpy-server non presente: modulo senza video a bassa latenza"
+fi
 chmod 755 stage/bin/* stage/*.sh stage/META-INF/com/google/android/update-binary
 (cd stage && zip -qr9 -X "../$OUT/phantom-f0.zip" .)
 rm -rf stage
