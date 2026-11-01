@@ -23,6 +23,15 @@ workflows:
     scripts:
       - name: Compila e crea l'IPA
         script: ./ios/build-ipa.sh
+      - name: Prepara gli artifacts
+        script: |
+          # Tutto ciò che sta in CM_EXPORT_DIR viene pubblicato come artifact da Codemagic.
+          EXPORT_DIR="${CM_EXPORT_DIR:-$CM_BUILD_DIR/export}"
+          mkdir -p "$EXPORT_DIR"
+          echo "File prodotti:"
+          find ios/build -maxdepth 2 \( -name '*.ipa' -o -name '*.log' \) -exec ls -l {} \;
+          cp ios/build/*.ipa ios/build/xcodebuild.log "$EXPORT_DIR"/
+          ls -l "$EXPORT_DIR"
     artifacts:
       - ios/build/*.ipa
       - ios/build/xcodebuild.log
