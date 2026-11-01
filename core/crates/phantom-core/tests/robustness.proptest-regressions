@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 24f38aecfb98a63ea86f7c571ca4059ce7067b41c1804be59cd1dafc9da7293f # shrinks to ops = [(0, Message(Pong { id: 0, t_client_us: 0, t_host_rx_us: 9223372036854775807, t_host_tx_us: 18446744073709551615 }))], start = 0

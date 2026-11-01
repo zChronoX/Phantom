@@ -14,3 +14,6 @@ phantom-proto = { path = "../phantom-proto" }
 phantom-netsim = { path = "../phantom-netsim" }
 phantom-clock = { path = "../phantom-clock" }
 phantom-video = { path = "../phantom-video" }
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }

@@ -11,3 +11,6 @@ workspace = true
 
 [dependencies]
 phantom-proto = { path = "../phantom-proto" }
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }

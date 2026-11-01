@@ -7,6 +7,8 @@
 
 pub mod rate;
 
+use std::collections::VecDeque;
+
 use phantom_clock::{ClockSync, Sample};
 use phantom_proto::{decode, Codec, Finger, Header, Message, Stats, QUEUE_DELAY_UNKNOWN};
 use phantom_video::{AssembledFrame, EncodedFrame, Output, ReceiverConfig, VideoReceiver, VideoSender};
@@ -16,6 +18,10 @@ pub use phantom_clock;
 pub use phantom_netsim;
 pub use phantom_proto;
 pub use phantom_video;
+
+/// Ping senza risposta che il client ricorda: oltre, i più vecchi si dimenticano (le loro risposte, se mai arrivano, si
+/// ignorano).
+const MAX_PENDING_PINGS: usize = 64;
 
 /// Impostazioni di una sessione.
 #[derive(Clone, Debug)]
@@ -250,6 +256,9 @@ pub struct Client {
     pub clock: ClockSync,
     seq: u32,
     ping_id: u32,
+    /// Ping in attesa di risposta: (numero, istante di partenza). Una risposta vale solo se la si è chiesta, e il tempo
+    /// di partenza è quello annotato qui, non quello che l'altro lato dice di aver ricevuto.
+    pending_pings: VecDeque<(u32, u64)>,
     next_ping_us: u64,
     next_touch_us: u64,
     next_stats_us: u64,
@@ -270,6 +279,7 @@ impl Client {
             clock,
             seq: 0,
             ping_id: 0,
+            pending_pings: VecDeque::new(),
             next_ping_us: 0,
             next_touch_us: 0,
             next_stats_us: 0,
@@ -305,7 +315,7 @@ impl Client {
         for o in outs {
             match o {
                 Output::Frame(f) => {
-                    let latency = self.clock.host_to_client(f.capture_ts_us).map(|cap| now_us as i64 - cap as i64);
+                    let latency = self.clock.age_of_host_time(now_us, f.capture_ts_us);
                     self.delivered.push(Delivered { frame: f, latency_us: latency });
                 }
                 Output::Nack { frame_id, missing } => {
@@ -335,11 +345,14 @@ impl Client {
                 let outs = self.video.on_fragment(now_us, &v);
                 self.handle_outputs(now_us, outs, &mut send);
             }
-            Message::Pong { t_client_us, t_host_rx_us, t_host_tx_us, .. } => {
-                let accepted =
-                    self.clock.add(Sample { t0: t_client_us, t1: t_host_rx_us, t2: t_host_tx_us, t3: now_us });
-                if accepted {
-                    self.last_pong_us = Some(now_us);
+            Message::Pong { id, t_host_rx_us, t_host_tx_us, .. } => {
+                // solo risposte a ping veri, una volta sola: le copie duplicate e quelle inventate non contano
+                let asked = self.pending_pings.iter().position(|(pid, _)| *pid == id);
+                if let Some((_, t0)) = asked.and_then(|pos| self.pending_pings.remove(pos)) {
+                    let accepted = self.clock.add(Sample { t0, t1: t_host_rx_us, t2: t_host_tx_us, t3: now_us });
+                    if accepted {
+                        self.last_pong_us = Some(now_us);
+                    }
                 }
             }
             _ => {}
@@ -355,7 +368,11 @@ impl Client {
         }
         if now_us >= self.next_ping_us {
             let id = self.ping_id;
-            self.ping_id += 1;
+            self.ping_id = self.ping_id.wrapping_add(1);
+            self.pending_pings.push_back((id, now_us));
+            while self.pending_pings.len() > MAX_PENDING_PINGS {
+                self.pending_pings.pop_front();
+            }
             if let Some(b) = self.encode(&Message::Ping { id, t_client_us: now_us }) {
                 send.push(b);
             }
@@ -408,5 +425,56 @@ impl Client {
             rtt_us: self.clock.recent_rtt_us(3).map_or(0, |r| r.min(u64::from(u32::MAX - 1)) as u32),
         });
         self.encode(&m)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pongs_count_only_once_and_only_if_asked() {
+        let cfg = SessionConfig::default();
+        let mut client = Client::new(cfg.clone());
+        let mut host = Host::new(cfg.clone());
+        // il client manda il suo primo ping a t = 1000 µs; l'orologio dell'host è avanti di 5 s
+        let ping = client.tick(1_000).remove(0);
+        let pong = host.on_datagram(5_001_100, &ping).remove(0);
+        client.on_datagram(1_800, &pong);
+        assert_eq!(client.clock.len(), 1, "la risposta a un ping vero conta");
+        client.on_datagram(1_900, &pong);
+        assert_eq!(client.clock.len(), 1, "la copia duplicata no");
+        // risposta mai chiesta, con orari assurdi: ignorata
+        let forged = Message::Pong { id: 999, t_client_us: 0, t_host_rx_us: u64::MAX, t_host_tx_us: u64::MAX }
+            .encode(Header { conn_id: cfg.conn_id, seq: 0 })
+            .unwrap_or_default();
+        client.on_datagram(2_000, &forged);
+        assert_eq!(client.clock.len(), 1, "una risposta inventata no");
+        // il tempo di partenza è quello annotato dal client, non quello scritto nella risposta
+        let tampered = Message::Pong { id: 1, t_client_us: 123, t_host_rx_us: 5_150_100, t_host_tx_us: 5_150_100 }
+            .encode(Header { conn_id: cfg.conn_id, seq: 1 })
+            .unwrap_or_default();
+        let ping2 = client
+            .tick(150_000)
+            .into_iter()
+            .find(|d| matches!(decode(d), Ok((_, Message::Ping { .. }))))
+            .unwrap_or_default();
+        assert!(!ping2.is_empty(), "il secondo ping parte dopo l'intervallo");
+        client.on_datagram(150_800, &tampered);
+        assert_eq!(client.clock.len(), 2);
+        let off = client.clock.offset_at(150_800).unwrap_or(0);
+        assert!((off - 5_000_000).abs() < 2_000, "offset {off}: ignora il t_client scritto nella risposta (123)");
+    }
+
+    #[test]
+    fn rejects_foreign_sessions_everywhere() {
+        let cfg = SessionConfig::default();
+        let other = SessionConfig { conn_id: cfg.conn_id ^ 0xFFFF, ..SessionConfig::default() };
+        let mut host = Host::new(cfg.clone());
+        let mut stranger = Client::new(other);
+        for d in stranger.tick(0) {
+            assert!(host.on_datagram(0, &d).is_empty(), "una sessione diversa non riceve risposta");
+        }
+        assert_eq!(host.stats().touch_states, 0);
     }
 }

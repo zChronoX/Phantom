@@ -22,7 +22,7 @@ PHANTOM_E2E_TIMELINE=1 cargo test -p phantom-core --release --test e2e_netsim co
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Le prove su UDP reale (`tests/udp_loopback.rs`) usano soglie larghe di proposito, perché su una macchina di CI sotto carico lo scheduler introduce pause di decine di millisecondi.
+Le prove su UDP reale (`tests/udp_loopback.rs`) usano soglie larghe di proposito, perché su una macchina di CI sotto carico lo scheduler introduce pause di decine di millisecondi. Le prove di robustezza (`robustness.rs` nei crate video e core) generano input ostili con proptest; `PROPTEST_CASES=5000 cargo test -p phantom-core --test robustness` le spinge molto più in là, e `PHANTOM_E2E_TIMELINE=1` mostra secondo per secondo le prove sul simulatore.
 
 ## Binding
 

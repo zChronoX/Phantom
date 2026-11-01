@@ -16,6 +16,8 @@ Host (Android) e client (iPhone) parlano a oltre 100 messaggi al secondo in ogni
 - Il video è frammentato con un frammento di parità XOR opzionale per gruppo (campo `fec_group`); i dettagli del recupero sono nell'ADR-006.
 - Le statistiche del client (`Stats`) usano contatori cumulativi: l'host ne fa le differenze, quindi la perdita di un messaggio non falsa nulla. Contengono byte ricevuti, frame consegnati e persi, frame salvati dalla parità, ritardo di coda e RTT (usati dall'ADR-007).
 
+- **Gli orari che arrivano dalla rete non sono affidabili.** I conti sugli orologi dell'altro lato sono a 128 bit con saturazione (una risposta con orari assurdi non può far andare in overflow nulla), i giri di ping oltre i 60 s si scartano, e il client risponde solo ai ping che ha mandato: annota numero e istante di partenza, usa il proprio e ignora risposte duplicate o inventate. Prove di proprietà con host e client ostili, in compilazione di debug (con controllo degli overflow), lo verificano; hanno trovato proprio il difetto degli orari assurdi.
+
 ## Alternative scartate
 
 Protobuf o simili (allocazioni, parser generato difficile da rendere privo di panici, byte in più sul percorso caldo); eventi di tocco incrementali (una perdita lascia un dito «premuto» per sempre); un flusso affidabile per i comandi (head-of-line blocking: un pacchetto perso ferma anche il tocco successivo).

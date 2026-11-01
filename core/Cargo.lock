@@ -364,6 +364,7 @@ dependencies = [
  "phantom-netsim",
  "phantom-proto",
  "phantom-video",
+ "proptest",
 ]
 
 [[package]]
@@ -390,6 +391,7 @@ name = "phantom-video"
 version = "0.1.0"
 dependencies = [
  "phantom-proto",
+ "proptest",
 ]
 
 [[package]]

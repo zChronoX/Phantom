@@ -32,18 +32,27 @@ pub struct Sample {
     pub t3: u64,
 }
 
+/// Un giro di ping più lungo di così non è una misura ma una risposta vecchia o inventata: si scarta (µs).
+pub const MAX_SAMPLE_SPAN_US: u64 = 60_000_000;
+
+fn saturate(v: i128) -> i64 {
+    v.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
 impl Sample {
     /// Tempo di andata e ritorno in rete, senza il tempo di elaborazione dell'host (µs). Negativo = campione non valido.
+    /// I conti sono a 128 bit: i valori dell'host arrivano dalla rete e possono essere qualsiasi cosa.
     pub fn rtt_us(&self) -> i64 {
-        (self.t3 as i64 - self.t0 as i64) - (self.t2 as i64 - self.t1 as i64)
+        saturate((i128::from(self.t3) - i128::from(self.t0)) - (i128::from(self.t2) - i128::from(self.t1)))
     }
     /// Orologio host − orologio client (µs).
     pub fn offset_us(&self) -> i64 {
-        ((self.t1 as i64 - self.t0 as i64) + (self.t2 as i64 - self.t3 as i64)) / 2
+        saturate(((i128::from(self.t1) - i128::from(self.t0)) + (i128::from(self.t2) - i128::from(self.t3))) / 2)
     }
-    /// Un campione ha senso solo se il tempo scorre in avanti su entrambi gli orologi e il RTT non è negativo.
+    /// Un campione ha senso solo se il tempo scorre in avanti su entrambi gli orologi, il RTT non è negativo e il giro
+    /// non è durato più di [`MAX_SAMPLE_SPAN_US`].
     pub fn is_valid(&self) -> bool {
-        self.t3 >= self.t0 && self.t2 >= self.t1 && self.rtt_us() >= 0
+        self.t3 >= self.t0 && self.t3 - self.t0 <= MAX_SAMPLE_SPAN_US && self.t2 >= self.t1 && self.rtt_us() >= 0
     }
 }
 
@@ -199,15 +208,24 @@ impl ClockSync {
     /// Converte un istante dell'orologio client in uno dell'orologio host.
     pub fn client_to_host(&self, t_client_us: u64) -> Option<u64> {
         let off = self.offset_at(t_client_us)?;
-        Some((t_client_us as i64 + off).max(0) as u64)
+        Some((i128::from(t_client_us) + i128::from(off)).clamp(0, i128::from(u64::MAX)) as u64)
     }
 
     /// Converte un istante dell'orologio host in uno dell'orologio client (usa l'offset stimato a quell'istante).
     pub fn host_to_client(&self, t_host_us: u64) -> Option<u64> {
         // l'offset varia pianissimo: una iterazione di punto fisso basta
-        let first = t_host_us as i64 - self.offset_at(t_host_us)?;
-        let off = self.offset_at(first.max(0) as u64)?;
-        Some((t_host_us as i64 - off).max(0) as u64)
+        let first =
+            (i128::from(t_host_us) - i128::from(self.offset_at(t_host_us)?)).clamp(0, i128::from(u64::MAX)) as u64;
+        let off = self.offset_at(first)?;
+        Some((i128::from(t_host_us) - i128::from(off)).clamp(0, i128::from(u64::MAX)) as u64)
+    }
+
+    /// Da quanto tempo (µs) è passato `t_host_us`, un istante dell'orologio host, visto dal client all'istante
+    /// `now_client_us`. Può essere negativo se l'host dichiara un istante nel futuro. Satura invece di andare in
+    /// overflow.
+    pub fn age_of_host_time(&self, now_client_us: u64, t_host_us: u64) -> Option<i64> {
+        let t = self.host_to_client(t_host_us)?;
+        Some(saturate(i128::from(now_client_us) - i128::from(t)))
     }
 }
 
@@ -216,17 +234,21 @@ mod tests {
     use super::*;
     use phantom_netsim::{Dir, LinkConfig, NetSim, Rng};
 
-    /// Orologio host: in ritardo/anticipo di `offset` e con una deriva in ppm rispetto al tempo reale.
+    /// Orologio host: in ritardo/anticipo di `offset` e con una deriva in ppm rispetto al tempo reale. Gli orologi veri
+    /// non sono mai negativi: per provare un offset negativo il client parte da `client_base_us`.
     struct Clocks {
         offset_us: i64,
         drift_ppm: f64,
+        client_base_us: u64,
     }
     impl Clocks {
         fn client(&self, real_us: u64) -> u64 {
-            real_us
+            real_us + self.client_base_us
         }
         fn host(&self, real_us: u64) -> u64 {
-            (real_us as f64 * (1.0 + self.drift_ppm * 1e-6)) as i64 as u64 + self.offset_us as u64
+            let drifted = (real_us as f64 * (1.0 + self.drift_ppm * 1e-6)) as i128;
+            u64::try_from(drifted + i128::from(self.client_base_us) + i128::from(self.offset_us))
+                .expect("orologio host negativo")
         }
     }
 
@@ -278,7 +300,7 @@ mod tests {
 
     #[test]
     fn exact_on_symmetric_ideal_link() {
-        let c = Clocks { offset_us: 5_000_000, drift_ppm: 0.0 };
+        let c = Clocks { offset_us: 5_000_000, drift_ppm: 0.0, client_base_us: 0 };
         let sim = NetSim::symmetric(1, LinkConfig { base_delay_us: 4_000, ..LinkConfig::ideal() });
         let samples = measure(&c, sim, 20, 100_000, 100);
         let mut cs = ClockSync::new();
@@ -292,7 +314,7 @@ mod tests {
 
     #[test]
     fn jitter_is_filtered_by_minimum_rtt() {
-        let c = Clocks { offset_us: -123_456_789, drift_ppm: 0.0 };
+        let c = Clocks { offset_us: -123_456_789, drift_ppm: 0.0, client_base_us: 1_000_000_000 };
         let cfg = LinkConfig { base_delay_us: 3_000, jitter_us: 6_000, ..LinkConfig::ideal() };
         let sim = NetSim::symmetric(7, cfg);
         let samples = measure(&c, sim, 80, 50_000, 50);
@@ -301,7 +323,7 @@ mod tests {
         for s in &samples {
             cs.add(*s);
         }
-        let est = cs.offset_at(3_000_000).unwrap();
+        let est = cs.offset_at(c.client(3_000_000)).unwrap();
         let err = (est + 123_456_789).abs();
         let worst_raw = *raw_errors.iter().max().unwrap();
         assert!(err < 1_500, "errore dopo il filtro: {err} µs");
@@ -311,7 +333,7 @@ mod tests {
     #[test]
     fn asymmetry_bounds_the_error_by_half() {
         // andata 2 ms, ritorno 10 ms: l'offset sbaglia di (2 − 10) / 2 = −4 ms; è il limite teorico di questo metodo
-        let c = Clocks { offset_us: 1_000_000, drift_ppm: 0.0 };
+        let c = Clocks { offset_us: 1_000_000, drift_ppm: 0.0, client_base_us: 0 };
         let sim = NetSim::new(
             1,
             LinkConfig { base_delay_us: 2_000, ..LinkConfig::ideal() },
@@ -328,7 +350,7 @@ mod tests {
 
     #[test]
     fn drift_is_estimated_and_corrected() {
-        let c = Clocks { offset_us: 777_000, drift_ppm: 50.0 };
+        let c = Clocks { offset_us: 777_000, drift_ppm: 50.0, client_base_us: 0 };
         let cfg = LinkConfig { base_delay_us: 2_500, jitter_us: 2_000, ..LinkConfig::ideal() };
         let sim = NetSim::symmetric(3, cfg);
         // un ping al secondo per 80 secondi: la finestra da 64 campioni copre 64 s
@@ -423,5 +445,46 @@ mod tests {
             c.add(Sample { t0: t, t1: t + 30_000, t2: t + 30_000, t3: t + 60_000 + 24_000 });
         }
         assert!(c.queue_delay_us(3, 8).unwrap() > 40_000, "una coda vera, +60 ms, si vede");
+    }
+    #[test]
+    fn hostile_samples_never_overflow_or_poison_the_window() {
+        let mut c = ClockSync::new();
+        let extremes = [0u64, 1, u64::MAX, 1 << 63, (1 << 63) - 1, 1 << 62];
+        for &t0 in &extremes {
+            for &t1 in &extremes {
+                for &t2 in &extremes {
+                    for &t3 in &extremes {
+                        let s = Sample { t0, t1, t2, t3 };
+                        let _ = s.rtt_us();
+                        let _ = s.offset_us();
+                        let _ = s.is_valid();
+                        let _ = c.add(s);
+                    }
+                }
+            }
+        }
+        // risposta vecchia di 10 minuti: scartata
+        assert!(!Sample { t0: 0, t1: 5, t2: 6, t3: 600_000_000 }.is_valid());
+        // risposta normale: accettata
+        assert!(Sample { t0: 1_000, t1: 6_000, t2: 6_100, t3: 2_100 }.is_valid());
+        let _ = c.offset_at(u64::MAX);
+        let _ = c.client_to_host(u64::MAX);
+        let _ = c.host_to_client(u64::MAX);
+        let _ = c.age_of_host_time(u64::MAX, u64::MAX);
+        let _ = c.age_of_host_time(0, u64::MAX);
+    }
+
+    #[test]
+    fn age_of_host_time_matches_a_known_offset() {
+        let mut c = ClockSync::new();
+        // host avanti di 5 s, giro di 2 ms
+        for i in 0..20u64 {
+            let t0 = 1_000_000 + i * 100_000;
+            assert!(c.add(Sample { t0, t1: t0 + 1_000 + 5_000_000, t2: t0 + 1_000 + 5_000_000, t3: t0 + 2_000 }));
+        }
+        // un frame catturato sull'host quando il client era a 2 s, visto dal client a 2,03 s: 30 ms
+        assert_eq!(c.age_of_host_time(2_030_000, 7_000_000), Some(30_000));
+        // un istante nel futuro dichiarato dall'host: età negativa
+        assert_eq!(c.age_of_host_time(2_030_000, 7_100_000), Some(-70_000));
     }
 }

@@ -17,6 +17,10 @@ Il video H.264/H.265 dipende dai frame precedenti: un frame perso rende inutiliz
 - **La richiesta di keyframe si ripete ogni 500 ms (almeno 2 RTT) finché il keyframe non arriva.** Lezione dalla prova a raffiche: la richiesta partiva una volta sola, e se il keyframe richiesto andava perso a sua volta l'immagine restava ferma fino al keyframe periodico, per sempre se l'encoder non ne produce. L'host rispetta una distanza minima di 300 ms tra keyframe su richiesta.
 - Il ricevitore non conta come perdita di rete i frame scartati in attesa del keyframe (sono la conseguenza di una perdita già contata): altrimenti una sola raffica falserebbe le statistiche usate dal controllo del bitrate.
 
+## Verifiche
+
+Oltre alle prove sul simulatore, due prove di proprietà sul ricevitore: con frammenti ostili (campi estremi, incoerenti tra loro, duplicati, frame fuori ordine, tempo che salta o torna indietro) non va in panico e non consegna due volte lo stesso frame né in disordine; con schemi casuali di perdite, duplicati e riordino ogni frame consegnato è identico all'originale, anche quando un frammento è stato ricostruito con la parità.
+
 ## Limiti noti
 
 - Una raffica più lunga di qualche frame costa sempre un keyframe e circa 300 ms di immagine ferma. Per ridurla servono invalidazione dei frame di riferimento o intra-refresh periodico nell'encoder (fase 2/5).
