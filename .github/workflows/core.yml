@@ -176,9 +176,10 @@ jobs:
           grep -q "class PhantomHost" ../dist/kotlin/uniffi/phantom_ffi/phantom_ffi.kt
           grep -q "class PhantomClient" ../dist/kotlin/uniffi/phantom_ffi/phantom_ffi.kt
       - name: Libreria per Android (arm64, NDK del runner)
-        env:
-          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_NDK_LATEST_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
         run: |
+          # ANDROID_NDK_LATEST_HOME è una variabile del runner, non del workflow: va letta nella shell
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
+          test -x "$CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
           cargo rustc -p phantom-ffi --release --target aarch64-linux-android --crate-type cdylib
           mkdir -p ../dist/android/arm64-v8a
           cp target/aarch64-linux-android/release/libphantom_ffi.so ../dist/android/arm64-v8a/
