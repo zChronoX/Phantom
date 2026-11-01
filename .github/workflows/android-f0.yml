@@ -14,6 +14,8 @@ jobs:
   module:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -50,3 +52,14 @@ jobs:
         with:
           name: phantom-f0
           path: dist/phantom-f0.zip
+
+      - name: Pubblica nella release «f0-latest»
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view f0-latest >/dev/null 2>&1 || gh release create f0-latest --prerelease \
+            --title "Phantom F0 · ultime build" \
+            --notes "File sempre aggiornati dalle compilazioni automatiche: phantom-f0.zip (modulo per il POCO, da installare nel manager SukiSU) e PhantomF0.ipa (app per iPhone)." \
+            || true
+          gh release upload f0-latest dist/phantom-f0.zip --clobber

@@ -12,6 +12,8 @@ jobs:
   build:
     runs-on: macos-15
     timeout-minutes: 20
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Test del parser scrcpy
@@ -28,3 +30,13 @@ jobs:
           path: |
             ios/build/*.ipa
             ios/build/xcodebuild.log
+
+      - name: Pubblica nella release «f0-latest»
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view f0-latest >/dev/null 2>&1 || gh release create f0-latest --prerelease \
+            --title "Phantom F0 · ultime build" \
+            --notes "File sempre aggiornati dalle compilazioni automatiche: phantom-f0.zip (modulo per il POCO, da installare nel manager SukiSU) e PhantomF0.ipa (app per iPhone)." \
+            || true
+          gh release upload f0-latest ios/build/PhantomF0.ipa --clobber
