@@ -20,6 +20,7 @@ xcodebuild \
   -destination 'generic/platform=iOS' \
   -derivedDataPath "$OUT/dd" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+  CURRENT_PROJECT_VERSION="${BUILD_NUMBER:-1}" \
   build 2>&1 | tee "$OUT/xcodebuild.log" | grep -E "error:|warning:|BUILD (SUCCEEDED|FAILED)" || true
 
 APP_PATH="$OUT/dd/Build/Products/Release-iphoneos/$APP_NAME.app"
