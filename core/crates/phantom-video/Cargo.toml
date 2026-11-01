@@ -1,0 +1,13 @@
+[package]
+name = "phantom-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Phantom: phantom-video"
+
+[lints]
+workspace = true
+
+[dependencies]
+phantom-proto = { path = "../phantom-proto" }

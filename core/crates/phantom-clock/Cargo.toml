@@ -1,0 +1,15 @@
+[package]
+name = "phantom-clock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Phantom: sincronia degli orologi host/client (quattro timestamp, filtro sul RTT minimo, deriva)"
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+phantom-netsim = { path = "../phantom-netsim" }

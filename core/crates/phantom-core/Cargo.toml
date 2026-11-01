@@ -1,0 +1,16 @@
+[package]
+name = "phantom-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Phantom: phantom-core"
+
+[lints]
+workspace = true
+
+[dependencies]
+phantom-proto = { path = "../phantom-proto" }
+phantom-netsim = { path = "../phantom-netsim" }
+phantom-clock = { path = "../phantom-clock" }
+phantom-video = { path = "../phantom-video" }

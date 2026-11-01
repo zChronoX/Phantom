@@ -1,0 +1,106 @@
+# Nucleo Rust (protocollo, simulatore di rete, sincronia degli orologi, video, controllo del bitrate).
+# Gira su Linux, macOS e Windows: è la stessa logica che andrà sull'iPhone e sul POCO, e deve comportarsi allo
+# stesso modo ovunque. Controlla anche che compili per Android e iOS.
+name: Core · Rust
+
+on:
+  push:
+    branches: [main]
+    paths: ["core/**", ".github/workflows/core.yml"]
+  pull_request:
+    paths: ["core/**", ".github/workflows/core.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: core-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: core
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  lint:
+    name: Formato, clippy, documentazione
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (da core/rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Documentazione senza avvisi
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
+  test:
+    name: Prove · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (da core/rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      # in release: le prove sul simulatore girano in millisecondi, quelle su UDP reale durano qualche secondo
+      - name: Prove (release)
+        run: cargo test --workspace --release -- --nocapture --test-threads=2
+      - name: Prove (debug, solo Linux)
+        if: runner.os == 'Linux'
+        run: cargo test --workspace
+
+  cross:
+    name: Compila per ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: aarch64-linux-android }
+          - { os: macos-15, target: aarch64-apple-ios }
+          - { os: macos-15, target: aarch64-apple-ios-sim }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain e bersaglio
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+          key: ${{ matrix.target }}
+      # solo le librerie: `check` non collega, quindi non serve l'NDK né Xcode per i test
+      - run: cargo check --workspace --lib --release --target ${{ matrix.target }}
+
+  msrv:
+    name: Versione minima di Rust (1.82)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust 1.82
+        run: rustup toolchain install 1.82 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+          key: msrv
+      - run: cargo +1.82 check --workspace --lib

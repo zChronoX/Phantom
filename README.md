@@ -8,13 +8,15 @@ Il piano completo (obiettivi, architettura, roadmap, test) è nel documento di p
 
 **Fase 0 · Fattibilità** — in corso. Strumenti per verificare sul telefono reale i tre rischi principali: cattura ed encoder, rete di casa, raggiungibilità in Doze. Guida: [docs/f0-guida.md](docs/f0-guida.md).
 
+**Fase 1 · Fondamenta** — iniziata. Il core Rust ([core/](core/README.md)) ha protocollo v0, simulatore di rete, sincronia degli orologi, video con parità e NACK, controllo del bitrate, prove sul simulatore e su UDP reale, CI su tre sistemi operativi. Mancano i binding UniFFI.
+
 ## Struttura
 
 ```
 android/
   probe/      phantom-probe: sonda C statica (rete, Doze, video di base)
   module/     modulo SukiSU/KernelSU/Magisk "Phantom F0" con WebUI
-core/         core Rust condiviso (dalla fase 1)
+core/         core Rust condiviso: protocollo, simulatore di rete, orologi, video, bitrate (fase 1)
 ios/          app Swift (dalla fase 0, seconda metà)
 tools/        client di test per PC e utilità di build
 docs/adr/     decisioni architetturali
