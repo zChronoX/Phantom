@@ -77,7 +77,12 @@ struct ContentView: View {
                     } label: {
                         Label("Tocco e frequenza dello schermo", systemImage: "hand.tap")
                     }
-                    Text("Misure dell'iPhone da solo, utili per decidere come mandare video e tocco: quanto costa decodificare e con quale precisione l'iPhone legge le dita.")
+                    NavigationLink {
+                        CoreLoopbackScreen()
+                    } label: {
+                        Label("Core Rust: tutto sul telefono", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    Text("Misure dell'iPhone da solo, utili per decidere come mandare video e tocco: quanto costa decodificare, con quale precisione l'iPhone legge le dita e come se la cava il core Rust di Phantom con codifica, perdite e decodifica a 120 fps.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

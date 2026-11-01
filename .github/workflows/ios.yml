@@ -5,17 +5,22 @@ name: iOS · Phantom F0
 on:
   push:
     branches: [main]
-    paths: ["ios/**", ".github/workflows/ios.yml"]
+    paths: ["ios/**", "core/**", ".github/workflows/ios.yml"]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 35
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      # l'app contiene il core Rust (build-ipa.sh lo compila): la cache evita di rifarlo da zero a ogni build
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+          key: ios-app
       - name: Test del parser scrcpy
         run: ./ios/Tests/run-tests.sh
 

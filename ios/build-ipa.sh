@@ -9,6 +9,21 @@ OUT=build
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
+# Core Rust di Phantom: libreria statica per iPhone + binding Swift generati da UniFFI (core/crates/phantom-ffi).
+# Va fatto prima di XcodeGen, che include il file Swift generato tra i sorgenti.
+RUST="$PWD/$OUT/rust"
+mkdir -p "$RUST/swift" "$RUST/lib"
+echo "== core Rust"
+(
+  cd ../core
+  rustup target add aarch64-apple-ios
+  cargo build -p phantom-ffi --release
+  cargo run -q -p uniffi-bindgen --release -- generate --library target/release/libphantom_ffi.dylib --language swift --out-dir "$RUST/swift"
+  cargo rustc -p phantom-ffi --release --target aarch64-apple-ios --crate-type staticlib
+  cp target/aarch64-apple-ios/release/libphantom_ffi.a "$RUST/lib/"
+) > "$OUT/rust.log" 2>&1 || { echo "BUILD DEL CORE RUST FALLITA. Ultime righe del log:"; tail -n 60 "$OUT/rust.log"; exit 1; }
+ls -l "$RUST/lib" "$RUST/swift"
+
 command -v xcodegen >/dev/null || brew install xcodegen
 xcodegen generate --spec project.yml
 

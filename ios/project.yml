@@ -9,7 +9,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.4.0"
+    MARKETING_VERSION: "0.5.0"
     CURRENT_PROJECT_VERSION: "1"
     ENABLE_USER_SCRIPT_SANDBOXING: YES
 targets:
@@ -20,6 +20,8 @@ targets:
       - path: PhantomF0
         excludes:
           - Info.plist
+      # Binding Swift del core Rust (UniFFI): li genera build-ipa.sh prima di XcodeGen, in build/rust.
+      - path: build/rust/swift/phantom_ffi.swift
     scheme: {}
     info:
       path: PhantomF0/Info.plist
@@ -40,3 +42,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: app.phantom.f0
         TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        # Core Rust: libreria statica per iPhone e modulo C dei binding (vedi core/crates/phantom-ffi e ADR-008).
+        SWIFT_INCLUDE_PATHS: "$(SRCROOT)/build/rust/swift"
+        OTHER_SWIFT_FLAGS: "-Xcc -fmodule-map-file=$(SRCROOT)/build/rust/swift/phantom_ffiFFI.modulemap"
+        LIBRARY_SEARCH_PATHS: "$(SRCROOT)/build/rust/lib"
+        OTHER_LDFLAGS: "-lphantom_ffi -liconv"

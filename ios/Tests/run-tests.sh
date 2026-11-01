@@ -24,3 +24,10 @@ mkdir -p "$OUT/bench"
 cp BenchStatsTests.swift "$OUT/bench/main.swift"
 swiftc -O -o "$OUT/run-bench" ../PhantomF0/BenchStats.swift "$OUT/bench/main.swift"
 "$OUT/run-bench"
+
+echo
+echo "== conversioni AVCC <-> Annex-B"
+mkdir -p "$OUT/annexb"
+cp AnnexBConvertTests.swift "$OUT/annexb/main.swift"
+swiftc -O -o "$OUT/run-annexb" ../PhantomF0/AnnexBConvert.swift ../PhantomF0/ScrcpyStream.swift "$OUT/annexb/main.swift"
+"$OUT/run-annexb"
