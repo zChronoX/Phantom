@@ -4,7 +4,7 @@
 #   phantomctl status | start | stop | restart
 #   phantomctl scrcpy on [profilo] [h264|h265] | off | profiles | status
 #   phantomctl stopsessions        ferma subito la sessione video scrcpy in corso
-#   phantomctl postmortem          rapporto su un blocco o un riavvio anomalo
+#   phantomctl postmortem [deep]   rapporto su un blocco o un riavvio anomalo; «deep» legge anche i dump del watchdog e i tombstone
 #   phantomctl video on|off        flusso H.264 di base sulla porta 47802
 #   phantomctl autostart on|off    avvio della sonda all'accensione
 #   phantomctl doze on|off         forza il Doze profondo (per test rapidi) o lo ripristina
@@ -262,10 +262,25 @@ case "$1" in
             echo "La sonda è ferma"
         fi ;;
     postmortem)
-        OUT=$DATA/postmortem.txt
-        sh "$MODDIR/bin/phantom-postmortem.sh" > "$OUT" 2>&1
-        cp "$OUT" /sdcard/Download/phantom-f0-postmortem.txt 2>/dev/null && echo "Salvato anche in Download/phantom-f0-postmortem.txt"
-        cat "$OUT" ;;
+        case "$2" in
+            deep)
+                # Legge i dump già salvati da Android (watchdog, tombstone): non avvia nessuna cattura, è sicuro.
+                OUT=$DATA/deep.txt
+                sh "$MODDIR/bin/phantom-deep.sh" > "$OUT" 2>&1
+                if cp "$OUT" /sdcard/Download/phantom-f0-deep.txt 2>/dev/null; then
+                    echo "Salvato in Download/phantom-f0-deep.txt ($(wc -c < "$OUT") byte): allegalo alla chat."
+                else
+                    echo "Salvato in $OUT ($(wc -c < "$OUT") byte); non sono riuscito a copiarlo in Download."
+                fi
+                echo
+                sed -n '1,40p' "$OUT" ;;
+            "")
+                OUT=$DATA/postmortem.txt
+                sh "$MODDIR/bin/phantom-postmortem.sh" > "$OUT" 2>&1
+                cp "$OUT" /sdcard/Download/phantom-f0-postmortem.txt 2>/dev/null && echo "Salvato anche in Download/phantom-f0-postmortem.txt"
+                cat "$OUT" ;;
+            *) echo "uso: phantomctl postmortem [deep]"; exit 2 ;;
+        esac ;;
     report) PHANTOM_MODDIR=$MODDIR sh "$MODDIR/bin/phantom-report.sh" ;;
     log) tail -n "${2:-50}" "$LOG" ;;
     *) sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;

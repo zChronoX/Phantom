@@ -11,13 +11,13 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 unzip -q "$ZIP" -d "$T"
 
 for f in module.prop customize.sh service.sh action.sh uninstall.sh webroot/index.html META-INF/com/google/android/update-binary \
-         bin/phantom-probe bin/phantomctl bin/phantom-report.sh bin/phantom-postmortem.sh; do
+         bin/phantom-probe bin/phantomctl bin/phantom-report.sh bin/phantom-postmortem.sh bin/phantom-deep.sh; do
     [ -f "$T/$f" ] && ok "contiene $f" || bad "manca $f"
 done
-for f in service.sh action.sh customize.sh uninstall.sh bin/phantomctl bin/phantom-report.sh bin/phantom-postmortem.sh bin/phantom-probe; do
+for f in service.sh action.sh customize.sh uninstall.sh bin/phantomctl bin/phantom-report.sh bin/phantom-postmortem.sh bin/phantom-deep.sh bin/phantom-probe; do
     [ -x "$T/$f" ] && ok "$f è eseguibile" || bad "$f non è eseguibile"
 done
-for f in service.sh action.sh customize.sh uninstall.sh bin/phantomctl bin/phantom-report.sh bin/phantom-postmortem.sh; do
+for f in service.sh action.sh customize.sh uninstall.sh bin/phantomctl bin/phantom-report.sh bin/phantom-postmortem.sh bin/phantom-deep.sh; do
     sh -n "$T/$f" 2>/dev/null && ok "$f: sintassi corretta" || bad "$f: errore di sintassi"
 done
 file "$T/bin/phantom-probe" | grep -q "ARM aarch64" && ok "la sonda è un binario arm64" || bad "la sonda non è arm64"

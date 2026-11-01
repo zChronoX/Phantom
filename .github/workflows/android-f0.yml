@@ -25,7 +25,7 @@ jobs:
       - name: Controllo degli script
         run: |
           cd android/module
-          shellcheck -s sh -e SC1090,SC1091 bin/phantomctl bin/phantom-postmortem.sh bin/phantom-report.sh service.sh action.sh uninstall.sh customize.sh
+          shellcheck -s sh -e SC1090,SC1091 bin/phantomctl bin/phantom-postmortem.sh bin/phantom-deep.sh bin/phantom-report.sh service.sh action.sh uninstall.sh customize.sh
 
       - name: Scarica il server di scrcpy (Apache 2.0)
         env:

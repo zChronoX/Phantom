@@ -24,6 +24,8 @@ if [ -f "$DATA/session.marker" ]; then
         echo "=== Marker (impostazioni in uso al momento del blocco) ==="
         cat "$DATA/session.marker"
         sh "$MODDIR/bin/phantom-postmortem.sh"
+        echo
+        PHANTOM_NDUMPS=1 PHANTOM_DUMP_MAXKB=400 sh "$MODDIR/bin/phantom-deep.sh"
     } > "$REP" 2>&1
     cp "$REP" "$DATA/crash-last.txt"
     cp "$REP" /sdcard/Download/phantom-f0-crash-last.txt 2>/dev/null

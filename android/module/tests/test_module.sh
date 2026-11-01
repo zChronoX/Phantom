@@ -12,7 +12,7 @@ check() { if eval "$2"; then ok "$1"; else bad "$1  [$2]"; fi; }
 T=$(mktemp -d)
 export PHANTOM_MODDIR="$T/mod" PHANTOM_DATA="$T/data"
 mkdir -p "$PHANTOM_MODDIR/bin" "$PHANTOM_DATA" "$T/Download"
-cp "$SRC/bin/phantomctl" "$SRC/bin/phantom-postmortem.sh" "$SRC/service.sh" "$PHANTOM_MODDIR/bin/"
+cp "$SRC/bin/phantomctl" "$SRC/bin/phantom-postmortem.sh" "$SRC/bin/phantom-deep.sh" "$SRC/service.sh" "$PHANTOM_MODDIR/bin/"
 mv "$PHANTOM_MODDIR/bin/service.sh" "$PHANTOM_MODDIR/service.sh"
 # La finta sonda: registra gli argomenti, scrive il pid e resta in attesa come un demone.
 cat > "$PHANTOM_MODDIR/bin/phantom-probe" <<'PROBE'
@@ -23,6 +23,40 @@ pidfile=""; while [ $# -gt 0 ]; do [ "$1" = "--pidfile" ] && pidfile="$2"; shift
 PROBE
 chmod +x "$PHANTOM_MODDIR/bin/"* "$PHANTOM_MODDIR/service.sh"
 echo -n fakejar > "$PHANTOM_MODDIR/bin/scrcpy-server"; echo 5.0.1 > "$PHANTOM_MODDIR/bin/scrcpy-server.version"
+# Finti dump di Android per il post-mortem approfondito: watchdog (compresso), tombstone, ANR.
+export PHANTOM_DROPBOX="$T/dropbox" PHANTOM_TOMBSTONES="$T/tombstones" PHANTOM_ANR="$T/anr"
+mkdir -p "$PHANTOM_DROPBOX" "$PHANTOM_TOMBSTONES" "$PHANTOM_ANR"
+cat > "$T/wd.txt" <<'WD'
+Process: system_server
+Subject: Blocked in monitor com.android.server.wm.WindowManagerGlobalLock on foreground thread (android.fg)
+Memory pressure stats:
+some avg10=0.50 avg60=1.20 avg300=0.30 total=123456
+full avg10=0.10 avg60=0.40 avg300=0.10 total=23456
+  23% 1527/surfaceflinger: 12% user + 11% kernel
+
+----- pid 1234 at 2026-11-01 16:41:00.123 -----
+Cmd line: system_server
+
+"main" prio=5 tid=1 Blocked
+  at com.android.server.wm.WindowManagerService.relayoutWindow(WindowManagerService.java:2000)
+  - waiting to lock <0x0a1b2c3d> (a com.android.server.wm.WindowManagerGlobalLock) held by thread 33
+
+"binder:1234_3" prio=5 tid=14 Native
+  native: #00 pc 000000000009c6a8  libc.so (__ioctl+8)
+
+"android.display" prio=5 tid=33 Waiting
+  at android.view.SurfaceControl.nativeCreateDisplay(Native method)
+
+----- pid 1527 at 2026-11-01 16:41:01.000 -----
+Cmd line: /system/bin/surfaceflinger
+
+"surfaceflinger" sysTid=1527
+    #00 pc 00000000000a1b2c  /vendor/lib64/libgsl.so (ioctl_kgsl_wait+44)
+WD
+gzip -c "$T/wd.txt" > "$PHANTOM_DROPBOX/system_server_pre_watchdog@1793547660450.txt.gz"
+printf 'Build: test\n' > "$PHANTOM_DROPBOX/SYSTEM_BOOT@1793547572357.txt"
+printf 'pid: 1527, tid: 1527, name: surfaceflinger  >>> /system/bin/surfaceflinger <<<\nsignal 6 (SIGABRT), code -1 (SI_QUEUE), fault addr --------\nAbort message: prova\nbacktrace:\n      #00 pc 000000000009c6a8  libc.so (abort+168)\n' > "$PHANTOM_TOMBSTONES/tombstone_43"
+touch "$PHANTOM_ANR/anr_2026-11-01-16-41-00"
 C="sh $PHANTOM_MODDIR/bin/phantomctl"
 args() { cat "$PHANTOM_DATA/probe.args"; }
 opts_of() { args | tr ' ' '\n' | grep -A1 -- '--scrcpy-opt' | grep -v -- '--scrcpy-opt\|^--$' ; }
@@ -86,6 +120,7 @@ check "scrcpy spento per sicurezza" "grep -qx 'SCRCPY=0' $PHANTOM_DATA/probe.con
 check "rapporto creato" "ls $PHANTOM_DATA/crash-2*.txt >/dev/null 2>&1 && [ -f $PHANTOM_DATA/crash-last.txt ]"
 check "il rapporto contiene il marker" "grep -q 'profilo=hw-mid' $PHANTOM_DATA/crash-last.txt && grep -q 'max_fps=60' $PHANTOM_DATA/crash-last.txt"
 check "il rapporto contiene il post-mortem" "grep -q 'Marker della sessione interrotta' $PHANTOM_DATA/crash-last.txt && grep -q 'Ultime righe del log' $PHANTOM_DATA/crash-last.txt"
+check "il rapporto contiene il post-mortem approfondito" "grep -q 'post-mortem approfondito' $PHANTOM_DATA/crash-last.txt && grep -q 'waiting to lock' $PHANTOM_DATA/crash-last.txt"
 check "il servizio ha scritto l'avviso" "grep -q 'ATTENZIONE' $PHANTOM_DATA/service.log"
 check "la sonda è ripartita senza scrcpy" "! args | grep -q -- '--scrcpy-port'"
 st=$($C status)
@@ -105,6 +140,26 @@ check "scrcpy resta com'era" "grep -qx 'SCRCPY=1' $PHANTOM_DATA/probe.conf"
 echo "post-mortem a mano"
 out=$($C postmortem 2>&1)
 check "il post-mortem produce il rapporto" "echo \"\$out\" | grep -q 'Phantom F0 · post-mortem' && [ -f $PHANTOM_DATA/postmortem.txt ]"
+
+echo "post-mortem approfondito"
+out=$($C postmortem deep 2>&1)
+D=$PHANTOM_DATA/deep.txt
+check "il rapporto approfondito esiste" "[ -s $D ]"
+check "elenca la voce del dropbox con la data in UTC" "grep -q 'system_server_pre_watchdog@1793547660450.txt.gz · .* · 2026-11-01 15:41:00 UTC' $D"
+check "riporta il motivo del watchdog" "grep -q 'Subject: Blocked in monitor' $D"
+check "riporta la pressione di memoria" "grep -q '^full avg10=0.10' $D"
+check "il filtro tiene il thread bloccato e chi aspetta" "grep -q 'waiting to lock' $D && grep -q '\"android.display\"' $D"
+check "il filtro tiene lo stack di surfaceflinger" "grep -q 'ioctl_kgsl_wait' $D"
+check "il filtro scarta i thread inattivi" "! sed -n '/thread bloccati/,/=== Tombstone/p' $D | grep -q 'binder:1234_3'"
+check "l'appendice contiene il dump intero" "grep -q '##### INIZIO dump 1' $D && grep -q '##### FINE dump 1' $D"
+check "il tombstone è riportato" "grep -q 'signal 6 (SIGABRT)' $D && grep -q 'Abort message: prova' $D"
+check "elenca gli ANR" "grep -q 'anr_2026-11-01-16-41-00' $D"
+check "nessuna cartella di lavoro lasciata in giro" "[ ! -d $PHANTOM_DATA/deep-work ]"
+check "l'uscita a video mostra l'inizio e dice dove è il file" "echo \"\$out\" | grep -q 'phantom-f0-deep.txt\|deep.txt' && echo \"\$out\" | grep -q 'post-mortem approfondito'"
+PHANTOM_DROPBOX="$T/vuoto" PHANTOM_TOMBSTONES="$T/vuoto" PHANTOM_ANR="$T/vuoto" $C postmortem deep >/dev/null 2>&1
+check "senza dump non si rompe e lo dice" "grep -q 'nessun dump del watchdog' $D && grep -q 'nessun tombstone' $D"
+$C postmortem nonsense >/dev/null 2>&1; rc=$?
+check "argomento sconosciuto rifiutato" "[ $rc -ne 0 ]"
 
 echo "aiuto"
 check "senza argomenti stampa l'uso" "$C nonsense 2>&1 | grep -q 'phantomctl scrcpy on'"
