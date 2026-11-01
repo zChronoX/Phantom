@@ -1,0 +1,27 @@
+# Strumento di analisi: stampa nel log il protocollo e le opzioni del server di scrcpy scaricato.
+name: Analisi scrcpy
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versione di scrcpy (es. 5.0.1)"
+        required: true
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Sorgenti del server
+        run: |
+          git clone --quiet --depth 1 --branch "v${{ inputs.version }}" https://github.com/Genymobile/scrcpy src
+          cd src
+          echo "=== develop.md: protocollo ==="
+          awk '/^## Protocol/,0' doc/develop.md | head -n 160
+          echo "=== Streamer.java ==="
+          cat server/src/main/java/com/genymobile/scrcpy/device/Streamer.java 2>/dev/null || find server -name Streamer.java -exec cat {} \;
+          echo "=== chiavi di Options.java ==="
+          grep -hE 'case "[a-z_]+"' server/src/main/java/com/genymobile/scrcpy/Options.java | tr -s ' ' | head -n 80
+          echo "=== Server.java: connessione e accept ==="
+          grep -nE "tunnel|dummy|sendDeviceMeta|DEVICE_NAME|abstract|LocalServerSocket|scid" server/src/main/java/com/genymobile/scrcpy/Server.java server/src/main/java/com/genymobile/scrcpy/device/DesktopConnection.java 2>/dev/null | head -n 50
