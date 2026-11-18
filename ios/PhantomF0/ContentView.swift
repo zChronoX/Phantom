@@ -17,6 +17,18 @@ struct ContentView: View {
             Form {
                 CrashLogSection()
 
+                Section("Controllo remoto") {
+                    NavigationLink {
+                        RemoteConnectView()
+                    } label: {
+                        Label("Schermo Android (QUIC)", systemImage: "iphone.and.arrow.forward")
+                            .fontWeight(.semibold)
+                    }
+                    Text("Sessione completa QUIC con apertura obbligatoria, decodifica hardware H.264/HEVC, multi-touch fino a 10 dita, tastiera e loopback locale sull'iPhone.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Telefono Android") {
                     TextField("Indirizzo IP del POCO", text: $host)
                         .keyboardType(.numbersAndPunctuation)

@@ -38,3 +38,10 @@ mkdir -p "$OUT/session"
 cp SessionAgreementTests.swift "$OUT/session/main.swift"
 swiftc -O -o "$OUT/run-session" ../PhantomF0/SessionAgreement.swift "$OUT/session/main.swift"
 "$OUT/run-session"
+
+echo
+echo "== controllo remoto (tocco, tastiera e indirizzi)"
+mkdir -p "$OUT/remote"
+cp RemoteInputTests.swift "$OUT/remote/main.swift"
+swiftc -O -o "$OUT/run-remote" ../PhantomF0/TouchMapper.swift ../PhantomF0/RemoteInputMap.swift "$OUT/remote/main.swift"
+"$OUT/run-remote"

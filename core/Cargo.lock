@@ -577,6 +577,7 @@ name = "phantom-ffi"
 version = "0.1.0"
 dependencies = [
  "phantom-core",
+ "phantom-quic",
  "uniffi",
 ]
 

@@ -1,8 +1,7 @@
 # Handoff
 
-Scritto: 2026-11-18 da Particle-1 (Kilo); aggiornato dopo T10 (apertura
-obbligatoria).
-Branch: main - Commit: e8070ca (allineato a origin/main) + modifiche locali non committate
+Scritto: 2026-11-18 da Particle-1 (Kilo); aggiornato dopo integrazione QUIC nei binding UniFFI e nuovo client iOS di controllo remoto.
+Branch: main - Commit locale: `62ba082` (avanti di 1 rispetto a `origin/main` `e8070ca`) + modifiche locali non committate
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -72,18 +71,33 @@ Otto task della sessione precedente più T9 e T10 chiusi e verificati in Docker
 
 ## In progress (exact state)
 
-- Nessun file a metà. Tutto è **non committato**: l'utente vuole **un solo
-  commit**, il testo è pronto in `COMMIT_MSG.md` e ora copre T1–T10
-  (`git commit -F COMMIT_MSG.md`).
+- Il blocco precedente T1–T10 è stato committato dall'utente in `62ba082`
+  (ancora locale, da pushare quando vuole).
+- Esposto `phantom-quic` nei binding UniFFI (`phantom-ffi`), aggiornato
+  `swift-smoke` con prova QUIC loopback reale e aggiunti i flag NDK (`CC`/`AR`/`RANLIB`)
+  a `ffi-android` in `.github/workflows/core.yml`: **verificato** in Docker
+  `rust:1` (`fmt`, `clippy`, `cargo doc -Dwarnings`, `cargo test --workspace --release`)
+  e `swift:5.10` (`OK: 362 frame, 600 stati del tocco, 30 tasti, offset orologi 5000000 µs, bitrate 20 Mbps (QUIC ok)`).
+- Aggiunta la logica pura iOS per controllo remoto (`TouchMapper.swift`,
+  `RemoteInputMap.swift`) e il sesto blocco di test in `ios/Tests/run-tests.sh`
+  (`RemoteInputTests.swift`): **verificato** in Docker `swift:5.10` (6 blocchi su 6,
+  tutti superati).
+- Aggiunta la parte UI/sessione iOS (`VideoDecoderSupport.swift`,
+  `RemoteSession.swift`, `RemoteControlSurface.swift`, `RemoteConnectView.swift`,
+  voce in `ContentView.swift`, orientamenti Portrait+Landscape in `ios/project.yml`):
+  scrittura completata, ma **non ancora passata con `swiftc -parse` né compilata con Xcode**
+  perché Docker Desktop non era più raggiungibile a fine sessione (`npipe:////./pipe/dockerDesktopLinuxEngine`).
 
 ## Next steps (in order)
 
 1. Eseguire `powershell -NoProfile -ExecutionPolicy Bypass -File tools/repo-preflight.ps1`.
-2. Leggere `PLAN.md`, `PROGRESS.md`, `COMMIT_MSG.md`.
-3. Se l'utente lo chiede: `git add -A && git commit -F COMMIT_MSG.md`.
-4. Prossimo lavoro da concordare: esporre `phantom-quic` nei binding UniFFI e
-   collegarlo all'app (serve un dispositivo per provare), trasporto QUIC
-   nell'app iOS reale, parità Reed-Solomon, controllo di congestione completo.
+2. Se Docker Desktop è avviato, verificare sintassi Swift dei file UI (`swiftc -parse`)
+   e/o fare commit + push su `main` per far compilare e produrre l'`.ipa` su Codemagic
+   (`codemagic.yaml` parte sui push che toccano `ios/`).
+3. Provare su iPhone reale la nuova schermata «Controllo remoto (QUIC)» in modalità
+   **loopback QUIC locale** (video HEVC, rotazione, multi-touch 10 dita, tastiera, azioni rapide).
+4. Lato Android: iniziare il server host Kotlin (`app_process`) che usa `PhantomHost`,
+   `QuicHostEndpoint` e `MediaCodec`, oppure proseguire con Reed-Solomon / Fase 5.
 5. A fine sessione aggiornare `PROGRESS.md` e questo file.
 
 ## Decisions and constraints from the user
@@ -171,43 +185,33 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- `core/crates/phantom-proto/src/lib.rs`: `caps`, `close_reason`,
-  `Codec::caps_bit()`.
-- `core/crates/phantom-core/src/lib.rs`: `Negotiated`, `KeyEvent`,
-  `SessionConfig::{nonce, hello_retry_us}`, negoziazione, tastiera e chiusura in
-  `Host`/`Client`, `HostStats::key_events`, cancello sull'apertura (video e input
-  solo dopo `Hello`/`HelloAck`), test `negotiation`, `keyboard`, `close`, `gate`,
-  test dei ping aggiornato.
-- `core/crates/phantom-core/tests/e2e_netsim.rs`: test delle raffiche su nove
-  seed con soglie sulle medie.
-- `core/crates/phantom-ffi/src/lib.rs`: `SessionSettings.nonce`,
-  `Capability`/`caps_contains`, `NegotiatedInfo`, `KeyInput`,
-  `send_key`/`take_key`, chiusura, `HostCounters::key_events`, helper `open` e
-  test `input_waits_for_the_session`, 9 test in tutto.
-- `core/crates/phantom-ffi/swift-smoke/main.swift`: apertura, 30 eventi di
-  tastiera (il primo dopo l'ack, al passo 50), chiusura finale.
-- `core/crates/phantom-video/src/lib.rs`: ciclo FEC con `iter().flatten()`.
-- `core/crates/uniffi-bindgen/{Cargo.toml,src/main.rs}`: lint del workspace e
-  doc di crate.
-- `core/crates/phantom-ffi/Cargo.toml`: tabella `[lints]` esplicita.
-- `core/crates/phantom-quic/{Cargo.toml,src/lib.rs,tests/quic_loopback.rs}`
-  (nuovo): trasporto QUIC con datagrammi, certificato fissato, prove in
-  loopback; `core/Cargo.toml` lo aggiunge al workspace e `core/Cargo.lock` ha
-  i 70 pacchetti nuovi (nessuna dipendenza preesistente aggiornata).
-- `docs/adr/ADR-009-trasporto-quic.md` (nuovo): decisioni su QUIC, certificato
-  fissato, dimensione dei datagrammi e MSRV; `ADR-004` annota il limite di 1162
-  byte alla MTU minima.
-- `.github/workflows/core.yml`: il job `cross` Android passa `CC`/`AR`/`RANLIB`
-  dell'NDK per il C di `ring`.
-- `ios/PhantomF0/CoreLoopback.swift`, `ios/PhantomF0/CoreLoopbackView.swift`:
-  nonce vero, accordo della sessione nel rapporto, stop su chiusura o HEVC non
-  concordato, `Close` a fine prova.
-- `ios/PhantomF0/SessionAgreement.swift` (nuovo): lettura dell'accordo e testi,
-  parte pura provata da `ios/Tests`.
-- `ios/Tests/SessionAgreementTests.swift` (nuovo) e `ios/Tests/run-tests.sh`:
-  quinto blocco «sessione (apertura e chiusura)».
-- `README.md`, `core/README.md`, `docs/adr/ADR-004-protocollo-v0.md`,
-  `docs/adr/ADR-008-binding-uniffi.md`: stato reale di binding, apertura e
-  chiusura della sessione, tastiera e verifica su Linux.
-- `PLAN.md`, `PROGRESS.md`, `COMMIT_MSG.md`, `HANDOFF.md`, `AGENTS.md`,
-  `tools/repo-preflight.ps1`: contesto, memoria e messaggio di commit.
+- `core/crates/phantom-ffi/Cargo.toml`: aggiunta dipendenza `phantom-quic`.
+- `core/crates/phantom-ffi/src/lib.rs`: aggiunti `SessionSettings.frag_size`,
+  `video_payload_for_datagram`, `default_quic_server_name`, `QuicTransportError`,
+  `QuicHostEndpoint`, `QuicClientEndpoint`, `QuicConnection` e 3 nuovi test (12 totali).
+- `core/crates/phantom-ffi/swift-smoke/main.swift`: verificati `fragSize`,
+  `videoPayloadForDatagram`, `defaultQuicServerName` e aggiunta prova end-to-end
+  `runQuicLoopbackSmoke()` su loopback UDP/QUIC reale.
+- `.github/workflows/core.yml`: aggiunti `CC`/`AR`/`RANLIB` dell'NDK anche nel job
+  `ffi-android` per la compilazione C di `ring`.
+- `ios/PhantomF0/TouchMapper.swift` (nuovo): `VideoRect` (`aspectFit`, normalizzazione
+  `[0, 65535]`), `TouchTracker` (slot stabili `0..<10`), `EndpointParser`, `CertificateCodec`.
+- `ios/PhantomF0/RemoteInputMap.swift` (nuovo): costanti HID USB `0x07`, `HidKeyEvent`,
+  `RemoteQuickAction` (Back/Home/Recents/Volume/Power) e `HidCharacterMapper`.
+- `ios/PhantomF0/VideoDecoderSupport.swift` (nuovo): `AnnexBSampleBuilder` H.264/HEVC
+  per `AVSampleBufferDisplayLayer`.
+- `ios/PhantomF0/RemoteSession.swift` (nuovo): motore di sessione remota QUIC
+  (`QuicClientEndpoint` + `PhantomClient`), supporto sia connessione reale verso Android
+  sia `localQuicLoopback` con `QuicHostEndpoint` + `PhantomHost` + `VTCompressionSession`.
+- `ios/PhantomF0/RemoteControlSurface.swift` (nuovo): `RemoteDisplayTouchView`
+  full-screen multi-touch + `UIKeyInput` + `pressesBegan`/`Ended`, `GamepadBridge`
+  (`GCController`) e `RemoteSessionView` con HUD collassabile.
+- `ios/PhantomF0/RemoteConnectView.swift` (nuovo): configurazione `IP:porta`,
+  certificato DER fissato, scelta codec e avvio loopback QUIC locale.
+- `ios/PhantomF0/ContentView.swift`: aggiunta sezione «Controllo remoto» con link a
+  `RemoteConnectView` (lasciando intatti i percorsi Fase 0).
+- `ios/project.yml`: aggiunti orientamenti `UIInterfaceOrientationLandscapeLeft` e
+  `UIInterfaceOrientationLandscapeRight`.
+- `ios/Tests/RemoteInputTests.swift` (nuovo) e `ios/Tests/run-tests.sh`: sesto blocco
+  di test puri «controllo remoto (tocco, tastiera e indirizzi)».
+- `HANDOFF.md`, `PROGRESS.md`: aggiornati a fine sessione.

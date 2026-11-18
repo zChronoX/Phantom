@@ -35,6 +35,8 @@ targets:
         CADisableMinimumFrameDurationOnPhone: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
         # Senza questa voce iOS blocca le connessioni verso la rete di casa.
         NSLocalNetworkUsageDescription: Phantom si collega al tuo telefono Android sulla rete di casa per misurare la latenza.
     settings:

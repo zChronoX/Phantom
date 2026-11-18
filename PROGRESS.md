@@ -1,7 +1,6 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-18. Branch `main`, commit `e8070ca` più modifiche
-locali non committate al core, all'app iPhone e ai documenti (vedi `PLAN.md`).
+Ultimo aggiornamento: 2026-11-18. Branch `main`, commit locale `62ba082` (avanti di 1 su `origin/main` `e8070ca`) più modifiche locali non committate per QUIC nei binding UniFFI e controllo remoto iOS (vedi `HANDOFF.md`).
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Dove siamo
@@ -115,7 +114,24 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
   tastiera e i due test FFI che mandavano input prima dell'ack. Suite completa
   → 20 blocchi `test result: ok` (core 30 test, `phantom-ffi` 9), prova QUIC → 3
   test `ok` (269 stati del tocco, 8 tasti), `swift-smoke` → «OK: 362 frame, 600
-  stati del tocco, 30 tasti...», `fmt`/`clippy`/`doc`/MSRV 1.82 puliti.
+  stati del tocco, 30 tasti...», `fmt`/`clippy`/`doc`/MSRV 1.82 puliti. T1–T10
+  committati dall'utente in `62ba082`.
+- Esposto `phantom-quic` nei binding UniFFI (`phantom-ffi`): `QuicHostEndpoint`,
+  `QuicClientEndpoint`, `QuicConnection`, `QuicTransportError`, `SessionSettings.frag_size`,
+  `video_payload_for_datagram`, `default_quic_server_name`. Aggiornato `ffi-android`
+  in `.github/workflows/core.yml` con `CC`/`AR`/`RANLIB` dell'NDK per `ring`.
+  Verificati `fmt`, `clippy -D warnings`, `cargo doc -Dwarnings`, `cargo test --workspace --release`
+  (12 test in `phantom-ffi`), generazione binding Swift/Kotlin e `swift-smoke`
+  (con prova QUIC loopback reale).
+- Realizzato il client di controllo remoto iOS su QUIC («stile emulazione»):
+  `TouchMapper.swift` (`VideoRect.aspectFit`, `TouchTracker` multi-touch fino a 10 dita,
+  `EndpointParser`, `CertificateCodec`), `RemoteInputMap.swift` (`HidKeyCode`,
+  `RemoteQuickAction`, `HidCharacterMapper`), `VideoDecoderSupport.swift` (H.264/HEVC),
+  `RemoteSession.swift` (QUIC reale + loopback QUIC locale su iPhone),
+  `RemoteControlSurface.swift` (superficie full-screen multi-touch, tastiera software/fisica,
+  `GCController`, HUD collassabile), `RemoteConnectView.swift`, link in `ContentView.swift`
+  e supporto Portrait/Landscape in `ios/project.yml`. `ios/Tests/run-tests.sh`
+  (6 blocchi) verde in Docker `swift:5.10`; i file UIKit/SwiftUI attendono `swiftc -parse`/Codemagic.
 
 ## Decisioni
 
@@ -216,22 +232,16 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Prossimo passo
 
-Modifiche pronte ma non committate, da unire in **un solo commit** con il testo
-già scritto in `COMMIT_MSG.md` (ora comprende T1–T10,
-`git commit -F COMMIT_MSG.md`): `README.md`,
-`docs/adr/{ADR-004-protocollo-v0,ADR-008-binding-uniffi,ADR-009-trasporto-quic}.md`,
-`core/README.md`, `core/Cargo.toml`, `core/Cargo.lock`,
-`core/crates/phantom-proto/src/lib.rs`,
-`core/crates/phantom-core/{src/lib.rs,tests/e2e_netsim.rs}`,
-`core/crates/phantom-video/src/lib.rs`,
-`core/crates/phantom-quic/{Cargo.toml,src/lib.rs,tests/quic_loopback.rs}`,
-`core/crates/uniffi-bindgen/{Cargo.toml,src/main.rs}`,
-`core/crates/phantom-ffi/{Cargo.toml,src/lib.rs,swift-smoke/main.swift}`,
-`ios/PhantomF0/{CoreLoopback.swift,CoreLoopbackView.swift,SessionAgreement.swift}`,
-`ios/Tests/{SessionAgreementTests.swift,run-tests.sh}`, `.github/workflows/core.yml`,
-più `PLAN.md`/`PROGRESS.md`/`HANDOFF.md`.
+Modifiche locali pronte (da committare dall'utente quando vuole e pushare per
+far girare Codemagic su `ios/`):
+- `core/crates/phantom-ffi/{Cargo.toml,src/lib.rs,swift-smoke/main.swift}`
+- `.github/workflows/core.yml`
+- `ios/PhantomF0/{TouchMapper.swift,RemoteInputMap.swift,VideoDecoderSupport.swift,RemoteSession.swift,RemoteControlSurface.swift,RemoteConnectView.swift,ContentView.swift}`
+- `ios/project.yml`
+- `ios/Tests/{RemoteInputTests.swift,run-tests.sh}`
+- `HANDOFF.md`, `PROGRESS.md`
 
-Prossimo lavoro da concordare con l'utente: esporre `phantom-quic` nei binding
-UniFFI e collegarlo all'app (serve un dispositivo per provare), trasporto QUIC
-nell'app iOS reale, parità Reed-Solomon, controllo di congestione completo.
-Ripartire sempre dal preflight.
+Quando Codemagic avrà generato `PhantomF0.ipa`, provare su iPhone la sezione
+«Controllo remoto -> Schermo Android (QUIC) -> Avvia in loopback QUIC locale».
+Poi si può iniziare il server host Kotlin su Android oppure aggiungere
+Reed-Solomon / controllo di congestione / Fase 5 nel core.

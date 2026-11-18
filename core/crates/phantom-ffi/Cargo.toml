@@ -12,6 +12,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
 phantom-core = { path = "../phantom-core" }
+phantom-quic = { path = "../phantom-quic" }
 uniffi = "0.32"
 
 # Niente `[lints] workspace = true`: il codice generato da UniFFI usa `unsafe`, che nel resto del workspace è vietato.

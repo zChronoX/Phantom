@@ -26,6 +26,9 @@ check(maxFingers() == 10, "dita al massimo: \(maxFingers())")
 check(settings.codec == .h265, "codec predefinito: \(settings.codec)")
 check(settings.fecGroup == 10, "gruppo di parità predefinito: \(settings.fecGroup)")
 check(settings.nonce.count == 16, "nonce predefinito di \(settings.nonce.count) byte")
+check(settings.fragSize == 1160, "fragSize predefinito: \(settings.fragSize)")
+check(videoPayloadForDatagram(maxDatagramSize: 1162) == 1122, "payload video su MTU iniziale QUIC")
+check(defaultQuicServerName() == "localhost", "nome server QUIC predefinito")
 
 let host = PhantomHost(settings: settings)
 let client = PhantomClient(settings: settings)
@@ -143,4 +146,121 @@ check(client.tick(nowUs: 4_000_000).isEmpty, "il client chiuso manda ancora data
 check(client.sendKey(nowUs: 4_000_000, code: 4, down: true) == nil, "tastiera dopo la chiusura")
 check(client.close(reason: 0) == nil, "seconda chiusura")
 
-print("OK: \(frames.count) frame, \(touchStates) stati del tocco, \(keyEvents) tasti, offset orologi \(offset) µs, bitrate \(hostCounters.targetBitrateBps / 1_000_000) Mbps")
+// Prova QUIC reale su loopback UDP attraverso i binding Swift.
+func runQuicLoopbackSmoke() throws {
+    let hostEndpoint = try QuicHostEndpoint.bind(addr: "127.0.0.1:0")
+    let serverAddr = try hostEndpoint.localAddr()
+    let cert = hostEndpoint.certificateDer()
+    check(!cert.isEmpty, "certificato QUIC vuoto")
+
+    let clientEndpoint = try QuicClientEndpoint.bind(addr: "127.0.0.1:0")
+    do {
+        _ = try clientEndpoint.connect(
+            addr: serverAddr,
+            serverName: defaultQuicServerName(),
+            pinnedCertificateDer: Data(),
+            timeoutMs: 200
+        )
+        fail("certificato vuoto accettato")
+    } catch QuicTransportError.EmptyCertificate {
+        // atteso
+    }
+
+    let hostDone = DispatchSemaphore(value: 0)
+    var hostKeyCode: UInt16?
+    var hostClosed = false
+    var hostNegotiated = false
+
+    DispatchQueue.global().async {
+        defer { hostDone.signal() }
+        do {
+            let link = try hostEndpoint.accept(timeoutMs: 5_000)
+            guard let maxDgram = link.maxDatagramSize() else { fail("datagrammi QUIC non supportati") }
+            var hostSettings = defaultSessionSettings()
+            hostSettings.fragSize = videoPayloadForDatagram(maxDatagramSize: maxDgram)
+            let qHost = PhantomHost(settings: hostSettings)
+            let start = DispatchTime.now().uptimeNanoseconds
+            var sentFrame = false
+            while (DispatchTime.now().uptimeNanoseconds - start) < 2_000_000_000 {
+                let nowUs = (DispatchTime.now().uptimeNanoseconds - start) / 1_000
+                do {
+                    let d = try link.recvDatagram(maxBytes: 2048, timeoutMs: 5)
+                    for reply in qHost.onDatagram(nowUs: nowUs, data: d) {
+                        try link.sendDatagram(datagram: reply)
+                    }
+                } catch QuicTransportError.Timeout {
+                } catch {
+                    break
+                }
+                if qHost.negotiated() != nil && !sentFrame {
+                    let key = qHost.wantsKeyframe(nowUs: nowUs)
+                    let payload = Data(repeating: 0xCE, count: 6_000)
+                    for d in qHost.sendFrame(key: key, captureTsUs: nowUs, data: payload) {
+                        try link.sendDatagram(datagram: d)
+                    }
+                    sentFrame = true
+                }
+                if let key = qHost.takeKey() {
+                    hostKeyCode = key.code
+                }
+                if qHost.isClosed() {
+                    hostClosed = true
+                    break
+                }
+            }
+            hostNegotiated = qHost.negotiated() != nil
+        } catch {
+            fail("errore thread host QUIC: \(error)")
+        }
+    }
+
+    let link = try clientEndpoint.connect(
+        addr: serverAddr,
+        serverName: defaultQuicServerName(),
+        pinnedCertificateDer: cert,
+        timeoutMs: 5_000
+    )
+    let qClient = PhantomClient(settings: defaultSessionSettings())
+    let start = DispatchTime.now().uptimeNanoseconds
+    var qFrames: [VideoFrame] = []
+    var sentKey = false
+    while (DispatchTime.now().uptimeNanoseconds - start) < 2_000_000_000 {
+        let nowUs = (DispatchTime.now().uptimeNanoseconds - start) / 1_000
+        for d in qClient.tick(nowUs: nowUs) {
+            try link.sendDatagram(datagram: d)
+        }
+        if qClient.negotiated() != nil && !sentKey {
+            if let d = qClient.sendKey(nowUs: nowUs, code: 30, down: true) {
+                try link.sendDatagram(datagram: d)
+                sentKey = true
+            }
+        }
+        do {
+            let d = try link.recvDatagram(maxBytes: 2048, timeoutMs: 5)
+            for reply in qClient.onDatagram(nowUs: nowUs, data: d) {
+                try link.sendDatagram(datagram: reply)
+            }
+        } catch QuicTransportError.Timeout {
+        } catch {
+            break
+        }
+        qFrames.append(contentsOf: qClient.takeFrames())
+        if !qFrames.isEmpty && sentKey {
+            break
+        }
+    }
+    if let closeDatagram = qClient.close(reason: 0) {
+        try link.sendDatagram(datagram: closeDatagram)
+    }
+    Thread.sleep(forTimeInterval: 0.05)
+    link.close(code: 0, reason: Data())
+    check(hostDone.wait(timeout: .now() + 5) == .success, "thread host QUIC in timeout")
+    check(hostNegotiated, "sessione QUIC non negoziata dall'host")
+    check(hostClosed, "chiusura non arrivata all'host QUIC")
+    check(hostKeyCode == 30, "tasto su QUIC non ricevuto: \(String(describing: hostKeyCode))")
+    check(!qFrames.isEmpty && qFrames[0].data.count == 6_000, "frame su QUIC non ricevuto")
+}
+
+try runQuicLoopbackSmoke()
+
+print("OK: \(frames.count) frame, \(touchStates) stati del tocco, \(keyEvents) tasti, offset orologi \(offset) µs, bitrate \(hostCounters.targetBitrateBps / 1_000_000) Mbps (QUIC ok)")

@@ -13,10 +13,16 @@
 //!   va mai in panico, vedi ADR-004);
 //! - gli oggetti si possono usare da più thread: dentro c'è un blocco che serializza le chiamate.
 
+use std::fmt;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
-use phantom_core::phantom_proto::{caps, Codec, Finger, MAX_DATAGRAM, MAX_FINGERS};
+use phantom_core::phantom_proto::{
+    caps, Codec, Finger, HEADER_LEN, MAX_DATAGRAM, MAX_FINGERS, MAX_VIDEO_PAYLOAD, VIDEO_HEADER_LEN,
+};
 use phantom_core::{Client, Delivered, Host, KeyEvent, Negotiated, SessionConfig};
+use phantom_quic::{ClientEndpoint, HostEndpoint, QuicError, QuicLink};
 
 uniffi::setup_scaffolding!();
 
@@ -73,6 +79,9 @@ pub struct SessionSettings {
     /// Valore casuale annunciato nell'apertura della sessione: 16 byte (se più corto si completa con zeri, se più
     /// lungo si tronca). Nella fase 5 sarà la base della chiave; per ora può restare vuoto.
     pub nonce: Vec<u8>,
+    /// Dimensione massima del payload video per datagramma (byte, almeno 1 e al massimo `MAX_VIDEO_PAYLOAD`).
+    /// Su QUIC va scelta in base a `max_datagram_size` tramite `video_payload_for_datagram`.
+    pub frag_size: u16,
 }
 
 /// Le impostazioni predefinite: HEVC, parità 1:10, bitrate da 2 a 20 Mbps partendo da 6, tocco a 240 Hz.
@@ -88,6 +97,7 @@ pub fn default_session_settings() -> SessionSettings {
         max_bitrate_bps: d.max_bitrate_bps,
         touch_interval_us: d.touch_interval_us,
         nonce: d.nonce.to_vec(),
+        frag_size: d.frag_size,
     }
 }
 
@@ -97,6 +107,7 @@ impl From<SessionSettings> for SessionConfig {
         let mut nonce = [0u8; 16];
         let n = s.nonce.len().min(nonce.len());
         nonce[..n].copy_from_slice(&s.nonce[..n]);
+        let frag_size = s.frag_size.clamp(1, MAX_VIDEO_PAYLOAD as u16);
         SessionConfig {
             conn_id: s.conn_id,
             codec: s.codec.into(),
@@ -106,6 +117,7 @@ impl From<SessionSettings> for SessionConfig {
             max_bitrate_bps: s.max_bitrate_bps,
             touch_interval_us: s.touch_interval_us,
             nonce,
+            frag_size,
             ..SessionConfig::default()
         }
     }
@@ -187,6 +199,19 @@ impl From<KeyEvent> for KeyInput {
 #[uniffi::export]
 pub fn max_datagram_size() -> u32 {
     MAX_DATAGRAM as u32
+}
+
+/// Payload video massimo (`SessionSettings::frag_size`) compatibile con un datagramma di `max_datagram_size` byte.
+#[uniffi::export]
+pub fn video_payload_for_datagram(max_datagram_size: u32) -> u16 {
+    let overhead = (HEADER_LEN + VIDEO_HEADER_LEN) as u32;
+    max_datagram_size.saturating_sub(overhead).clamp(1, MAX_VIDEO_PAYLOAD as u32) as u16
+}
+
+/// Nome server predefinito usato nel certificato autofirmato effimero di [`QuicHostEndpoint`].
+#[uniffi::export]
+pub fn default_quic_server_name() -> String {
+    "localhost".to_owned()
 }
 
 /// Numero massimo di dita in uno stato del tocco.
@@ -502,6 +527,202 @@ impl PhantomClient {
     }
 }
 
+/// Errore del trasporto QUIC esposto ai binding Swift e Kotlin.
+#[derive(Debug, uniffi::Error)]
+pub enum QuicTransportError {
+    /// Indirizzo IP/porta non valido (atteso `ip:porta`, es. `127.0.0.1:47800`).
+    InvalidAddress {
+        /// Dettaglio dell'errore di parsing.
+        message: String,
+    },
+    /// Il certificato da fissare è vuoto.
+    EmptyCertificate,
+    /// Nessuna risposta entro il timeout richiesto.
+    Timeout,
+    /// L'endpoint è stato chiuso e non accetta più connessioni.
+    EndpointClosed,
+    /// L'altro lato non supporta i datagrammi QUIC (RFC 9221).
+    DatagramsUnsupported,
+    /// Il datagramma supera il massimo corrente della connessione.
+    DatagramTooLarge {
+        /// Lunghezza del datagramma che si è provato a spedire.
+        len: u32,
+        /// Massimo accettato in questo momento (`max_datagram_size`).
+        max: u32,
+    },
+    /// Il datagramma ricevuto supera la capacità del buffer ed è stato scartato.
+    BufferTooSmall {
+        /// Lunghezza del datagramma arrivato.
+        len: u32,
+        /// Capacità massima passata a `recv_datagram`.
+        capacity: u32,
+    },
+    /// Connessione chiusa o handshake TLS/QUIC fallito (incluso certificato diverso da quello fissato).
+    ConnectionFailed {
+        /// Descrizione dell'errore.
+        message: String,
+    },
+    /// Errore locale di I/O, TLS o configurazione dell'endpoint.
+    Transport {
+        /// Descrizione dell'errore.
+        message: String,
+    },
+}
+
+impl fmt::Display for QuicTransportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            QuicTransportError::InvalidAddress { message } => write!(f, "indirizzo non valido: {message}"),
+            QuicTransportError::EmptyCertificate => write!(f, "il certificato da fissare è vuoto"),
+            QuicTransportError::Timeout => write!(f, "nessuna risposta entro il timeout"),
+            QuicTransportError::EndpointClosed => write!(f, "endpoint chiuso"),
+            QuicTransportError::DatagramsUnsupported => write!(f, "datagrammi QUIC non supportati dall'altro lato"),
+            QuicTransportError::DatagramTooLarge { len, max } => write!(f, "datagramma di {len} byte, massimo {max}"),
+            QuicTransportError::BufferTooSmall { len, capacity } => {
+                write!(f, "datagramma di {len} byte, buffer di {capacity}")
+            }
+            QuicTransportError::ConnectionFailed { message } => write!(f, "{message}"),
+            QuicTransportError::Transport { message } => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for QuicTransportError {}
+
+impl From<QuicError> for QuicTransportError {
+    fn from(error: QuicError) -> Self {
+        match error {
+            QuicError::EmptyCertificate => QuicTransportError::EmptyCertificate,
+            QuicError::Timeout => QuicTransportError::Timeout,
+            QuicError::EndpointClosed => QuicTransportError::EndpointClosed,
+            QuicError::DatagramsUnsupported => QuicTransportError::DatagramsUnsupported,
+            QuicError::DatagramTooLarge { len, max } => QuicTransportError::DatagramTooLarge {
+                len: u32::try_from(len).unwrap_or(u32::MAX),
+                max: u32::try_from(max).unwrap_or(u32::MAX),
+            },
+            QuicError::BufferTooSmall { len, capacity } => QuicTransportError::BufferTooSmall {
+                len: u32::try_from(len).unwrap_or(u32::MAX),
+                capacity: u32::try_from(capacity).unwrap_or(u32::MAX),
+            },
+            QuicError::Connection(_) => QuicTransportError::ConnectionFailed { message: error.to_string() },
+            QuicError::Io(_)
+            | QuicError::Tls(_)
+            | QuicError::TlsConfig(_)
+            | QuicError::Certificate(_)
+            | QuicError::Connect(_)
+            | QuicError::SendDatagram(_) => QuicTransportError::Transport { message: error.to_string() },
+        }
+    }
+}
+
+fn parse_socket_addr(addr: &str) -> Result<SocketAddr, QuicTransportError> {
+    addr.parse::<SocketAddr>().map_err(|e| QuicTransportError::InvalidAddress { message: e.to_string() })
+}
+
+/// Endpoint QUIC lato host (server): genera un certificato autofirmato effimero e accetta una connessione.
+#[derive(uniffi::Object)]
+pub struct QuicHostEndpoint {
+    inner: HostEndpoint,
+}
+
+#[uniffi::export]
+impl QuicHostEndpoint {
+    /// Apre l'endpoint in ascolto su `addr` (es. `0.0.0.0:47800` o `127.0.0.1:0`).
+    #[uniffi::constructor]
+    pub fn bind(addr: String) -> Result<Arc<Self>, QuicTransportError> {
+        let addr = parse_socket_addr(&addr)?;
+        let inner = HostEndpoint::bind(addr)?;
+        Ok(Arc::new(Self { inner }))
+    }
+
+    /// Indirizzo locale (`ip:porta`) su cui l'endpoint ascolta.
+    pub fn local_addr(&self) -> Result<String, QuicTransportError> {
+        Ok(self.inner.local_addr()?.to_string())
+    }
+
+    /// Certificato autofirmato DER da consegnare al client perché lo fissi durante la connessione.
+    pub fn certificate_der(&self) -> Vec<u8> {
+        self.inner.certificate_der().to_vec()
+    }
+
+    /// Aspetta una connessione in ingresso e completa il handshake entro `timeout_ms` millisecondi.
+    pub fn accept(&self, timeout_ms: u64) -> Result<Arc<QuicConnection>, QuicTransportError> {
+        let link = self.inner.accept(Duration::from_millis(timeout_ms))?;
+        Ok(Arc::new(QuicConnection { link }))
+    }
+}
+
+/// Endpoint QUIC lato client: apre il socket locale e si collega all'host fissando il certificato.
+#[derive(uniffi::Object)]
+pub struct QuicClientEndpoint {
+    inner: ClientEndpoint,
+}
+
+#[uniffi::export]
+impl QuicClientEndpoint {
+    /// Apre l'endpoint locale su `addr` (es. `0.0.0.0:0` o `127.0.0.1:0`).
+    #[uniffi::constructor]
+    pub fn bind(addr: String) -> Result<Arc<Self>, QuicTransportError> {
+        let addr = parse_socket_addr(&addr)?;
+        let inner = ClientEndpoint::bind(addr)?;
+        Ok(Arc::new(Self { inner }))
+    }
+
+    /// Si collega a `addr` verificando che il certificato sia esattamente `pinned_certificate_der`.
+    pub fn connect(
+        &self,
+        addr: String,
+        server_name: String,
+        pinned_certificate_der: Vec<u8>,
+        timeout_ms: u64,
+    ) -> Result<Arc<QuicConnection>, QuicTransportError> {
+        let addr = parse_socket_addr(&addr)?;
+        let link =
+            self.inner.connect(addr, &server_name, &pinned_certificate_der, Duration::from_millis(timeout_ms))?;
+        Ok(Arc::new(QuicConnection { link }))
+    }
+}
+
+/// Connessione QUIC aperta che sposta datagrammi non affidabili (RFC 9221).
+///
+/// Invio e ricezione possono avvenire in contemporanea da thread diversi senza bloccarsi a vicenda.
+#[derive(uniffi::Object)]
+pub struct QuicConnection {
+    link: QuicLink,
+}
+
+#[uniffi::export]
+impl QuicConnection {
+    /// Spedisce subito un datagramma, se sta entro [`QuicConnection::max_datagram_size`].
+    pub fn send_datagram(&self, datagram: Vec<u8>) -> Result<(), QuicTransportError> {
+        Ok(self.link.send_datagram(&datagram)?)
+    }
+
+    /// Aspetta un datagramma fino a `timeout_ms` millisecondi, con buffer massimo di `max_bytes`.
+    pub fn recv_datagram(&self, max_bytes: u32, timeout_ms: u64) -> Result<Vec<u8>, QuicTransportError> {
+        let capacity = (max_bytes as usize).clamp(1, 65_536);
+        let mut buf = vec![0u8; capacity];
+        let n = self.link.recv_datagram(&mut buf, Duration::from_millis(timeout_ms))?;
+        buf.truncate(n);
+        Ok(buf)
+    }
+
+    /// Massimo datagramma accettato in questo momento (dipende dalla path MTU); `None` se non supportato.
+    pub fn max_datagram_size(&self) -> Option<u32> {
+        self.link.max_datagram_size().and_then(|n| u32::try_from(n).ok())
+    }
+
+    /// Chiude la connessione con un codice e un motivo applicativo.
+    pub fn close(&self, code: u32, reason: Vec<u8>) {
+        self.link.close(code, &reason);
+    }
+
+    /// `true` se la connessione QUIC è già chiusa.
+    pub fn is_closed(&self) -> bool {
+        self.link.is_closed()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,5 +922,134 @@ mod tests {
         assert!(client.tick(1_000).is_empty(), "il client chiuso non manda niente");
         assert!(client.send_key(1_000, 4, true).is_none());
         assert!(host.send_frame(true, 0, vec![1, 2, 3]).is_empty());
+    }
+
+    #[test]
+    fn video_payload_and_frag_size_follow_mtu_limits() {
+        assert_eq!(video_payload_for_datagram(1162), 1122);
+        assert_eq!(video_payload_for_datagram(10), 1);
+        assert_eq!(video_payload_for_datagram(2000), MAX_VIDEO_PAYLOAD as u16);
+
+        let d = default_session_settings();
+        assert_eq!(d.frag_size, MAX_VIDEO_PAYLOAD as u16);
+        let clamped_low: SessionConfig = SessionSettings { frag_size: 0, ..d.clone() }.into();
+        assert_eq!(clamped_low.frag_size, 1);
+        let clamped_high: SessionConfig = SessionSettings { frag_size: u16::MAX, ..d }.into();
+        assert_eq!(clamped_high.frag_size, MAX_VIDEO_PAYLOAD as u16);
+    }
+
+    #[test]
+    fn quic_bindings_reject_bad_inputs_and_mismatched_certificates() {
+        assert!(matches!(
+            QuicHostEndpoint::bind("not-an-addr".to_owned()),
+            Err(QuicTransportError::InvalidAddress { .. })
+        ));
+        let client = QuicClientEndpoint::bind("127.0.0.1:0".to_owned()).expect("bind client");
+        assert!(matches!(
+            client.connect("127.0.0.1:1".to_owned(), default_quic_server_name(), vec![], 100),
+            Err(QuicTransportError::EmptyCertificate)
+        ));
+
+        let host = QuicHostEndpoint::bind("127.0.0.1:0".to_owned()).expect("bind host");
+        let addr = host.local_addr().expect("addr");
+        let mut wrong_cert = host.certificate_der();
+        for b in &mut wrong_cert {
+            *b ^= 0xff;
+        }
+        let acceptor = std::thread::spawn(move || {
+            let _ = host.accept(2_000);
+        });
+        let err = client.connect(addr, default_quic_server_name(), wrong_cert, 2_000);
+        assert!(matches!(err, Err(QuicTransportError::ConnectionFailed { .. })));
+        acceptor.join().expect("thread accept");
+    }
+
+    #[test]
+    fn quic_bindings_open_exchange_and_close_over_loopback() {
+        let host_ep = QuicHostEndpoint::bind("127.0.0.1:0".to_owned()).expect("bind host");
+        let addr = host_ep.local_addr().expect("addr");
+        let cert = host_ep.certificate_der();
+        assert!(!cert.is_empty());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let host_thread = std::thread::spawn(move || {
+            let link = host_ep.accept(5_000).expect("accept");
+            let max_dgram = link.max_datagram_size().expect("datagrammi abilitati");
+            let mut cfg = default_session_settings();
+            cfg.frag_size = video_payload_for_datagram(max_dgram);
+            let host = PhantomHost::new(cfg);
+
+            let start = std::time::Instant::now();
+            let mut frame_sent = false;
+            while start.elapsed() < Duration::from_secs(2) {
+                match link.recv_datagram(2048, 5) {
+                    Ok(d) => {
+                        let now = start.elapsed().as_micros() as u64;
+                        for reply in host.on_datagram(now, d) {
+                            let _ = link.send_datagram(reply);
+                        }
+                    }
+                    Err(QuicTransportError::Timeout) => {}
+                    Err(_) => break,
+                }
+                if host.negotiated().is_some() && !frame_sent {
+                    let now = start.elapsed().as_micros() as u64;
+                    let key = host.wants_keyframe(now);
+                    for d in host.send_frame(key, now, vec![0xCD; 8_000]) {
+                        link.send_datagram(d).expect("invio frame su QUIC");
+                    }
+                    frame_sent = true;
+                }
+                if host.is_closed() {
+                    break;
+                }
+            }
+            tx.send((host.negotiated().is_some(), host.is_closed(), host.take_key())).expect("report host");
+        });
+
+        let client_ep = QuicClientEndpoint::bind("127.0.0.1:0".to_owned()).expect("bind client");
+        let link = client_ep.connect(addr, default_quic_server_name(), cert, 5_000).expect("connect");
+        let client = PhantomClient::new(default_session_settings());
+        let start = std::time::Instant::now();
+        let mut frames = Vec::new();
+        let mut key_sent = false;
+        while start.elapsed() < Duration::from_secs(2) {
+            let now = start.elapsed().as_micros() as u64;
+            for d in client.tick(now) {
+                link.send_datagram(d).expect("tick client");
+            }
+            if client.negotiated().is_some() && !key_sent {
+                if let Some(d) = client.send_key(now, 30, true) {
+                    link.send_datagram(d).expect("key client");
+                    key_sent = true;
+                }
+            }
+            match link.recv_datagram(2048, 5) {
+                Ok(d) => {
+                    for reply in client.on_datagram(now, d) {
+                        let _ = link.send_datagram(reply);
+                    }
+                }
+                Err(QuicTransportError::Timeout) => {}
+                Err(_) => break,
+            }
+            frames.extend(client.take_frames());
+            if !frames.is_empty() && key_sent {
+                break;
+            }
+        }
+        if let Some(close_dgram) = client.close(0) {
+            let _ = link.send_datagram(close_dgram);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        link.close(0, Vec::new());
+
+        let (host_negotiated, host_closed, taken_key) = rx.recv_timeout(Duration::from_secs(3)).expect("esito host");
+        host_thread.join().expect("thread host");
+        assert!(host_negotiated);
+        assert!(host_closed);
+        assert_eq!(taken_key.map(|k| (k.code, k.down)), Some((30, true)));
+        assert!(!frames.is_empty(), "almeno un frame ricevuto su QUIC");
+        assert_eq!(frames[0].data.len(), 8_000);
     }
 }
