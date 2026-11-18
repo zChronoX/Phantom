@@ -88,7 +88,16 @@ jobs:
         with:
           workspaces: core
           key: ${{ matrix.target }}
-      # solo le librerie: `check` non collega, quindi non serve l'NDK né Xcode per i test
+      # `ring` (crypto di QUIC) compila C anche con `cargo check`: per Android
+      # serve il clang e l'ar dell'NDK, per iOS bastano Xcode e xcrun.
+      - name: Compilatore C per Android (ring)
+        if: matrix.target == 'aarch64-linux-android'
+        run: |
+          NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CC_aarch64_linux_android=$NDK_BIN/aarch64-linux-android26-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$NDK_BIN/llvm-ar" >> "$GITHUB_ENV"
+          echo "RANLIB_aarch64_linux_android=$NDK_BIN/llvm-ranlib" >> "$GITHUB_ENV"
+      # solo le librerie: `check` non collega; il C di ring usa solo il compilatore dell'NDK
       - run: cargo check --workspace --lib --release --target ${{ matrix.target }}
 
   msrv:

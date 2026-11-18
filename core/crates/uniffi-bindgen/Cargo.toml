@@ -11,5 +11,8 @@ publish = false
 name = "uniffi-bindgen"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 uniffi = { version = "0.32", features = ["cli"] }

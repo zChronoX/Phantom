@@ -64,6 +64,12 @@ private final class LoopbackMetrics {
     var onDatagramUs: [Double] = []
     var touchAgeMs: [Double] = []
     var bitrateTrace: [Double] = []
+    /// Esito dell'apertura della sessione, appena arriva il `HelloAck`.
+    var agreement: SessionAgreement?
+    /// Motivo della chiusura arrivata durante la prova (non quella chiesta da noi alla fine).
+    var peerClosed: UInt8?
+    /// Perché la prova non può continuare, se è successo.
+    var sessionProblem: String?
 
     func add(_ body: (LoopbackMetrics) -> Void) {
         lock.lock(); defer { lock.unlock() }
@@ -141,6 +147,8 @@ private final class LoopbackRun {
         CrashLog.mark("Core: creo le impostazioni di sessione")
         var cfg = defaultSessionSettings()
         cfg.codec = .h265
+        // Il nonce è il valore casuale che ogni lato annuncia nell'apertura: qui è vero, non zero come il predefinito.
+        cfg.nonce = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
         settings = cfg
         CrashLog.mark("Core: creo PhantomHost")
         host = PhantomHost(settings: cfg)
@@ -223,6 +231,10 @@ private final class LoopbackRun {
 
         tickTimer?.cancel()
         netQueue.sync {}
+        // Chiusura ordinata, come farà l'app con il POCO: il client manda `Close`, l'host lo registra e nessuno dei due
+        // parla più. Il rapporto dice se è andata così.
+        CrashLog.mark("Core: chiudo la sessione")
+        if let d = client.close(reason: 0) { sendUplink(d) }
         CrashLog.mark("Core: scrivo il rapporto")
         return makeReport(wallSeconds: wallSeconds, cpuSeconds: cpuSecondsUsed, thermalStart: thermalStart)
     }
@@ -230,7 +242,8 @@ private final class LoopbackRun {
     private func liveText(second: Int, of seconds: Int) -> String {
         let (delivered, sent, touches) = m.read { ($0.delivered, $0.sourceFrames, $0.touchReceived) }
         let mbps = Double(host.targetBitrateBps()) / 1e6
-        return "\(second) s su \(seconds) · frame consegnati \(delivered) su \(sent) · bitrate richiesto \(String(format: "%.1f", mbps)) Mbps · tocchi all'host \(touches)"
+        let session = m.read { $0.agreement }.map { " · sessione \($0.proto), \($0.videoCodec ?? "senza codec")" } ?? ""
+        return "\(second) s su \(seconds) · frame consegnati \(delivered) su \(sent) · bitrate richiesto \(String(format: "%.1f", mbps)) Mbps · tocchi all'host \(touches)\(session)"
     }
 
     // MARK: Encoder
@@ -375,6 +388,33 @@ private final class LoopbackRun {
             }
         }
         for f in client.takeFrames() { handleFrame(f) }
+        checkSession()
+    }
+
+    /// Apertura e chiusura viste dal client: l'accordo si registra appena arriva il `HelloAck`, e se la sessione si
+    /// chiude la prova si ferma invece di continuare a parlare con nessuno.
+    private func checkSession() {
+        if m.read({ $0.agreement == nil }), let n = client.negotiated() {
+            let a = SessionAgreement(
+                proto: n.proto,
+                hevc: capsContains(caps: n.caps, capability: .h265),
+                avc: capsContains(caps: n.caps, capability: .h264),
+                parity: capsContains(caps: n.caps, capability: .xorParity),
+                retransmit: capsContains(caps: n.caps, capability: .nack),
+                keyframeRequest: capsContains(caps: n.caps, capability: .keyframeRequest),
+                queueDelay: capsContains(caps: n.caps, capability: .queueDelay),
+                peerNonce: n.peerNonce)
+            m.add { $0.agreement = a }
+            // L'encoder di questa prova è HEVC e basta: se i due lati non l'hanno concordato, non ha senso continuare.
+            if !a.hevc {
+                m.add { $0.sessionProblem = "l'HEVC non è stato concordato: la prova codifica solo HEVC" }
+                stop.set()
+            }
+        }
+        if m.read({ $0.peerClosed == nil }) && (client.isClosed() || host.isClosed()) {
+            m.add { $0.peerClosed = client.closeReason() ?? host.closeReason() ?? 0 }
+            stop.set()
+        }
     }
 
     // MARK: Lato client: dal frame del core al livello di visualizzazione
@@ -553,8 +593,27 @@ private final class LoopbackRun {
 
         var t = "Phantom F0 · prova «tutto sul telefono» (core Rust)\n"
         t += "modello \(DecoderBench.machineId()) · iOS \(UIDevice.current.systemVersion) · stato termico: \(thermalStart) → \(DecoderBench.thermal())\n"
-        t += String(format: "HEVC %d×%d · %d fps · %d s · perdita simulata sulla discesa %.0f%% · orologio dell'host sfasato di +%.0f s\n\n",
+        t += String(format: "HEVC %d×%d · %d fps · %d s · perdita simulata sulla discesa %.0f%% · orologio dell'host sfasato di +%.0f s\n",
                     s.width, s.height, s.fps, s.seconds, s.lossPercent, Double(hostClockOffsetUs) / 1e6)
+
+        let agreement = m.read { $0.agreement }
+        let problem = m.read { $0.sessionProblem }
+        let peerClosed = m.read { $0.peerClosed }
+        let clientSide = client.negotiated()
+        let hostSide = host.negotiated()
+        let sameSession = clientSide != nil && hostSide != nil
+            && clientSide?.proto == hostSide?.proto && clientSide?.caps == hostSide?.caps
+        if let a = agreement {
+            t += a.summary + "\n"
+        } else {
+            t += "sessione: nessun HelloAck ricevuto dal client\n"
+        }
+        t += "i due lati vedono la stessa sessione: \(sameSession ? "sì" : "no")\n"
+        if let problem = problem { t += "problema: \(problem)\n" }
+        if let reason = peerClosed {
+            t += "la sessione si è chiusa durante la prova: \(SessionAgreement.closeText(reason))\n"
+        }
+        t += "\n"
 
         t += "frame: sorgente \(source) · codificati \(encoded) · consegnati dal core \(delivered) · mostrati \(displayed) · errori di codifica \(failures)\n"
         let lostPct = source > 0 ? 100 * Double(source - delivered) / Double(source) : 0
@@ -588,6 +647,12 @@ private final class LoopbackRun {
         }
 
         t += "tocco: stati inviati \(touchSent) · ricevuti dall'host \(touchReceived) (\(hc.touchStates) contati dal core) · età alla ricezione \(touchAge.text)\n"
+
+        // Chiusura: il client ha chiesto `Close` alla fine e l'host deve averlo registrato; da lì in poi il client tace.
+        let quietAfterClose = client.isClosed() && client.tick(nowUs: nowUs()).isEmpty
+            && client.sendKey(nowUs: nowUs(), code: 4, down: true) == nil
+        t += "sessione alla fine: \(SessionAgreement.closeText(client.closeReason())) · client \(client.isClosed() ? "chiuso" : "aperto") · host \(host.isClosed() ? "chiuso" : "aperto")"
+        t += " · dopo la chiusura il client non manda più nulla: \(quietAfterClose ? "sì" : "no")\n"
         return t
     }
 }

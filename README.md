@@ -8,7 +8,7 @@ Il piano completo (obiettivi, architettura, roadmap, test) è nel documento di p
 
 **Fase 0 · Fattibilità** — in corso. Strumenti per verificare sul telefono reale i tre rischi principali: cattura ed encoder, rete di casa, raggiungibilità in Doze. Guida: [docs/f0-guida.md](docs/f0-guida.md).
 
-**Fase 1 · Fondamenta** — iniziata. Il core Rust ([core/](core/README.md)) ha protocollo v0, simulatore di rete, sincronia degli orologi, video con parità e NACK, controllo del bitrate, prove sul simulatore e su UDP reale, CI su tre sistemi operativi. Mancano i binding UniFFI.
+**Fase 1 · Fondamenta** — iniziata. Il core Rust ([core/](core/README.md)) ha protocollo v0, apertura obbligatoria (`Hello`/`HelloAck`: senza accordo non passano video né input) e chiusura ordinata della sessione, simulatore di rete, sincronia degli orologi, video con parità e NACK, controllo del bitrate, prove sul simulatore e su UDP reale, CI su tre sistemi operativi. Il crate `phantom-quic` porta gli stessi datagrammi su QUIC (fase 2, prima parte: trasporto provato in loopback, non ancora collegato all'app). I binding UniFFI (`phantom-ffi`) espongono host e client a Swift e Kotlin: la CI li genera, ne compila ed esegue una prova per entrambe le lingue e pubblica le librerie per iPhone e Android.
 
 ## Struttura
 

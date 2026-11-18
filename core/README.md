@@ -8,8 +8,9 @@ Logica condivisa tra host (Android) e client (iPhone). È scritta come **macchin
 | `phantom-netsim` | Simulatore di rete deterministico: ritardo, jitter FIFO, perdite casuali e a raffica a tempo, riordino, collo di bottiglia, cambi a metà prova. [ADR-005](../docs/adr/ADR-005-simulatore-di-rete.md) |
 | `phantom-clock` | Sincronia degli orologi (offset e deriva, stile NTP con scelta dei campioni migliori) e stima del ritardo di coda. |
 | `phantom-video` | Frammentazione, parità XOR, NACK con budget, riassemblaggio in ordine, richieste di keyframe ripetute. [ADR-006](../docs/adr/ADR-006-recupero-delle-perdite-video.md) |
-| `phantom-core` | `Host` e `Client` che mettono insieme i pezzi, più il controllo del bitrate (`rate`). [ADR-007](../docs/adr/ADR-007-controllo-del-bitrate-v0.md) |
-| `phantom-ffi` | Binding UniFFI per Swift e Kotlin: `PhantomHost` e `PhantomClient`. Nessuna logica, solo l'involucro. [ADR-008](../docs/adr/ADR-008-binding-uniffi.md) |
+| `phantom-core` | `Host` e `Client` che mettono insieme i pezzi: apertura obbligatoria della sessione (`Hello`/`HelloAck`, versione e funzioni comuni: senza accordo non passano video né input), chiusura ordinata, tastiera e controllo del bitrate (`rate`). [ADR-007](../docs/adr/ADR-007-controllo-del-bitrate-v0.md) |
+| `phantom-quic` | Trasporto QUIC con datagrammi (RFC 9221): endpoint host/client, certificato autofirmato effimero fissato dal client, API bloccante sopra `quinn`. Il core resta puro. [ADR-009](../docs/adr/ADR-009-trasporto-quic.md) |
+| `phantom-ffi` | Binding UniFFI per Swift e Kotlin: `PhantomHost` e `PhantomClient` con negoziazione (`negotiated`, `caps_contains`), tocco, tastiera (`send_key`/`take_key`), chiusura ordinata e contatori. Nessuna logica, solo l'involucro. [ADR-008](../docs/adr/ADR-008-binding-uniffi.md) |
 | `uniffi-bindgen` | Generatore dei binding: `cargo run -p uniffi-bindgen -- generate --library <lib> --language swift --out-dir <dir>` |
 
 ## Comandi
@@ -26,8 +27,8 @@ Le prove su UDP reale (`tests/udp_loopback.rs`) usano soglie larghe di proposito
 
 ## Binding
 
-La CI compila ed esegue su macOS un programma Swift che pilota host e client attraverso i binding (`crates/phantom-ffi/swift-smoke/`), genera i binding Kotlin e pubblica come artifact le librerie per iPhone (`.a`), simulatore e Android arm64 (`.so`), insieme ai sorgenti generati. Per rifarlo a mano su un Mac: i comandi sono nel job `ffi-apple` di `.github/workflows/core.yml`.
+La CI compila ed esegue su macOS un programma Swift che pilota host e client attraverso i binding (`crates/phantom-ffi/swift-smoke/`), genera i binding Kotlin e pubblica come artifact le librerie per iPhone (`.a`), simulatore e Android arm64 (`.so`), insieme ai sorgenti generati. Per rifarlo a mano su un Mac: i comandi sono nel job `ffi-apple` di `.github/workflows/core.yml`. Lo stesso programma Swift si compila ed esegue anche su Linux, senza Mac, con la libreria `.so` e `swiftc` di Docker `swift:5.10` (comandi in `HANDOFF.md`).
 
 ## Cosa manca (vedi la roadmap)
 
-Trasporto QUIC (fase 2), cifratura e autenticazione (fase 5), parità Reed-Solomon, controllo di congestione completo (fase 5).
+Trasporto QUIC: il crate `phantom-quic` c'è ed è provato in loopback, ma non è ancora collegato ai binding e all'app. Poi cifratura e autenticazione (fase 5), parità Reed-Solomon, controllo di congestione completo (fase 5).

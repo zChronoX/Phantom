@@ -31,3 +31,10 @@ mkdir -p "$OUT/annexb"
 cp AnnexBConvertTests.swift "$OUT/annexb/main.swift"
 swiftc -O -o "$OUT/run-annexb" ../PhantomF0/AnnexBConvert.swift ../PhantomF0/ScrcpyStream.swift "$OUT/annexb/main.swift"
 "$OUT/run-annexb"
+
+echo
+echo "== sessione (apertura e chiusura)"
+mkdir -p "$OUT/session"
+cp SessionAgreementTests.swift "$OUT/session/main.swift"
+swiftc -O -o "$OUT/run-session" ../PhantomF0/SessionAgreement.swift "$OUT/session/main.swift"
+"$OUT/run-session"

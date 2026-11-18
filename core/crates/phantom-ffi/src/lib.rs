@@ -15,8 +15,8 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use phantom_core::phantom_proto::{Codec, Finger, MAX_DATAGRAM, MAX_FINGERS};
-use phantom_core::{Client, Delivered, Host, SessionConfig};
+use phantom_core::phantom_proto::{caps, Codec, Finger, MAX_DATAGRAM, MAX_FINGERS};
+use phantom_core::{Client, Delivered, Host, KeyEvent, Negotiated, SessionConfig};
 
 uniffi::setup_scaffolding!();
 
@@ -70,6 +70,9 @@ pub struct SessionSettings {
     pub max_bitrate_bps: u64,
     /// Intervallo dello stato del tocco (µs); 4167 = 240 Hz.
     pub touch_interval_us: u64,
+    /// Valore casuale annunciato nell'apertura della sessione: 16 byte (se più corto si completa con zeri, se più
+    /// lungo si tronca). Nella fase 5 sarà la base della chiave; per ora può restare vuoto.
+    pub nonce: Vec<u8>,
 }
 
 /// Le impostazioni predefinite: HEVC, parità 1:10, bitrate da 2 a 20 Mbps partendo da 6, tocco a 240 Hz.
@@ -84,11 +87,16 @@ pub fn default_session_settings() -> SessionSettings {
         min_bitrate_bps: d.min_bitrate_bps,
         max_bitrate_bps: d.max_bitrate_bps,
         touch_interval_us: d.touch_interval_us,
+        nonce: d.nonce.to_vec(),
     }
 }
 
 impl From<SessionSettings> for SessionConfig {
     fn from(s: SessionSettings) -> Self {
+        // il nonce del protocollo è fisso a 16 byte: qui si completa o si tronca, senza errori da gestire nell'app
+        let mut nonce = [0u8; 16];
+        let n = s.nonce.len().min(nonce.len());
+        nonce[..n].copy_from_slice(&s.nonce[..n]);
         SessionConfig {
             conn_id: s.conn_id,
             codec: s.codec.into(),
@@ -97,8 +105,81 @@ impl From<SessionSettings> for SessionConfig {
             min_bitrate_bps: s.min_bitrate_bps,
             max_bitrate_bps: s.max_bitrate_bps,
             touch_interval_us: s.touch_interval_us,
+            nonce,
             ..SessionConfig::default()
         }
+    }
+}
+
+/// Una funzione che host e client possono concordare all'apertura della sessione.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum Capability {
+    /// H.264 / AVC.
+    H264,
+    /// H.265 / HEVC.
+    H265,
+    /// Frammento di parità XOR per gruppo (recupero di un frammento perso senza ritrasmissione).
+    XorParity,
+    /// Ritrasmissione dei frammenti persi su richiesta.
+    Nack,
+    /// Richiesta di un nuovo keyframe.
+    KeyframeRequest,
+    /// Ritardo di coda misurato dal client e riportato all'host.
+    QueueDelay,
+}
+
+impl Capability {
+    fn bit(self) -> u32 {
+        match self {
+            Capability::H264 => caps::H264,
+            Capability::H265 => caps::H265,
+            Capability::XorParity => caps::XOR_PARITY,
+            Capability::Nack => caps::NACK,
+            Capability::KeyframeRequest => caps::KEYFRAME_REQUEST,
+            Capability::QueueDelay => caps::QUEUE_DELAY,
+        }
+    }
+}
+
+/// `true` se la sessione ha concordato quella funzione (vedi [`NegotiatedInfo::caps`]).
+#[uniffi::export]
+pub fn caps_contains(caps: u32, capability: Capability) -> bool {
+    caps & capability.bit() != 0
+}
+
+/// Esito dell'apertura della sessione (`Hello`/`HelloAck`).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct NegotiatedInfo {
+    /// Versione del protocollo scelta.
+    pub proto: u8,
+    /// Funzioni comuni ai due lati: usarle con [`caps_contains`].
+    pub caps: u32,
+    /// Valore casuale annunciato dall'altro lato (16 byte).
+    pub peer_nonce: Vec<u8>,
+}
+
+impl From<Negotiated> for NegotiatedInfo {
+    fn from(n: Negotiated) -> Self {
+        NegotiatedInfo { proto: n.proto, caps: n.caps, peer_nonce: n.peer_nonce.to_vec() }
+    }
+}
+
+/// Un evento di tastiera ricevuto dall'host. Premere e rilasciare sono due eventi distinti.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct KeyInput {
+    /// Numero progressivo dell'evento (cresce di uno a ogni invio del client).
+    pub seq: u32,
+    /// Istante dell'evento sull'orologio del client (µs).
+    pub client_time_us: u64,
+    /// Codice HID del tasto.
+    pub code: u16,
+    /// `true` = premuto, `false` = rilasciato.
+    pub down: bool,
+}
+
+impl From<KeyEvent> for KeyInput {
+    fn from(k: KeyEvent) -> Self {
+        KeyInput { seq: k.seq, client_time_us: k.t_client_us, code: k.code, down: k.down }
     }
 }
 
@@ -201,6 +282,8 @@ pub struct HostCounters {
     pub keyframe_requests: u64,
     /// Stati del tocco ricevuti.
     pub touch_states: u64,
+    /// Eventi di tastiera ricevuti.
+    pub key_events: u64,
     /// Riduzioni del bitrate decise dal controllo.
     pub bitrate_decreases: u64,
     /// Bitrate che l'encoder dovrebbe usare adesso (bit/s).
@@ -298,9 +381,37 @@ impl PhantomHost {
             retransmit_denied: s.retransmit_denied,
             keyframe_requests: s.keyframe_requests,
             touch_states: s.touch_states,
+            key_events: s.key_events,
             bitrate_decreases: s.bitrate_decreases,
             target_bitrate_bps: g.host.target_bitrate_bps(),
         }
+    }
+
+    /// Esito dell'apertura della sessione (`Hello`/`HelloAck`), se il client l'ha già aperta: versione e funzioni
+    /// comuni.
+    pub fn negotiated(&self) -> Option<NegotiatedInfo> {
+        lock(&self.inner).host.negotiated().map(NegotiatedInfo::from)
+    }
+
+    /// Il più vecchio evento di tastiera non ancora prelevato. Sono eventi, non stato: vanno prelevati tutti, in
+    /// ordine.
+    pub fn take_key(&self) -> Option<KeyInput> {
+        lock(&self.inner).host.take_key().map(KeyInput::from)
+    }
+
+    /// `true` se la sessione è stata chiusa (dal client o da [`PhantomHost::close`]): l'app deve fermare il trasporto.
+    pub fn is_closed(&self) -> bool {
+        lock(&self.inner).host.is_closed()
+    }
+
+    /// Motivo della chiusura, se c'è stata (0 = normale).
+    pub fn close_reason(&self) -> Option<u8> {
+        lock(&self.inner).host.close_reason()
+    }
+
+    /// Chiude la sessione: restituisce il datagramma `Close` da spedire al client, oppure `None` se era già chiusa.
+    pub fn close(&self, reason: u8) -> Option<Vec<u8>> {
+        lock(&self.inner).host.close(reason)
     }
 }
 
@@ -340,6 +451,34 @@ impl PhantomClient {
     /// I frame completi arrivati dall'ultima chiamata, in ordine, pronti per il decoder.
     pub fn take_frames(&self) -> Vec<VideoFrame> {
         lock(&self.inner).take_frames().into_iter().map(VideoFrame::from).collect()
+    }
+
+    /// Spedisce un evento di tastiera all'host: `code` è il codice HID, `down` dice premuto o rilasciato. Sono eventi,
+    /// non stato: vanno mandati tutti, anche due di seguito con lo stesso codice. Restituisce il datagramma da spedire,
+    /// oppure `None` se la sessione è chiusa.
+    pub fn send_key(&self, now_us: u64, code: u16, down: bool) -> Option<Vec<u8>> {
+        lock(&self.inner).key(now_us, code, down)
+    }
+
+    /// Esito dell'apertura della sessione (`Hello`/`HelloAck`), se l'host l'ha già confermata: versione e funzioni
+    /// comuni.
+    pub fn negotiated(&self) -> Option<NegotiatedInfo> {
+        lock(&self.inner).negotiated().map(NegotiatedInfo::from)
+    }
+
+    /// `true` se la sessione è stata chiusa (dall'host o da [`PhantomClient::close`]): l'app deve fermare il trasporto.
+    pub fn is_closed(&self) -> bool {
+        lock(&self.inner).is_closed()
+    }
+
+    /// Motivo della chiusura, se c'è stata (0 = normale).
+    pub fn close_reason(&self) -> Option<u8> {
+        lock(&self.inner).close_reason()
+    }
+
+    /// Chiude la sessione: restituisce il datagramma `Close` da spedire all'host, oppure `None` se era già chiusa.
+    pub fn close(&self, reason: u8) -> Option<Vec<u8>> {
+        lock(&self.inner).close(reason)
     }
 
     /// Contatori e misure; `now_us` è l'ora locale del client.
@@ -384,6 +523,30 @@ mod tests {
                 To::Client => queue.extend(client.on_datagram(t, d).into_iter().map(|r| (To::Host, r))),
             }
         }
+    }
+
+    /// Apre la sessione con il primo `Hello` e l'ack dell'host.
+    fn open(host: &PhantomHost, client: &PhantomClient) {
+        let out: Vec<(To, Vec<u8>)> = client.tick(0).into_iter().map(|d| (To::Host, d)).collect();
+        pump(host, client, 0, out);
+        assert!(client.negotiated().is_some(), "sessione aperta");
+        assert!(host.negotiated().is_some(), "anche l'host vede la sessione aperta");
+    }
+
+    #[test]
+    fn input_waits_for_the_session() {
+        let host = PhantomHost::new(default_session_settings());
+        let client = PhantomClient::new(default_session_settings());
+        let fingers = vec![TouchPoint { id: 3, x: 1000, y: 2000, pressure: 90 }];
+        assert!(client.touch_tick(0, fingers.clone()).is_none(), "niente tocco prima dell'apertura");
+        assert!(client.send_key(0, 4, true).is_none(), "niente tastiera prima dell'apertura");
+        assert!(host.send_frame(true, 0, vec![1, 2, 3]).is_empty(), "niente video prima dell'apertura");
+        assert!(!host.wants_keyframe(0), "niente keyframe prima dell'apertura");
+
+        open(&host, &client);
+        assert!(client.touch_tick(1, fingers).is_some(), "dopo l'apertura il tocco parte");
+        assert!(client.send_key(1, 4, true).is_some(), "dopo l'apertura la tastiera parte");
+        assert!(!host.send_frame(true, 1, vec![1, 2, 3]).is_empty(), "dopo l'apertura il video parte");
     }
 
     #[test]
@@ -453,6 +616,7 @@ mod tests {
     fn more_than_ten_fingers_are_truncated_not_dropped() {
         let host = PhantomHost::new(default_session_settings());
         let client = PhantomClient::new(default_session_settings());
+        open(&host, &client);
         let fingers: Vec<TouchPoint> =
             (0..14).map(|i| TouchPoint { id: i, x: u16::from(i) * 100, y: 5, pressure: 1 }).collect();
         let d = client.touch_tick(0, fingers).expect("lo stato parte");
@@ -472,5 +636,70 @@ mod tests {
         assert_eq!(cfg.codec, Codec::H264);
         assert_eq!(cfg.fec_group, 0);
         assert_eq!(VideoCodec::from(Codec::H264), VideoCodec::H264);
+    }
+
+    #[test]
+    fn negotiation_and_caps_are_visible() {
+        let host = PhantomHost::new(default_session_settings());
+        let client = PhantomClient::new(default_session_settings());
+        let out: Vec<(To, Vec<u8>)> = client.tick(0).into_iter().map(|d| (To::Host, d)).collect();
+        pump(&host, &client, 0, out);
+
+        let n = client.negotiated().expect("il client ha negoziato");
+        assert_eq!(n.proto, 0);
+        assert_eq!(n.peer_nonce.len(), 16);
+        assert!(caps_contains(n.caps, Capability::H265), "HEVC concordato");
+        assert!(caps_contains(n.caps, Capability::XorParity), "parità concordata");
+        assert!(caps_contains(n.caps, Capability::Nack));
+        assert!(!caps_contains(n.caps, Capability::H264), "un solo codec si concorda");
+        let h = host.negotiated().expect("anche l'host vede la sessione aperta");
+        assert_eq!(h.caps, n.caps);
+        assert_eq!(h.proto, n.proto);
+    }
+
+    #[test]
+    fn nonce_crosses_the_bindings_and_short_ones_are_padded() {
+        let settings = SessionSettings { nonce: vec![7; 16], ..default_session_settings() };
+        let host = PhantomHost::new(settings.clone());
+        let client = PhantomClient::new(SessionSettings { nonce: vec![3; 3], ..settings });
+        let out: Vec<(To, Vec<u8>)> = client.tick(0).into_iter().map(|d| (To::Host, d)).collect();
+        pump(&host, &client, 0, out);
+
+        let mut expected = vec![3u8; 3];
+        expected.resize(16, 0);
+        assert_eq!(host.negotiated().expect("negoziata").peer_nonce, expected, "il nonce corto si completa con zeri");
+        assert_eq!(client.negotiated().expect("negoziata").peer_nonce, vec![7; 16]);
+    }
+
+    #[test]
+    fn keyboard_events_pass_through_the_bindings() {
+        let host = PhantomHost::new(default_session_settings());
+        let client = PhantomClient::new(default_session_settings());
+        open(&host, &client);
+        for (code, down) in [(4u16, true), (4, false)] {
+            let d = client.send_key(1_000, code, down).expect("datagramma di tastiera");
+            host.on_datagram(0, d);
+        }
+        let press = host.take_key().expect("pressione");
+        assert_eq!((press.seq, press.code, press.down, press.client_time_us), (0, 4, true, 1_000));
+        let release = host.take_key().expect("rilascio");
+        assert_eq!((release.seq, release.down), (1, false));
+        assert!(host.take_key().is_none(), "la coda si svuota");
+        assert_eq!(host.counters().key_events, 2);
+    }
+
+    #[test]
+    fn close_is_terminal_on_both_sides() {
+        let host = PhantomHost::new(default_session_settings());
+        let client = PhantomClient::new(default_session_settings());
+        let d = client.close(0).expect("datagramma di chiusura");
+        assert!(client.is_closed());
+        assert!(host.on_datagram(0, d).is_empty(), "alla chiusura non si risponde");
+        assert!(host.is_closed());
+        assert_eq!(host.close_reason(), Some(0));
+        assert_eq!(client.close_reason(), Some(0));
+        assert!(client.tick(1_000).is_empty(), "il client chiuso non manda niente");
+        assert!(client.send_key(1_000, 4, true).is_none());
+        assert!(host.send_frame(true, 0, vec![1, 2, 3]).is_empty());
     }
 }

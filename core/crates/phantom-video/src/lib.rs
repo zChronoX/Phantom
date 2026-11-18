@@ -424,11 +424,9 @@ impl FrameState {
             }
             let Some(par) = self.parity[g].as_ref() else { continue };
             let mut buf = par.clone();
-            for i in first..last {
-                if let Some(d) = &self.data[i] {
-                    for (b, s) in buf.iter_mut().zip(d) {
-                        *b ^= s;
-                    }
+            for d in self.data[first..last].iter().flatten() {
+                for (b, s) in buf.iter_mut().zip(d) {
+                    *b ^= s;
                 }
             }
             let len = proto::fragment_len(self.total_len, self.frag_size, missing[0] as u16);

@@ -64,7 +64,7 @@ struct CoreLoopbackScreen: View {
             }
 
             Section {
-                Text("L'iPhone fa da solo tutto il percorso del video: crea frame sintetici, li codifica in HEVC con l'encoder hardware, li passa al core Rust di Phantom (frammenti, parità, ritrasmissioni, controllo del bitrate), perde una parte dei pacchetti a caso, li riceve con il client del core, li decodifica e li mostra. Intanto un dito finto manda lo stato del tocco a 240 Hz. Non usa la rete né il POCO. Tieni l'app aperta e lo schermo acceso fino alla fine.")
+                Text("L'iPhone fa da solo tutto il percorso del video: crea frame sintetici, li codifica in HEVC con l'encoder hardware, li passa al core Rust di Phantom (frammenti, parità, ritrasmissioni, controllo del bitrate), perde una parte dei pacchetti a caso, li riceve con il client del core, li decodifica e li mostra. La sessione si apre con Hello/HelloAck (versione e funzioni comuni) e alla fine si chiude con Close. Intanto un dito finto manda lo stato del tocco a 240 Hz. Non usa la rete né il POCO. Tieni l'app aperta e lo schermo acceso fino alla fine.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

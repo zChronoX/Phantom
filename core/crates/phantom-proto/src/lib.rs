@@ -147,6 +147,42 @@ pub enum Codec {
     H265 = 2,
 }
 
+impl Codec {
+    /// Bit corrispondente in [`caps`] (cosa si annuncia nell'apertura della sessione).
+    pub fn caps_bit(self) -> u32 {
+        match self {
+            Codec::H264 => caps::H264,
+            Codec::H265 => caps::H265,
+        }
+    }
+}
+
+/// Funzioni annunciate nell'apertura della sessione (`Hello`/`HelloAck`): un bit per funzione.
+///
+/// Ognuno dichiara quelle che sa fare; quelle comuni sono quelle che la sessione potrà usare.
+pub mod caps {
+    /// H.264 / AVC.
+    pub const H264: u32 = 1 << 0;
+    /// H.265 / HEVC.
+    pub const H265: u32 = 1 << 1;
+    /// Frammento di parità XOR per gruppo (ADR-006).
+    pub const XOR_PARITY: u32 = 1 << 2;
+    /// Ritrasmissione dei frammenti persi su richiesta (`Nack`).
+    pub const NACK: u32 = 1 << 3;
+    /// Richiesta di un nuovo keyframe (`KeyframeRequest`).
+    pub const KEYFRAME_REQUEST: u32 = 1 << 4;
+    /// Misura del ritardo di coda riportata in `Stats::queue_delay_us`.
+    pub const QUEUE_DELAY: u32 = 1 << 5;
+}
+
+/// Motivi del messaggio [`Message::Close`].
+pub mod close_reason {
+    /// Chiusura ordinata.
+    pub const NORMAL: u8 = 0;
+    /// Nessuna versione del protocollo in comune con l'altro lato.
+    pub const BAD_PROTOCOL: u8 = 1;
+}
+
 /// Flag di un frammento video.
 pub mod video_flags {
     /// Il frame è un keyframe.

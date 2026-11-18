@@ -16,3 +16,9 @@ uniffi = "0.32"
 
 # Niente `[lints] workspace = true`: il codice generato da UniFFI usa `unsafe`, che nel resto del workspace è vietato.
 # Tutta la logica sta negli altri crate; qui c'è solo l'involucro.
+[lints.rust]
+unsafe_code = "allow"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
