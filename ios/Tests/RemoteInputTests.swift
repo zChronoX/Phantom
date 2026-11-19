@@ -39,6 +39,8 @@ do {
     // Tocco iniziale nella banda nera sinistra -> ignorato
     let ignored = tracker.begin(touchID: 1, x: 50, y: 100, in: rect, requireInsideRect: true)
     check(!ignored && tracker.currentFingers.isEmpty, "tocco iniziale in banda nera ignorato")
+    check(!tracker.move(touchID: 1, x: 150, y: 150, in: rect), "move su tocco mai tracciato restituisce false")
+    check(!tracker.end(touchID: 1), "end su tocco mai tracciato restituisce false")
 
     // Tocco valido al centro
     let ok1 = tracker.begin(touchID: 10, x: 200, y: 200, pressure: 120, in: rect)
@@ -50,11 +52,12 @@ do {
     ], "stati iniziali: \(tracker.currentFingers)")
 
     // Trascinamento fuori dal video -> resta ancorato al bordo senza cadere
-    tracker.move(touchID: 10, x: 0, y: 100, pressure: 150, in: rect)
+    check(tracker.move(touchID: 10, x: 0, y: 100, pressure: 150, in: rect), "move valido restituisce true")
     check(tracker.currentFingers[0] == NormalizedFinger(id: 0, x: 0, y: 16384, pressure: 150), "move clampato")
 
     // Rilascio dito 0 e nuovo tocco -> riutilizza slot 0 mantenendo slot 1 sul secondo dito
-    tracker.end(touchID: 10)
+    check(tracker.end(touchID: 10), "end valido restituisce true")
+    check(!tracker.end(touchID: 10), "secondo end sullo stesso dito restituisce false")
     check(tracker.currentFingers.count == 1 && tracker.currentFingers[0].id == 1, "slot 1 invariato")
     check(tracker.begin(touchID: 30, x: 300, y: 0, pressure: 80, in: rect), "nuovo dito prende slot 0")
     check(tracker.currentFingers.map(\.id) == [0, 1], "slot riutilizzato in ordine")
@@ -106,6 +109,53 @@ do {
     check(RemoteQuickAction.home.hidSequence.first == HidKeyEvent(code: HidKeyCode.home, down: true), "home")
     check(RemoteQuickAction.recents.hidSequence.count == 4, "recents alt+tab")
     print("ok · HidCharacterMapper e RemoteQuickAction")
+}
+
+// 5. TouchDispatchState (rilascio ultimo dito senza rimanere incastrato)
+do {
+    var dispatch = TouchDispatchState()
+    check(!dispatch.shouldSendOnTick, "inizialmente inattivo")
+
+    let v1 = dispatch.update([NormalizedFinger(id: 0, x: 1000, y: 2000, pressure: 128)])
+    check(dispatch.shouldSendOnTick, "con dita appoggiate manda sempre")
+    dispatch.markSent(version: v1)
+    check(!dispatch.dirty && dispatch.shouldSendOnTick, "continua a mandare mentre il dito è giù")
+
+    // Rilascio rapido bloccato dal rate-limit: deve restare in attesa finché `markSent(v2)` non passa
+    let v2 = dispatch.update([])
+    check(dispatch.shouldSendOnTick && dispatch.dirty, "rilascio ultimo dito resta pronto per onTick")
+    dispatch.markSent(version: v1) // versione vecchia ignorata
+    check(dispatch.dirty && dispatch.shouldSendOnTick, "versione vecchia non cancella dirty")
+
+    // Primo invio di [] + 1 ripetizione di sicurezza, poi idle
+    dispatch.markSent(version: v2)
+    check(!dispatch.dirty && dispatch.shouldSendOnTick, "una ripetizione di sicurezza dopo il rilascio")
+    dispatch.markSent(version: v2)
+    check(!dispatch.shouldSendOnTick, "dopo la ripetizione torna inattivo")
+    print("ok · TouchDispatchState")
+}
+
+// 6. AnnexBScanner (zero-copy NAL ranges & parameter sets)
+do {
+    check(AnnexBScanner.nalRanges(in: Data()).isEmpty, "vuoto")
+    check(AnnexBScanner.nalRanges(in: Data([0, 0, 1])).isEmpty, "solo start code")
+
+    let h264 = Data([0, 0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68, 0xCE, 0, 0, 0, 1, 0x65, 0x88])
+    let r264 = AnnexBScanner.nalRanges(in: h264)
+    check(r264 == [4..<6, 9..<11, 15..<17], "intervalli H.264: \(r264)")
+    check(AnnexBScanner.parameterSetKind(firstByte: h264[r264[0].lowerBound], isHEVC: false) == .sps, "H.264 SPS")
+    check(AnnexBScanner.parameterSetKind(firstByte: h264[r264[1].lowerBound], isHEVC: false) == .pps, "H.264 PPS")
+    check(!AnnexBScanner.isParameterSet(firstByte: h264[r264[2].lowerBound], isHEVC: false), "H.264 IDR")
+
+    // H.265 NAL header byte = (nal_unit_type << 1): VPS=32 (0x40), SPS=33 (0x42), PPS=34 (0x44), IDR=19 (0x26)
+    let h265 = Data([0, 0, 1, 0x40, 0x01, 0, 0, 1, 0x42, 0x01, 0, 0, 1, 0x44, 0x01, 0, 0, 0, 1, 0x26, 0xAA])
+    let r265 = AnnexBScanner.nalRanges(in: h265)
+    check(r265.count == 4, "4 NAL H.265")
+    check(AnnexBScanner.parameterSetKind(firstByte: h265[r265[0].lowerBound], isHEVC: true) == .vps, "HEVC VPS")
+    check(AnnexBScanner.parameterSetKind(firstByte: h265[r265[1].lowerBound], isHEVC: true) == .sps, "HEVC SPS")
+    check(AnnexBScanner.parameterSetKind(firstByte: h265[r265[2].lowerBound], isHEVC: true) == .pps, "HEVC PPS")
+    check(!AnnexBScanner.isParameterSet(firstByte: h265[r265[3].lowerBound], isHEVC: true), "HEVC slice")
+    print("ok · AnnexBScanner")
 }
 
 print("Tutti i test superati.")

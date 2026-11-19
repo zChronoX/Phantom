@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Schermata di configurazione e avvio del controllo remoto QUIC (verso Android o in loopback locale).
 struct RemoteConnectView: View {
@@ -46,6 +47,23 @@ struct RemoteConnectView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
 
+                HStack {
+                    Button {
+                        if let text = UIPasteboard.general.string {
+                            certInput = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        }
+                    } label: {
+                        Label("Incolla dagli appunti", systemImage: "doc.on.clipboard")
+                    }
+                    .font(.footnote)
+                    Spacer()
+                    if let status = certificateStatusText {
+                        Text(status.text)
+                            .font(.caption2)
+                            .foregroundStyle(status.valid ? .green : .orange)
+                    }
+                }
+
                 Picker("Codec preferito", selection: $codecRaw) {
                     Text("HEVC (H.265)").tag("h265")
                     Text("H.264 (AVC)").tag("h264")
@@ -92,6 +110,15 @@ struct RemoteConnectView: View {
         .fullScreenCover(item: $activeMode) { route in
             RemoteSessionView(mode: route.sessionMode, showTouchIndicators: showTouchIndicators)
         }
+    }
+
+    private var certificateStatusText: (text: String, valid: Bool)? {
+        let trimmed = certInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let cert = CertificateCodec.decode(trimmed), !cert.isEmpty {
+            return ("Certificato valido · \(cert.count) byte", true)
+        }
+        return ("Formato non valido (atteso Hex o Base64)", false)
     }
 
     private func launchRemote() {

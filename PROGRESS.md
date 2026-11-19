@@ -1,6 +1,6 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `1a97d97` (allineato a `origin/main`) più modifiche locali non committate per il keep-alive `QuicConnection`/endpoint e i fix del loopback iOS (vedi `HANDOFF.md`).
+Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `cbca9c9` (allineato a `origin/main`) più modifiche locali non committate per fix, ottimizzazioni a bassa latenza e rifiniture UX del client iOS (vedi `HANDOFF.md`).
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Dove siamo
@@ -153,8 +153,22 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
     `VTCompressionSessionCompleteFrames` a chiusura.
   - `RemoteControlSurface.swift`: spinner mostrato solo con `session.running`, icona avviso
     quando fermo, banner centrato verticalmente senza sovrapposizione all'HUD.
-- Nota: Docker Desktop spento in questa sessione, quindi le verifiche Docker vanno eseguite
-  dopo il riavvio di Docker o tramite GitHub Actions al push.
+- Nota: il blocco di fix `QuicConnection`/loopback è stato committato e pushato in `cbca9c9`
+  e verificato su iPhone reale (110 fps, RTT 0,6 ms, multi-touch centrato nei frame HEVC).
+- Rifinitura e ottimizzazione iOS (locale, non committata):
+  - `TouchMapper.swift`: `VideoDimensions`, ritorno `Bool` su `TouchTracker.move`/`end`,
+    `TouchDispatchState` (con invio garantito di `[]` + ripetizione al rilascio) e `AnnexBScanner`.
+  - `VideoDecoderSupport.swift`: `BuiltVideoSample`, conversione diretta Annex-B → `CMBlockBuffer`
+    in copia singola e flag `formatChanged`.
+  - `RemoteSession.swift`: timer `tick` a 250 Hz, uso `TouchDispatchState`, loopback con sfondo
+    luma precalcolato, pacing a scadenza assoluta e adattamento bitrate.
+  - `RemoteControlSurface.swift`: renderer `AVSampleBufferVideoRenderer` su coda background,
+    niente cerchi fantasma per tocchi fuori video, `RemoteDisplayViewController` con
+    `preferredScreenEdgesDeferringSystemGestures = .all`, reset tocchi su `inactive`, pulizia
+    completa `GamepadBridge`.
+  - `RemoteConnectView.swift`: incolla certificato dagli appunti + indicatore di validità.
+  - `RemoteInputTests.swift`: aggiunti test per `TouchTracker.move`/`end`, `TouchDispatchState`
+    e `AnnexBScanner` (da verificare in CI o dopo riavvio di Docker Desktop).
 
 ## Decisioni
 
@@ -256,12 +270,10 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 ## Prossimo passo
 
 Modifiche locali pronte (da committare e pushare dall'utente su `origin/main` per
-eseguire le verifiche CI e generare il nuovo `PhantomF0.ipa`):
-- `core/crates/phantom-ffi/{src/lib.rs,swift-smoke/main.swift}`
-- `ios/PhantomF0/{RemoteSession.swift,RemoteControlSurface.swift}`
+eseguire test/build su GitHub Actions e generare il nuovo `PhantomF0.ipa`):
+- `ios/PhantomF0/{TouchMapper.swift,VideoDecoderSupport.swift,RemoteSession.swift,RemoteControlSurface.swift,RemoteConnectView.swift}`
+- `ios/Tests/RemoteInputTests.swift`
 - `HANDOFF.md`, `PROGRESS.md`
 
-Dopo il push, scaricare `PhantomF0.ipa` dalla release `f0-latest` di GitHub Actions
-e riprovare su iPhone «Controllo remoto → Schermo Android (QUIC) → Avvia in loopback QUIC locale».
-Poi si può iniziare il server host Kotlin su Android oppure aggiungere Reed-Solomon /
-controllo di congestione / Fase 5 nel core.
+Dopo la prova iOS, si può iniziare il server host Kotlin su Android oppure aggiungere
+Reed-Solomon / controllo di congestione / Fase 5 nel core.

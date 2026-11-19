@@ -1,7 +1,7 @@
 # Handoff
 
-Scritto: 2026-11-19 da Particle-1 (Kilo); aggiornato dopo il fix di ciclo di vita `QuicConnection`/endpoint QUIC e i miglioramenti UI/feedback del loopback iOS.
-Branch: main - Commit locale: `1a97d97` (allineato a `origin/main`) + modifiche locali non committate
+Scritto: 2026-11-19 da Particle-1 (Kilo); aggiornato dopo i fix e le ottimizzazioni del client iOS di controllo remoto.
+Branch: main - Commit locale: `cbca9c9` (allineato a `origin/main`) + modifiche locali non committate
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -71,36 +71,40 @@ Otto task della sessione precedente più T9 e T10 chiusi e verificati in Docker
 
 ## In progress (exact state)
 
-- Il blocco precedente è stato committato e pushato in `1a97d97` (build CI verdi).
-- Nella prima prova su iPhone reale il loopback QUIC mostrava «Sessione chiusa: ancora aperta»
-  con spinner fisso sovrapposto all'HUD: `let clientEp = try QuicClientEndpoint.bind(...)` in
-  `RemoteSession.swift` usciva di scope a fine `runConnect`, e `Drop for ClientEndpoint` in
-  `phantom-quic` chiudeva l'endpoint e tutte le connessioni aperte.
-- Applicati i fix (non ancora committati):
-  - `core/crates/phantom-ffi/src/lib.rs`: `QuicHostEndpoint` e `QuicClientEndpoint` tengono
-    `Arc<HostEndpoint>`/`Arc<ClientEndpoint>` e ogni `QuicConnection` mantiene `_keep_alive`
-    (dichiarato dopo `link`, così `link` droppa sempre prima dell'endpoint/runtime). Aggiunto
-    test `quic_connection_survives_dropping_endpoints`.
-  - `core/crates/phantom-ffi/swift-smoke/main.swift`: aggiunto `runQuicEndpointLifetimeSmoke()`.
-  - `ios/PhantomF0/RemoteSession.swift`: mantenuto `clientEndpoint` in `RemoteSession` fino a
-    `stop()`, usato `127.0.0.1:0` in loopback, separato il messaggio tra chiusura protocollo e
-    chiusura trasporto QUIC, spostato `isIdleTimerDisabled` sul main thread, salvato l'ultimo
-    `TouchState` in `LocalQuicHostRunner` per disegnare i tocchi ricevuti nel frame HEVC
-    sintetico, aggiunto guard `!self.isStopped` + `VTCompressionSessionCompleteFrames`.
-  - `ios/PhantomF0/RemoteControlSurface.swift`: spinner mostrato solo con `session.running`,
-    icona di avviso quando fermo, banner centrato verticalmente senza sovrapposizione all'HUD.
+- Il fix precedente di keep-alive `QuicConnection`/endpoint è stato committato e pushato in
+  `cbca9c9` e verificato su iPhone reale (110 fps, RTT 0,6 ms, multi-touch a 5 dita centrato).
+- Applicato un giro di bugfix, ottimizzazioni a bassa latenza e rifiniture UX lato iOS (non
+  ancora committato):
+  - `ios/PhantomF0/TouchMapper.swift`: aggiunti `VideoDimensions`, ritorno `Bool` su
+    `TouchTracker.move`/`end` (ignora dita non tracciate), `TouchDispatchState` (garantisce
+    l'invio di `[]` + ripetizione di sicurezza al rilascio rapido dell'ultimo dito) e
+    `AnnexBScanner` zero-copy.
+  - `ios/PhantomF0/VideoDecoderSupport.swift`: conversione Annex-B → `CMBlockBuffer` in
+    copia singola e rilevamento cambio formato (`formatChanged` per flush su rotazione).
+  - `ios/PhantomF0/RemoteSession.swift`: integrazione `TouchDispatchState` e `VideoDimensions`,
+    timer `tick` a 250 Hz (4 ms), loopback sintetico con sfondo precalcolato, pacing assoluto
+    a 120 fps e aggiornamento adattivo del bitrate dell'encoder.
+  - `ios/PhantomF0/RemoteControlSurface.swift`: rendering su coda background con API iOS 17
+    `AVSampleBufferVideoRenderer` (`sampleBufferRenderer` + flush su cambio formato), niente
+    cerchi fantasma per tocchi fuori video, `RemoteDisplayViewController` con
+    `preferredScreenEdgesDeferringSystemGestures = .all`, reset dita su `scenePhase == .inactive`
+    e pulizia completa degli handler in `GamepadBridge.stop()`.
+  - `ios/PhantomF0/RemoteConnectView.swift`: pulsante «Incolla dagli appunti» e stato di
+    validazione del certificato DER.
+  - `ios/Tests/RemoteInputTests.swift`: aggiunti test per `TouchTracker.move`/`end`,
+    `TouchDispatchState` e `AnnexBScanner`.
 - **Verifiche locali non eseguite in questa sessione**: Docker Desktop spento
-  (`open //./pipe/dockerDesktopLinuxEngine: Impossibile trovare il file specificato`).
+  (`open //./pipe/dockerDesktopLinuxEngine: Impossibile trovare il file specificato`), quindi
+  `ios/Tests/run-tests.sh` e `swiftc -parse` gireranno in CI su GitHub Actions al push
+  (oppure in locale dopo l'avvio di Docker Desktop).
 
 ## Next steps (in order)
 
 1. Eseguire `powershell -NoProfile -ExecutionPolicy Bypass -File tools/repo-preflight.ps1`.
-2. Committare e pushare su `origin/main` (oppure avviare Docker Desktop per eseguire prima in
-   locale i comandi nella sezione «How to verify»), poi scaricare il nuovo `PhantomF0.ipa`
+2. Committare e pushare su `origin/main` (o avviare Docker Desktop per verificare prima in
+   locale `ios/Tests/run-tests.sh` e `swiftc -parse`), poi scaricare il nuovo `PhantomF0.ipa`
    dalla release `f0-latest` di GitHub Actions.
-3. Riprovare su iPhone «Controllo remoto → Schermo Android (QUIC) → Avvia in loopback QUIC locale»
-   (verifica video HEVC, barra animata, quadrati gialli/luminosi sui tocchi ricevuti dall'host,
-   rotazione, tastiera e tasti rapidi).
+3. Riprovare su iPhone (tastiera, rotazione, multi-touch veloce, gesto dal bordo inferiore).
 4. Lato Android: iniziare il server host Kotlin (`app_process`) che usa `PhantomHost`,
    `QuicHostEndpoint` e `MediaCodec`, oppure proseguire con Reed-Solomon / Fase 5.
 5. A fine sessione aggiornare `PROGRESS.md` e questo file.
@@ -190,13 +194,17 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- `core/crates/phantom-ffi/src/lib.rs`: `QuicHostEndpoint`/`QuicClientEndpoint` su `Arc` +
-  `QuicEndpointKeepAlive` in `QuicConnection` (dopo `link`), test `quic_connection_survives_dropping_endpoints`.
-- `core/crates/phantom-ffi/swift-smoke/main.swift`: aggiunto `runQuicEndpointLifetimeSmoke()`.
-- `ios/PhantomF0/RemoteSession.swift`: mantenuto `clientEndpoint` fino a `stop()`, bind
-  `127.0.0.1:0` per loopback, messaggi distinti per chiusura sessione/trasporto, `isIdleTimerDisabled`
-  su main thread, eco visivo dei tocchi ricevuti dall'host nei frame HEVC del loopback e completamento
-  pulito dell'encoder.
-- `ios/PhantomF0/RemoteControlSurface.swift`: spinner solo con `session.running`, icona avviso
-  quando fermo, `connectionBanner` centrato verticalmente senza sovrapporsi all'HUD.
+- `ios/PhantomF0/TouchMapper.swift`: `VideoDimensions`, ritorno `Bool` su `TouchTracker.move`/`end`,
+  `TouchDispatchState` e `AnnexBScanner` zero-copy.
+- `ios/PhantomF0/VideoDecoderSupport.swift`: `BuiltVideoSample`, copia singola in `CMBlockBuffer`,
+  rilevamento `formatChanged`.
+- `ios/PhantomF0/RemoteSession.swift`: `TouchDispatchState` (niente dita incastrate al rilascio),
+  timer a 250 Hz, loopback HEVC con sfondo precalcolato, pacing assoluto a 120 fps e adattamento bitrate.
+- `ios/PhantomF0/RemoteControlSurface.swift`: renderer iOS 17 `sampleBufferRenderer` su coda
+  background, niente cerchi fantasma in banda nera, `RemoteDisplayViewController` con deferimento
+  gesti di sistema sui bordi, reset tocchi su `inactive`, pulizia `GamepadBridge`.
+- `ios/PhantomF0/RemoteConnectView.swift`: pulsante «Incolla dagli appunti» e badge di stato del
+  certificato DER.
+- `ios/Tests/RemoteInputTests.swift`: nuovi controlli per `TouchTracker`, `TouchDispatchState` e
+  `AnnexBScanner`.
 - `HANDOFF.md`, `PROGRESS.md`: aggiornati a fine sessione.

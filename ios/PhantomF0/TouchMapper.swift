@@ -42,6 +42,15 @@ struct VideoRect: Equatable {
     }
 }
 
+/// Dimensioni di un flusso video.
+struct VideoDimensions: Equatable {
+    var width: Int
+    var height: Int
+
+    static let zero = VideoDimensions(width: 0, height: 0)
+    var isValid: Bool { width > 0 && height > 0 }
+}
+
 /// Dito normalizzato indipendente dai tipi generati da UniFFI (mappato poi a `TouchPoint`).
 struct NormalizedFinger: Equatable {
     var id: UInt8
@@ -94,16 +103,20 @@ final class TouchTracker {
     }
 
     /// Aggiorna un contatto già attivo (i movimenti trascinati oltre il bordo restano ancorati al bordo del video).
-    func move(touchID: UInt, x: Double, y: Double, pressure: UInt8 = 128, in rect: VideoRect) {
-        guard let existing = active[touchID], !rect.isEmpty else { return }
+    @discardableResult
+    func move(touchID: UInt, x: Double, y: Double, pressure: UInt8 = 128, in rect: VideoRect) -> Bool {
+        guard let existing = active[touchID], !rect.isEmpty else { return false }
         let norm = rect.normalize(x: x, y: y)
         active[touchID] = ActiveTouch(slot: existing.slot, x: norm.x, y: norm.y, pressure: pressure)
+        return true
     }
 
     /// Rimuove un contatto terminato o annullato, liberandone lo slot.
-    func end(touchID: UInt) {
-        guard let removed = active.removeValue(forKey: touchID) else { return }
+    @discardableResult
+    func end(touchID: UInt) -> Bool {
+        guard let removed = active.removeValue(forKey: touchID) else { return false }
         usedSlots.remove(removed.slot)
+        return true
     }
 
     func reset() {
@@ -195,5 +208,106 @@ enum CertificateCodec {
     /// Rappresentazione esadecimale compatta (minuscola), utile per copia/incolla e diagnostica.
     static func encodeHex(_ data: Data) -> String {
         data.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// Traccia se lo stato corrente delle dita (incluso il rilascio finale `[]`) deve ancora essere spedito sul tick.
+struct TouchDispatchState {
+    private(set) var latestFingers: [NormalizedFinger] = []
+    private(set) var version: UInt64 = 0
+    private(set) var dirty = false
+    private(set) var emptyRepeatsRemaining = 0
+
+    mutating func update(_ fingers: [NormalizedFinger]) -> UInt64 {
+        let wasNonEmpty = !latestFingers.isEmpty
+        version &+= 1
+        latestFingers = fingers
+        dirty = true
+        if fingers.isEmpty {
+            emptyRepeatsRemaining = wasNonEmpty ? 2 : max(emptyRepeatsRemaining, 1)
+        } else {
+            emptyRepeatsRemaining = 0
+        }
+        return version
+    }
+
+    var shouldSendOnTick: Bool {
+        !latestFingers.isEmpty || dirty || emptyRepeatsRemaining > 0
+    }
+
+    mutating func markSent(version sentVersion: UInt64) {
+        guard sentVersion == version else { return }
+        dirty = false
+        if latestFingers.isEmpty && emptyRepeatsRemaining > 0 {
+            emptyRepeatsRemaining -= 1
+        }
+    }
+
+    mutating func reset() {
+        version &+= 1
+        latestFingers = []
+        dirty = false
+        emptyRepeatsRemaining = 0
+    }
+}
+
+/// Scansione zero-copy degli intervalli NAL dentro un frame Annex-B (start code 3 o 4 byte).
+enum AnnexBScanner {
+    enum ParameterSetKind {
+        case vps
+        case sps
+        case pps
+    }
+
+    static func nalRanges(in data: Data) -> [Range<Int>] {
+        let count = data.count
+        guard count >= 3 else { return [] }
+        return data.withUnsafeBytes { raw in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return [] }
+            var ranges: [Range<Int>] = []
+            var nalStart: Int?
+            var i = 0
+            while i + 3 <= count {
+                if base[i] == 0 && base[i + 1] == 0 {
+                    if base[i + 2] == 1 {
+                        if let s = nalStart, i > s { ranges.append(s..<i) }
+                        i += 3
+                        nalStart = i
+                        continue
+                    }
+                    if i + 4 <= count && base[i + 2] == 0 && base[i + 3] == 1 {
+                        if let s = nalStart, i > s { ranges.append(s..<i) }
+                        i += 4
+                        nalStart = i
+                        continue
+                    }
+                }
+                i += 1
+            }
+            if let s = nalStart, count > s {
+                ranges.append(s..<count)
+            }
+            return ranges
+        }
+    }
+
+    static func parameterSetKind(firstByte: UInt8, isHEVC: Bool) -> ParameterSetKind? {
+        if isHEVC {
+            switch (firstByte >> 1) & 0x3F {
+            case 32: return .vps
+            case 33: return .sps
+            case 34: return .pps
+            default: return nil
+            }
+        }
+        switch firstByte & 0x1F {
+        case 7: return .sps
+        case 8: return .pps
+        default: return nil
+        }
+    }
+
+    static func isParameterSet(firstByte: UInt8, isHEVC: Bool) -> Bool {
+        parameterSetKind(firstByte: firstByte, isHEVC: isHEVC) != nil
     }
 }

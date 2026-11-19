@@ -35,9 +35,9 @@ final class RemoteSession: ObservableObject {
     @Published private(set) var running = false
     @Published private(set) var statusText = "Pronto"
     @Published private(set) var metrics = RemoteSessionMetrics()
-    @Published private(set) var videoSize: (width: Int, height: Int) = (0, 0)
+    @Published private(set) var videoSize = VideoDimensions.zero
 
-    var onSample: ((CMSampleBuffer) -> Void)?
+    var onSample: ((CMSampleBuffer, Bool) -> Void)?
 
     private let stateLock = NSLock()
     private var generation: UInt64 = 0
@@ -54,8 +54,8 @@ final class RemoteSession: ObservableObject {
 
     private let sampleLock = NSLock()
     private let sampleBuilder = AnnexBSampleBuilder()
-    private var latestFingers: [NormalizedFinger] = []
-    private var lastReportedVideoSize: (width: Int, height: Int) = (0, 0)
+    private var touchDispatch = TouchDispatchState()
+    private var lastReportedVideoSize = VideoDimensions.zero
 
     // Finestra metrica lato client (protetta da `sampleLock`)
     private var windowStart = CACurrentMediaTime()
@@ -72,12 +72,12 @@ final class RemoteSession: ObservableObject {
         let currentGen: UInt64 = withLock {
             generation &+= 1
             stopRequested = false
-            latestFingers = []
+            touchDispatch.reset()
             return generation
         }
         sampleLock.lock()
         sampleBuilder.reset()
-        lastReportedVideoSize = (0, 0)
+        lastReportedVideoSize = .zero
         windowStart = CACurrentMediaTime()
         framesInWindow = 0
         bytesInWindow = 0
@@ -86,7 +86,7 @@ final class RemoteSession: ObservableObject {
         DispatchQueue.main.async {
             self.running = true
             self.metrics = RemoteSessionMetrics()
-            self.videoSize = (0, 0)
+            self.videoSize = .zero
             self.statusText = "Connessione QUIC in corso…"
             UIApplication.shared.isIdleTimerDisabled = true
         }
@@ -101,6 +101,7 @@ final class RemoteSession: ObservableObject {
         let (activeClient, activeConn, activeEp, activeHost): (PhantomClient?, QuicConnection?, QuicClientEndpoint?, LocalQuicHostRunner?) = withLock {
             generation &+= 1
             stopRequested = true
+            touchDispatch.reset()
             tickTimer?.cancel()
             tickTimer = nil
             let c = client
@@ -130,12 +131,13 @@ final class RemoteSession: ObservableObject {
 
     func updateTouches(_ fingers: [NormalizedFinger]) {
         let touchPoints = fingers.map { TouchPoint(id: $0.id, x: $0.x, y: $0.y, pressure: $0.pressure) }
-        let (c, q): (PhantomClient?, QuicConnection?) = withLock {
-            latestFingers = fingers
-            return (client, connection)
+        let (ver, c, q): (UInt64, PhantomClient?, QuicConnection?) = withLock {
+            let v = touchDispatch.update(fingers)
+            return (v, client, connection)
         }
         guard let c = c, let q = q else { return }
         if let datagram = c.touchTick(nowUs: Self.nowUs(), fingers: touchPoints) {
+            withLock { touchDispatch.markSent(version: ver) }
             try? q.sendDatagram(datagram: datagram)
         }
     }
@@ -260,9 +262,9 @@ final class RemoteSession: ObservableObject {
             }
         }
 
-        // Timer ad alta frequenza per `tick`, stato del tocco e telemetria.
+        // Timer a 250 Hz (allineato al tocco a 240 Hz) per `tick`, stato del tocco e telemetria.
         let timer = DispatchSource.makeTimerSource(flags: .strict, queue: ioQueue)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(2), leeway: .microseconds(250))
+        timer.schedule(deadline: .now(), repeating: .milliseconds(4), leeway: .microseconds(500))
         timer.setEventHandler { [weak self] in
             self?.onTick(client: client, conn: conn, gen: gen)
         }
@@ -294,10 +296,13 @@ final class RemoteSession: ObservableObject {
             try? conn.sendDatagram(datagram: datagram)
         }
 
-        let fingers: [TouchPoint] = withLock {
-            latestFingers.map { TouchPoint(id: $0.id, x: $0.x, y: $0.y, pressure: $0.pressure) }
+        let touchSnapshot: (ver: UInt64, fingers: [TouchPoint])? = withLock {
+            guard touchDispatch.shouldSendOnTick else { return nil }
+            let pts = touchDispatch.latestFingers.map { TouchPoint(id: $0.id, x: $0.x, y: $0.y, pressure: $0.pressure) }
+            return (touchDispatch.version, pts)
         }
-        if !fingers.isEmpty, let touchDgram = client.touchTick(nowUs: now, fingers: fingers) {
+        if let snap = touchSnapshot, let touchDgram = client.touchTick(nowUs: now, fingers: snap.fingers) {
+            withLock { touchDispatch.markSent(version: snap.ver) }
             try? conn.sendDatagram(datagram: touchDgram)
         }
 
@@ -308,20 +313,18 @@ final class RemoteSession: ObservableObject {
     private func drainDeliveredFrames(client: PhantomClient, gen: UInt64) {
         let frames = client.takeFrames()
         guard !frames.isEmpty, isGenerationActive(gen) else { return }
-        var readySamples: [CMSampleBuffer] = []
-        var updatedSize: (width: Int, height: Int)?
+        var readySamples: [(CMSampleBuffer, Bool)] = []
+        var updatedSize: VideoDimensions?
 
         sampleLock.lock()
         for f in frames {
             bytesInWindow += f.data.count
             framesInWindow += 1
-            if let sb = sampleBuilder.sampleBuffer(from: f.data, codec: f.codec) {
-                readySamples.append(sb)
-                let w = sampleBuilder.videoWidth
-                let h = sampleBuilder.videoHeight
-                if w > 0, h > 0, (w != lastReportedVideoSize.width || h != lastReportedVideoSize.height) {
-                    lastReportedVideoSize = (w, h)
-                    updatedSize = (w, h)
+            if let built = sampleBuilder.buildSample(from: f.data, codec: f.codec) {
+                readySamples.append((built.sampleBuffer, built.formatChanged))
+                if built.dimensions.isValid && built.dimensions != lastReportedVideoSize {
+                    lastReportedVideoSize = built.dimensions
+                    updatedSize = built.dimensions
                 }
             }
         }
@@ -330,8 +333,8 @@ final class RemoteSession: ObservableObject {
         if let size = updatedSize {
             DispatchQueue.main.async { self.videoSize = size }
         }
-        for sb in readySamples {
-            onSample?(sb)
+        for (sb, flush) in readySamples {
+            onSample?(sb, flush)
         }
     }
 
@@ -345,8 +348,7 @@ final class RemoteSession: ObservableObject {
         }
         let fps = Double(framesInWindow) / elapsed
         let mbps = Double(bytesInWindow) * 8.0 / 1_000_000.0 / elapsed
-        let videoW = sampleBuilder.videoWidth
-        let videoH = sampleBuilder.videoHeight
+        let videoDims = sampleBuilder.dimensions
         windowStart = nowMedia
         framesInWindow = 0
         bytesInWindow = 0
@@ -364,8 +366,8 @@ final class RemoteSession: ObservableObject {
         snap.queueDelayMs = counters.queueDelayUs.map { Double($0) / 1000.0 }
         snap.framesDelivered = counters.framesOk
         snap.framesLost = counters.framesLost
-        snap.videoWidth = videoW
-        snap.videoHeight = videoH
+        snap.videoWidth = videoDims.width
+        snap.videoHeight = videoDims.height
         if let hc = hostCounters {
             snap.hostTouchReceived = hc.touchStates
             snap.hostKeyReceived = hc.keyEvents
@@ -568,15 +570,39 @@ private final class LocalQuicHostRunner {
         CVPixelBufferPoolCreate(nil, nil, attrs as CFDictionary, &pool)
         guard let bufferPool = pool else { return }
 
+        var appliedBitrate = Int(host.targetBitrateBps())
+        let lumaPattern = Self.makeLumaBackground(width: width, height: height + 96)
         var frameIndex = 0
         let frameIntervalNs = UInt64(1_000_000_000 / max(1, fps))
+        let bitrateStep = max(1, fps / 2)
         let duration = CMTime(value: 1, timescale: CMTimeScale(fps))
+        var nextFrameNs = DispatchTime.now().uptimeNanoseconds
 
         while !isStopped && !conn.isClosed() && !host.isClosed() {
+            let nowNs = DispatchTime.now().uptimeNanoseconds
+            if nowNs < nextFrameNs {
+                let remNs = nextFrameNs - nowNs
+                if remNs > 500_000 {
+                    usleep(UInt32((remNs - 200_000) / 1_000))
+                }
+                while DispatchTime.now().uptimeNanoseconds < nextFrameNs && !isStopped {}
+            } else if nowNs - nextFrameNs > frameIntervalNs * 2 {
+                nextFrameNs = nowNs
+            }
+            nextFrameNs &+= frameIntervalNs
+
+            if frameIndex % bitrateStep == 0 {
+                let target = Int(host.targetBitrateBps())
+                if appliedBitrate > 0 && abs(target - appliedBitrate) * 100 > appliedBitrate * 8 {
+                    VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: target))
+                    appliedBitrate = target
+                }
+            }
+
             let frameStart = DispatchTime.now().uptimeNanoseconds
             var pbOut: CVPixelBuffer?
             if CVPixelBufferPoolCreatePixelBuffer(nil, bufferPool, &pbOut) == kCVReturnSuccess, let pb = pbOut {
-                fillSyntheticFrame(pb, index: frameIndex)
+                fillSyntheticFrame(pb, index: frameIndex, lumaBackground: lumaPattern)
                 let captureUs = frameStart / 1_000
                 let forceKey = frameIndex == 0 || host.wantsKeyframe(nowUs: captureUs)
                 let props: CFDictionary? = forceKey ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
@@ -599,16 +625,24 @@ private final class LocalQuicHostRunner {
                 }
                 frameIndex &+= 1
             }
-
-            let elapsedNs = DispatchTime.now().uptimeNanoseconds - frameStart
-            if elapsedNs < frameIntervalNs {
-                usleep(UInt32((frameIntervalNs - elapsedNs) / 1_000))
-            }
         }
         VTCompressionSessionCompleteFrames(encoder, untilPresentationTimeStamp: .invalid)
     }
 
-    private func fillSyntheticFrame(_ pb: CVPixelBuffer, index: Int) {
+    private static func makeLumaBackground(width: Int, height: Int) -> [UInt8] {
+        var buf = [UInt8](repeating: 0, count: width * height)
+        for row in 0..<height {
+            let v = UInt8(32 + (row % 96))
+            buf.withUnsafeMutableBytes { raw in
+                if let base = raw.baseAddress {
+                    memset(base + row * width, Int32(v), width)
+                }
+            }
+        }
+        return buf
+    }
+
+    private func fillSyntheticFrame(_ pb: CVPixelBuffer, index: Int, lumaBackground: [UInt8]) {
         stopLock.lock()
         let fingers = lastReceivedFingers
         stopLock.unlock()
@@ -621,9 +655,17 @@ private final class LocalQuicHostRunner {
         if let yBase = CVPixelBufferGetBaseAddressOfPlane(pb, 0) {
             let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
             let barTop = (index * 16) % max(1, yHeight - 80)
-            for row in 0..<yHeight {
-                let luma: Int32 = (row >= barTop && row < barTop + 80) ? 210 : Int32(32 + ((row + index * 2) % 96))
-                memset(yBase + row * stride, luma, yWidth)
+            let shift = (index * 2) % 96
+            let copyW = min(yWidth, width)
+            lumaBackground.withUnsafeBufferPointer { bg in
+                guard let bgBase = bg.baseAddress else { return }
+                for row in 0..<yHeight {
+                    if row >= barTop && row < barTop + 80 {
+                        memset(yBase + row * stride, 210, yWidth)
+                    } else {
+                        memcpy(yBase + row * stride, bgBase + (row + shift) * width, copyW)
+                    }
+                }
             }
             for finger in fingers {
                 let cx = Int((Double(finger.x) / 65535.0) * Double(max(0, yWidth - 1)))

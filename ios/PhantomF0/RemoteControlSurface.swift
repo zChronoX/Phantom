@@ -13,7 +13,7 @@ final class RemoteDisplayTouchView: UIView, UIKeyInput {
     var onKeyEvents: (([HidKeyEvent]) -> Void)?
     var onKeyboardStateChanged: ((Bool) -> Void)?
 
-    var videoSize: (width: Int, height: Int) = (0, 0)
+    var videoSize = VideoDimensions.zero
     var showTouchIndicators = true {
         didSet {
             if !showTouchIndicators { clearTouchLayers() }
@@ -22,6 +22,8 @@ final class RemoteDisplayTouchView: UIView, UIKeyInput {
 
     private let tracker = TouchTracker(maxFingers: Int(maxFingers()))
     private var touchLayers: [UInt: CAShapeLayer] = [:]
+    private let renderQueue = DispatchQueue(label: "app.phantom.remote.render", qos: .userInteractive)
+    private var videoRenderer: AVSampleBufferVideoRenderer?
 
     // MARK: - UITextInputTraits (tastiera software senza correzioni iOS)
     var autocorrectionType: UITextAutocorrectionType = .no
@@ -35,13 +37,21 @@ final class RemoteDisplayTouchView: UIView, UIKeyInput {
         isMultipleTouchEnabled = true
         backgroundColor = .black
         displayLayer.videoGravity = .resizeAspect
+        videoRenderer = displayLayer.sampleBufferRenderer
     }
 
     required init?(coder: NSCoder) { fatalError("non supportato") }
 
-    func enqueue(_ sb: CMSampleBuffer) {
-        if displayLayer.status == .failed { displayLayer.flush() }
-        if displayLayer.isReadyForMoreMediaData { displayLayer.enqueue(sb) }
+    func enqueueOnBackground(_ sb: CMSampleBuffer, flushBeforeEnqueue: Bool) {
+        guard let renderer = videoRenderer else { return }
+        renderQueue.async {
+            if flushBeforeEnqueue || renderer.status == .failed || renderer.requiresFlushToResumeDecoding {
+                renderer.flush()
+            }
+            if renderer.isReadyForMoreMediaData {
+                renderer.enqueue(sb)
+            }
+        }
     }
 
     // MARK: - Tastiera software (UIKeyInput) e fisica (presses)
@@ -166,14 +176,16 @@ final class RemoteDisplayTouchView: UIView, UIKeyInput {
                 let last = event?.coalescedTouches(for: touch)?.last ?? touch
                 let p = last.location(in: self)
                 let pressure = normalizedPressure(last)
-                tracker.move(touchID: touchID, x: Double(p.x), y: Double(p.y), pressure: pressure, in: rect)
-                updateTouchLayer(id: touchID, at: p, visible: true)
-                changed = true
+                if tracker.move(touchID: touchID, x: Double(p.x), y: Double(p.y), pressure: pressure, in: rect) {
+                    updateTouchLayer(id: touchID, at: p, visible: true)
+                    changed = true
+                }
 
             case .ended:
-                tracker.end(touchID: touchID)
-                updateTouchLayer(id: touchID, at: .zero, visible: false)
-                changed = true
+                if tracker.end(touchID: touchID) {
+                    updateTouchLayer(id: touchID, at: .zero, visible: false)
+                    changed = true
+                }
             }
         }
 
@@ -218,20 +230,35 @@ final class RemoteDisplayTouchView: UIView, UIKeyInput {
     }
 }
 
-private struct RemoteDisplayRepresentable: UIViewRepresentable {
+private final class RemoteDisplayViewController: UIViewController {
+    let displayView = RemoteDisplayTouchView()
+
+    override func loadView() {
+        view = displayView
+    }
+
+    override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge { .all }
+    override var prefersHomeIndicatorAutoHidden: Bool { true }
+    override var prefersStatusBarHidden: Bool { true }
+}
+
+private struct RemoteDisplayControllerRepresentable: UIViewControllerRepresentable {
     let session: RemoteSession
     let showTouchIndicators: Bool
     @Binding var keyboardVisible: Bool
     @Binding var toggleKeyboardToken: Int
+    @Binding var resetTouchesToken: Int
 
     final class Coordinator {
         var lastToggleToken = 0
+        var lastResetTouchesToken = 0
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    func makeUIView(context: Context) -> RemoteDisplayTouchView {
-        let view = RemoteDisplayTouchView()
+    func makeUIViewController(context: Context) -> RemoteDisplayViewController {
+        let controller = RemoteDisplayViewController()
+        let view = controller.displayView
         view.showTouchIndicators = showTouchIndicators
         view.onTouchesChanged = { [weak session] fingers in
             session?.updateTouches(fingers)
@@ -242,15 +269,20 @@ private struct RemoteDisplayRepresentable: UIViewRepresentable {
         view.onKeyboardStateChanged = { visible in
             DispatchQueue.main.async { keyboardVisible = visible }
         }
-        session.onSample = { [weak view] sb in
-            DispatchQueue.main.async { view?.enqueue(sb) }
+        session.onSample = { [weak view] sb, flush in
+            view?.enqueueOnBackground(sb, flushBeforeEnqueue: flush)
         }
-        return view
+        return controller
     }
 
-    func updateUIView(_ uiView: RemoteDisplayTouchView, context: Context) {
+    func updateUIViewController(_ uiViewController: RemoteDisplayViewController, context: Context) {
+        let uiView = uiViewController.displayView
         uiView.videoSize = session.videoSize
         uiView.showTouchIndicators = showTouchIndicators
+        if context.coordinator.lastResetTouchesToken != resetTouchesToken {
+            context.coordinator.lastResetTouchesToken = resetTouchesToken
+            uiView.resetTouches()
+        }
         if context.coordinator.lastToggleToken != toggleKeyboardToken {
             context.coordinator.lastToggleToken = toggleKeyboardToken
             if uiView.isFirstResponder {
@@ -275,6 +307,7 @@ struct RemoteSessionView: View {
     @State private var hudHidden = false
     @State private var keyboardVisible = false
     @State private var toggleKeyboardToken = 0
+    @State private var resetTouchesToken = 0
     @State private var started = false
     @State private var controllerBridge = GamepadBridge()
 
@@ -282,11 +315,12 @@ struct RemoteSessionView: View {
         ZStack(alignment: .top) {
             Color.black.ignoresSafeArea()
 
-            RemoteDisplayRepresentable(
+            RemoteDisplayControllerRepresentable(
                 session: session,
                 showTouchIndicators: showTouchIndicators,
                 keyboardVisible: $keyboardVisible,
-                toggleKeyboardToken: $toggleKeyboardToken
+                toggleKeyboardToken: $toggleKeyboardToken,
+                resetTouchesToken: $resetTouchesToken
             )
             .ignoresSafeArea()
 
@@ -311,7 +345,10 @@ struct RemoteSessionView: View {
         .onAppear { begin() }
         .onDisappear { end() }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .background {
+            if phase == .inactive {
+                resetTouchesToken &+= 1
+            } else if phase == .background {
+                resetTouchesToken &+= 1
                 end()
             } else if phase == .active && !started {
                 begin()
@@ -331,6 +368,7 @@ struct RemoteSessionView: View {
     private func end() {
         guard started else { return }
         started = false
+        resetTouchesToken &+= 1
         controllerBridge.stop()
         session.stop()
     }
@@ -409,6 +447,7 @@ struct RemoteSessionView: View {
                 Spacer()
 
                 Button {
+                    resetTouchesToken &+= 1
                     toggleKeyboardToken &+= 1
                 } label: {
                     Image(systemName: keyboardVisible ? "keyboard.chevron.compact.down" : "keyboard")
@@ -484,6 +523,7 @@ struct RemoteSessionView: View {
 /// Collega controller fisici MFi/Bluetooth (D-pad e tasti principali) a eventi HID di Phantom.
 private final class GamepadBridge {
     private var connectObserver: NSObjectProtocol?
+    private var attached: [GCController] = []
     private var handler: ((UInt16, Bool) -> Void)?
 
     func start(onKey: @escaping (UInt16, Bool) -> Void) {
@@ -505,11 +545,16 @@ private final class GamepadBridge {
             NotificationCenter.default.removeObserver(obs)
             connectObserver = nil
         }
+        for controller in attached {
+            detach(controller)
+        }
+        attached.removeAll()
         handler = nil
     }
 
     private func attach(_ controller: GCController) {
-        guard let pad = controller.extendedGamepad else { return }
+        guard !attached.contains(where: { $0 === controller }), let pad = controller.extendedGamepad else { return }
+        attached.append(controller)
         bind(pad.dpad.up, code: HidKeyCode.upArrow)
         bind(pad.dpad.down, code: HidKeyCode.downArrow)
         bind(pad.dpad.left, code: HidKeyCode.leftArrow)
@@ -519,6 +564,19 @@ private final class GamepadBridge {
         bind(pad.buttonX, code: HidKeyCode.space)
         bind(pad.buttonY, code: HidKeyCode.tab)
         bind(pad.buttonMenu, code: HidKeyCode.home)
+    }
+
+    private func detach(_ controller: GCController) {
+        guard let pad = controller.extendedGamepad else { return }
+        pad.dpad.up.pressedChangedHandler = nil
+        pad.dpad.down.pressedChangedHandler = nil
+        pad.dpad.left.pressedChangedHandler = nil
+        pad.dpad.right.pressedChangedHandler = nil
+        pad.buttonA.pressedChangedHandler = nil
+        pad.buttonB.pressedChangedHandler = nil
+        pad.buttonX.pressedChangedHandler = nil
+        pad.buttonY.pressedChangedHandler = nil
+        pad.buttonMenu.pressedChangedHandler = nil
     }
 
     private func bind(_ button: GCControllerButtonInput, code: UInt16) {
