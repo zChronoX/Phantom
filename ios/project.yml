@@ -51,4 +51,4 @@ targets:
         SWIFT_INCLUDE_PATHS: "$(SRCROOT)/build/rust/swift"
         OTHER_SWIFT_FLAGS: "-Xcc -fmodule-map-file=$(SRCROOT)/build/rust/swift/phantom_ffiFFI.modulemap"
         LIBRARY_SEARCH_PATHS: "$(SRCROOT)/build/rust/lib"
-        OTHER_LDFLAGS: "-lphantom_ffi -liconv"
+        OTHER_LDFLAGS: "-lphantom_ffi -liconv -lresolv -framework SystemConfiguration -framework Security -framework Network"

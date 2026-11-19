@@ -1,7 +1,7 @@
 # Handoff
 
 Scritto: 2026-11-19 da Particle-1 (Kilo); aggiornato dopo la creazione della nuova app host Android (`android/app/`).
-Branch: main - Commit locale: `ea6b1da` (allineato a `origin/main`) + modifiche locali non committate (trasporto P2P integrato `iroh` per 5G/4G senza VPN + `NWPathMonitor` su iPhone + doppio listener LAN+P2P su Android)
+Branch: main - Commit locale: `fea4038` (allineato a `origin/main`) + fix CI linker iOS (`SystemConfiguration`/`resolv`), `rustfmt` e loopback IPv4 in `phantom-p2p`
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -176,14 +176,7 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- **Nuovo crate P2P integrato (`core/crates/phantom-p2p/`) + FFI unificato**:
-  - `core/crates/phantom-p2p/{Cargo.toml,src/lib.rs}`: wrapper su `iroh = "1"` (TLS `ring`, `presets::N0` con UDP hole punching + relay cifrato E2E, `network_change`, chiave Ed25519 persistente da 32 byte, test loopback offline su `presets::Minimal`).
-  - `core/Cargo.toml`, `core/crates/phantom-quic/Cargo.toml`, `.github/workflows/core.yml`: aggiunto `phantom-p2p` al workspace, rimossi pin strict pre-1.91 in `phantom-quic` e aggiornato job MSRV CI da `1.82` a `1.91` (richiesto da `iroh 1.x`).
-  - `core/crates/phantom-ffi/{Cargo.toml,src/lib.rs}`: `QuicConnection` unificato (`Direct(QuicLink)` | `P2p(P2pLink)`), esposti `generate_p2p_secret_key`, `p2p_endpoint_id_from_secret`, `P2pHostEndpoint`, `P2pClientEndpoint`.
-- **Android Host APK (`android/app/`)**:
-  - `HostIdentityStore.kt`, `core/PairingCodec.kt` (+ `PairingCodecTest.kt`), `HostStateStore.kt`: chiave P2P Ed25519 persistente + `&p2p=<EndpointId>` incluso automaticamente nel QR code.
-  - `stream/PhantomHostSession.kt`, `root/RootHostMain.kt`, `HostForegroundService.kt`, `MainActivity.kt`: doppio listener simultaneo LAN QUIC + P2P `iroh`, monitor `ConnectivityManager.NetworkCallback` con `NET_CHANGE` verso `iroh`, stato P2P integrato in UI.
-- **Client iOS (`ios/`)**:
-  - `NetworkPathObserver.swift` (nuovo): `NWPathMonitor` per rilevare istantaneamente Wi-Fi ↔ 5G/4G.
-  - `PairingModels.swift`, `PairedDeviceStore.swift`, `RemoteSession.swift`, `RemoteConnectView.swift`, `Tests/PairingModelsTests.swift`: trasporto `.p2pIroh(endpointId)` integrato, skip LAN immediato quando su solo 5G/4G, migrazione live `p2pEndpoint.networkChange()` e failover rapido su cambio rete Wi-Fi ↔ 5G/4G senza VPN né configurazione router.
+- `ios/project.yml`: aggiunti `-lresolv -framework SystemConfiguration -framework Security -framework Network` a `OTHER_LDFLAGS` per risolvere i simboli Apple di `iroh` (`n0_dns_resolver` / `netdev`) in fase di link su iOS.
+- `ios/PhantomF0/VideoDecoderSupport.swift`: eliminato warning `result of call to 'withUnsafeBytes(of:_:)' is unused`.
+- `core/crates/phantom-p2p/src/lib.rs`: allineata la riga `let id =` a `cargo fmt --check` e usato `127.0.0.1:<port>` esplicito (`bound_sockets()` + `EndpointAddr::from(...).with_ip_addr(...)`) nel test `minimal_p2p_loopback_exchanges_datagrams` per renderlo deterministico anche su macOS CI.
 - `HANDOFF.md`, `PROGRESS.md`: aggiornati.

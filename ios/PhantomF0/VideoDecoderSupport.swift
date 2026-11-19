@@ -181,7 +181,7 @@ final class AnnexBSampleBuilder {
             var offset = 0
             for range in sliceRanges {
                 var beLen = UInt32(range.count).bigEndian
-                withUnsafeBytes(of: &beLen) { lenRaw in
+                _ = withUnsafeBytes(of: &beLen) { lenRaw in
                     memcpy(dst + offset, lenRaw.baseAddress!, 4)
                 }
                 offset += 4

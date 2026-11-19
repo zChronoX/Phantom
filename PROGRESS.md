@@ -1,6 +1,6 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `ea6b1da` (allineato a `origin/main`) più implementazione locale del trasporto P2P integrato (`phantom-p2p` su `iroh 1.x`, zero VPN/router, switch automatico Wi-Fi ↔ 5G/4G con `NWPathMonitor`).
+Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `fea4038` (allineato a `origin/main`) più fix CI locale per linker iOS (`SystemConfiguration`/`resolv`), `rustfmt` e loopback IPv4 in `phantom-p2p`.
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Dove siamo
@@ -309,10 +309,16 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
   - Android (`android/app/`): chiave P2P salvata in `HostIdentityStore`, `&p2p=<EndpointId>` incluso nel QR code, doppio listener simultaneo LAN QUIC + P2P `iroh` in `PhantomHostSession`, monitor rete `ConnectivityManager` → `NET_CHANGE`.
   - iOS (`ios/`): nuovo `NetworkPathObserver` (`NWPathMonitor`), skip immediato LAN quando su solo 5G/4G per connettersi subito via P2P, migrazione live `p2pEndpoint.networkChange()` e failover rapido su passaggio Wi-Fi ↔ 5G/4G — tutto dentro l'app senza Tailscale né port-forwarding.
 
+- Fix CI su `fea4038`:
+  - Tutti i bersagli Rust cross (`aarch64-linux-android`, `aarch64-apple-ios`, `aarch64-apple-ios-sim`, MSRV 1.91, binding Swift) e tutti i sorgenti Swift sono compilati al primo colpo con `iroh 1.x`.
+  - Aggiunti `-lresolv -framework SystemConfiguration -framework Security -framework Network` in `ios/project.yml` per i simboli di `n0_dns_resolver`/`netdev` in fase di link iOS.
+  - Allineata la formattazione di `connect` in `core/crates/phantom-p2p/src/lib.rs` e fissato il test loopback su `127.0.0.1:<port>` esplicito (`bound_sockets()`).
+
 ## Prossimo passo
 
-Modifiche locali pronte su `ea6b1da` (da committare e pushare dall'utente su `origin/main` per far girare `Core · Rust`, `iOS · Phantom F0` e `Android · Phantom Host APK` e rigenerare `PhantomHost-debug.apk` e `PhantomF0.ipa` in `f0-latest`).
+Modifiche locali pronte su `fea4038` (da committare e pushare dall'utente su `origin/main`):
+- `ios/project.yml`, `ios/PhantomF0/VideoDecoderSupport.swift`
+- `core/crates/phantom-p2p/src/lib.rs`
+- `HANDOFF.md`, `PROGRESS.md`
 
-Dopo il push, aggiornare sia APK sia IPA, riscansionare il QR una volta (per salvare il nuovo `EndpointId` P2P) e provare lo switch Wi-Fi ↔ 5G/4G. Poi resteranno solo:
-1. Validazione completa sul Redmi Note 11 Pro 5G (Standard subito, Root appena sbloccato il bootloader).
-2. Rifinitura UI/UX finale (iOS + Android) ed eventuali extra opzionali (audio Opus / controllo schermo).
+Dopo il push, verificare che `Core · Rust`, `iOS · Phantom F0` e `Android · Phantom Host APK` siano tutti verdi, aggiornare APK e IPA da `f0-latest`, riscansionare il QR una volta e provare lo switch Wi-Fi ↔ 5G/4G!

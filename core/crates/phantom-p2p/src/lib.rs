@@ -152,8 +152,8 @@ impl P2pEndpoint {
 
     /// Si collega a un host remoto tramite il suo `EndpointId` (P2P diretto con hole punching o relay cifrato E2E).
     pub fn connect(&self, remote_endpoint_id: &str, timeout: Duration) -> Result<P2pLink, P2pError> {
-        let id = EndpointId::from_str(remote_endpoint_id.trim())
-            .map_err(|e| P2pError::InvalidEndpointId(e.to_string()))?;
+        let id =
+            EndpointId::from_str(remote_endpoint_id.trim()).map_err(|e| P2pError::InvalidEndpointId(e.to_string()))?;
         self.connect_addr(id, timeout)
     }
 
@@ -273,6 +273,8 @@ mod tests {
 
     #[test]
     fn minimal_p2p_loopback_exchanges_datagrams() {
+        use std::net::{Ipv4Addr, SocketAddr};
+
         let key = generate_secret_key();
         let sk = SecretKey::from_bytes(&key);
         let rt_host = new_runtime().expect("rt host");
@@ -286,7 +288,8 @@ mod tests {
                     .await
             })
             .expect("bind minimal host");
-        let host_addr = host_ep.addr();
+        let port = host_ep.bound_sockets().into_iter().find(SocketAddr::is_ipv4).expect("socket ipv4").port();
+        let host_addr = EndpointAddr::from(host_ep.id()).with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
         let host = P2pEndpoint { endpoint: host_ep, runtime: Arc::new(rt_host) };
 
         let rt_client = new_runtime().expect("rt client");
