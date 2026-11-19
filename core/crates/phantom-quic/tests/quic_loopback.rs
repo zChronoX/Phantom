@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use phantom_core::phantom_proto::caps::{H265, KEYFRAME_REQUEST, NACK, QUEUE_DELAY, XOR_PARITY};
 use phantom_core::phantom_proto::{close_reason, Finger, MAX_DATAGRAM, MAX_VIDEO_PAYLOAD};
 use phantom_core::{Client, Host, Negotiated, SessionConfig};
-use phantom_quic::{ClientEndpoint, HostEndpoint, QuicError};
+use phantom_quic::{generate_host_identity, ClientEndpoint, HostEndpoint, QuicError};
 
 const HOST_NONCE: [u8; 16] = [0x22; 16];
 const CLIENT_NONCE: [u8; 16] = [0x11; 16];
@@ -274,4 +274,32 @@ fn empty_pinned_certificate_is_rejected_immediately() {
     let client = ClientEndpoint::bind(loopback()).expect("bind client");
     let result = client.connect(loopback(), SERVER_NAME, &[], Duration::from_millis(100));
     assert!(matches!(result, Err(QuicError::EmptyCertificate)));
+}
+
+#[test]
+fn persistent_host_identity_survives_rebind() {
+    let identity = generate_host_identity().expect("genera identità");
+    assert!(!identity.cert_der.is_empty());
+    assert!(!identity.key_der.is_empty());
+
+    for _ in 0..2 {
+        let cert = identity.cert_der.clone();
+        let key = identity.key_der.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let host = thread::spawn(move || {
+            let endpoint = HostEndpoint::bind_with_identity(loopback(), cert, key).expect("bind identità");
+            let addr = endpoint.local_addr().expect("addr");
+            ready_tx.send(addr).expect("ready");
+            let link = endpoint.accept(Duration::from_secs(5)).expect("accept");
+            let mut buf = [0u8; 64];
+            let n = link.recv_datagram(&mut buf, Duration::from_secs(2)).expect("recv");
+            assert_eq!(&buf[..n], b"ok");
+        });
+
+        let addr = ready_rx.recv_timeout(Duration::from_secs(5)).expect("addr");
+        let client = ClientEndpoint::bind(loopback()).expect("bind client");
+        let link = client.connect(addr, SERVER_NAME, &identity.cert_der, Duration::from_secs(5)).expect("connect");
+        link.send_datagram(b"ok").expect("send");
+        host.join().expect("join host");
+    }
 }

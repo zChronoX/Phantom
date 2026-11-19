@@ -38,7 +38,10 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         # Senza questa voce iOS blocca le connessioni verso la rete di casa.
-        NSLocalNetworkUsageDescription: Phantom si collega al tuo telefono Android sulla rete di casa per misurare la latenza.
+        NSLocalNetworkUsageDescription: Phantom si collega al tuo telefono Android sulla rete di casa per lo streaming e la scoperta automatica.
+        NSCameraUsageDescription: Phantom usa la fotocamera per scansionare il codice QR di accoppiamento del tuo telefono Android.
+        NSBonjourServices:
+          - _phantom._udp
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.phantom.f0

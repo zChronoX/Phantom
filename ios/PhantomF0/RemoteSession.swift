@@ -7,8 +7,8 @@ import QuartzCore
 
 /// Modalità di avvio della sessione remota.
 enum RemoteSessionMode: Equatable {
-    /// Connessione reale verso l'host Android tramite QUIC con certificato DER fissato.
-    case remote(address: String, certificateDer: Data, codec: VideoCodec)
+    /// Connessione reale verso l'host Android tramite QUIC con failover automatico LAN → Remoto (5G/4G) e riconnessione.
+    case remote(endpoints: [RemoteEndpointCandidate], certificateDer: Data, codec: VideoCodec, autoReconnect: Bool = true)
     /// Prova locale su iPhone con host QUIC + encoder hardware HEVC in loopback.
     case localQuicLoopback(fps: Int, width: Int, height: Int)
 }
@@ -16,6 +16,7 @@ enum RemoteSessionMode: Equatable {
 /// Metriche live mostrate nell'overlay di controllo remoto.
 struct RemoteSessionMetrics: Equatable {
     var connected = false
+    var endpointLabel = ""
     var agreementSummary = ""
     var codecName = ""
     var videoWidth = 0
@@ -42,6 +43,10 @@ final class RemoteSession: ObservableObject {
     private let stateLock = NSLock()
     private var generation: UInt64 = 0
     private var stopRequested = false
+    private var currentMode: RemoteSessionMode?
+    private var reconnectAttempt = 0
+    private var hasConnectedOnce = false
+    private var activeEndpointLabel = ""
 
     private var client: PhantomClient?
     private var clientEndpoint: QuicClientEndpoint?
@@ -72,16 +77,14 @@ final class RemoteSession: ObservableObject {
         let currentGen: UInt64 = withLock {
             generation &+= 1
             stopRequested = false
+            currentMode = mode
+            reconnectAttempt = 0
+            hasConnectedOnce = false
+            activeEndpointLabel = ""
             touchDispatch.reset()
             return generation
         }
-        sampleLock.lock()
-        sampleBuilder.reset()
-        lastReportedVideoSize = .zero
-        windowStart = CACurrentMediaTime()
-        framesInWindow = 0
-        bytesInWindow = 0
-        sampleLock.unlock()
+        resetDecoderWindow()
 
         DispatchQueue.main.async {
             self.running = true
@@ -95,6 +98,16 @@ final class RemoteSession: ObservableObject {
         ioQueue.async { [weak self] in
             self?.runConnect(mode: mode, gen: currentGen)
         }
+    }
+
+    private func resetDecoderWindow() {
+        sampleLock.lock()
+        sampleBuilder.reset()
+        lastReportedVideoSize = .zero
+        windowStart = CACurrentMediaTime()
+        framesInWindow = 0
+        bytesInWindow = 0
+        sampleLock.unlock()
     }
 
     func stop() {
@@ -163,23 +176,23 @@ final class RemoteSession: ObservableObject {
     private func runConnect(mode: RemoteSessionMode, gen: UInt64) {
         guard isGenerationActive(gen) else { return }
         do {
-            let targetAddr: String
+            let candidates: [RemoteEndpointCandidate]
             let bindAddr: String
             let certDer: Data
             let preferredCodec: VideoCodec
             var loopback: LocalQuicHostRunner?
 
             switch mode {
-            case let .remote(address, certificateDer, codec):
-                guard let normalized = EndpointParser.normalizeAddress(address) else {
-                    publishError("Indirizzo non valido (es. 192.168.1.118:47800)")
+            case let .remote(endpoints, certificateDer, codec, _):
+                guard !endpoints.isEmpty else {
+                    publishError("Nessun indirizzo configurato per il dispositivo")
                     return
                 }
                 guard !certificateDer.isEmpty else {
                     publishError("Certificato dell'host mancante")
                     return
                 }
-                targetAddr = normalized
+                candidates = endpoints
                 bindAddr = "0.0.0.0:0"
                 certDer = certificateDer
                 preferredCodec = codec
@@ -187,7 +200,7 @@ final class RemoteSession: ObservableObject {
             case let .localQuicLoopback(fps, width, height):
                 let runner = try LocalQuicHostRunner(fps: fps, width: width, height: height)
                 runner.start()
-                targetAddr = runner.address
+                candidates = [RemoteEndpointCandidate(address: runner.address, label: "Loopback", timeoutMs: 5_000)]
                 bindAddr = "127.0.0.1:0"
                 certDer = runner.certificateDer
                 preferredCodec = .h265
@@ -199,21 +212,51 @@ final class RemoteSession: ObservableObject {
                 return
             }
 
-            let clientEp = try QuicClientEndpoint.bind(addr: bindAddr)
-            let conn = try clientEp.connect(
-                addr: targetAddr,
-                serverName: defaultQuicServerName(),
-                pinnedCertificateDer: certDer,
-                timeoutMs: 5_000
-            )
+            var connectedEndpoint: QuicClientEndpoint?
+            var connectedLink: QuicConnection?
+            var chosenLabel = ""
+            var lastConnectError: Error?
+
+            for candidate in candidates {
+                guard isGenerationActive(gen) else {
+                    loopback?.stop()
+                    return
+                }
+                DispatchQueue.main.async {
+                    self.statusText = "Connessione (\(candidate.label)): \(candidate.address)…"
+                }
+                do {
+                    let ep = try QuicClientEndpoint.bind(addr: bindAddr)
+                    let link = try ep.connect(
+                        addr: candidate.address,
+                        serverName: defaultQuicServerName(),
+                        pinnedCertificateDer: certDer,
+                        timeoutMs: candidate.timeoutMs
+                    )
+                    connectedEndpoint = ep
+                    connectedLink = link
+                    chosenLabel = candidate.label
+                    break
+                } catch {
+                    lastConnectError = error
+                }
+            }
+
+            guard let clientEp = connectedEndpoint, let conn = connectedLink else {
+                loopback?.stop()
+                let desc = lastConnectError.map { "\($0)" } ?? "timeout"
+                handleDisconnect(reason: "Connessione QUIC fallita: \(desc)", orderly: false, gen: gen)
+                return
+            }
 
             var settings = defaultSessionSettings()
             settings.codec = preferredCodec
+            settings.minBitrateBps = 1_000_000
             settings.nonce = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
             if let maxDgram = conn.maxDatagramSize() {
                 settings.fragSize = videoPayloadForDatagram(maxDatagramSize: maxDgram)
             }
-            let phantomClient = PhantomClient(settings: settings)
+            let phantomClient = PhantomClient.newMultiCodec(settings: settings)
 
             let installed = withLock { () -> Bool in
                 guard generation == gen && !stopRequested else { return false }
@@ -221,6 +264,9 @@ final class RemoteSession: ObservableObject {
                 self.clientEndpoint = clientEp
                 self.connection = conn
                 self.hostLoopback = loopback
+                self.activeEndpointLabel = chosenLabel
+                self.reconnectAttempt = 0
+                self.hasConnectedOnce = true
                 return true
             }
             guard installed else {
@@ -230,12 +276,12 @@ final class RemoteSession: ObservableObject {
             }
 
             DispatchQueue.main.async {
-                self.statusText = "Apertura sessione (Hello/HelloAck)…"
+                self.statusText = "Apertura sessione (\(chosenLabel))…"
             }
 
             startLoops(client: phantomClient, conn: conn, gen: gen)
         } catch {
-            publishError("Connessione QUIC fallita: \(error)")
+            handleDisconnect(reason: "Connessione QUIC fallita: \(error)", orderly: false, gen: gen)
         }
     }
 
@@ -255,7 +301,7 @@ final class RemoteSession: ObservableObject {
                     continue
                 } catch {
                     if self.isGenerationActive(gen) {
-                        self.publishError("Collegamento QUIC interrotto: \(error)")
+                        self.handleDisconnect(reason: "Collegamento QUIC interrotto: \(error)", orderly: false, gen: gen)
                     }
                     break
                 }
@@ -283,11 +329,11 @@ final class RemoteSession: ObservableObject {
 
         if client.isClosed() {
             let reasonText = SessionAgreement.closeText(client.closeReason())
-            publishError("Sessione chiusa: \(reasonText)")
+            handleDisconnect(reason: "Sessione chiusa: \(reasonText)", orderly: true, gen: gen)
             return
         }
         if conn.isClosed() {
-            publishError("Connessione QUIC chiusa dal trasporto")
+            handleDisconnect(reason: "Connessione QUIC chiusa dal trasporto", orderly: false, gen: gen)
             return
         }
 
@@ -356,10 +402,11 @@ final class RemoteSession: ObservableObject {
 
         let negotiated = client.negotiated()
         let counters = client.counters(nowUs: nowUs)
-        let hostCounters = withLock { hostLoopback?.hostCounters() }
+        let (hostCounters, epLabel): (HostCounters?, String) = withLock { (hostLoopback?.hostCounters(), activeEndpointLabel) }
 
         var snap = RemoteSessionMetrics()
         snap.connected = negotiated != nil && !client.isClosed()
+        snap.endpointLabel = epLabel
         snap.fps = fps
         snap.bitrateMbps = mbps
         snap.rttMs = counters.rttUs.map { Double($0) / 1000.0 }
@@ -393,6 +440,49 @@ final class RemoteSession: ObservableObject {
             if snap.connected {
                 self.statusText = "Connesso (\(snap.codecName))"
             }
+        }
+    }
+
+    private func handleDisconnect(reason: String, orderly: Bool, gen: UInt64) {
+        let decision: (retryMode: RemoteSessionMode, nextGen: UInt64, attempt: Int, delay: Double)? = withLock {
+            guard generation == gen && !stopRequested else { return nil }
+            tickTimer?.cancel()
+            tickTimer = nil
+            let q = connection
+            client = nil
+            connection = nil
+            clientEndpoint = nil
+            hostLoopback?.stop()
+            hostLoopback = nil
+            touchDispatch.reset()
+            q?.close(code: 0, reason: Data())
+
+            guard !orderly,
+                  hasConnectedOnce,
+                  let mode = currentMode,
+                  case let .remote(_, _, _, autoReconnect) = mode,
+                  autoReconnect,
+                  reconnectAttempt < ReconnectBackoff.maxAttempts else {
+                return nil
+            }
+            reconnectAttempt += 1
+            generation &+= 1
+            return (mode, generation, reconnectAttempt, ReconnectBackoff.delaySeconds(attempt: reconnectAttempt))
+        }
+
+        guard let retry = decision else {
+            publishError(reason)
+            return
+        }
+
+        resetDecoderWindow()
+        DispatchQueue.main.async {
+            self.metrics.connected = false
+            self.statusText = "Connessione persa · riconnessione (\(retry.attempt)/\(ReconnectBackoff.maxAttempts))…"
+        }
+
+        ioQueue.asyncAfter(deadline: .now() + retry.delay) { [weak self] in
+            self?.runConnect(mode: retry.retryMode, gen: retry.nextGen)
         }
     }
 

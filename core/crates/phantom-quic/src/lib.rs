@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::{ClientConfig, Connection, Endpoint, ServerConfig, TransportConfig, VarInt};
+use quinn::{ClientConfig, Connection, Endpoint, IdleTimeout, ServerConfig, TransportConfig, VarInt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
@@ -124,12 +124,32 @@ impl From<io::Error> for QuicError {
     }
 }
 
+/// Identità TLS persistente dell'host (certificato X.509 DER e chiave privata PKCS#8 DER).
+///
+/// Generata una sola volta e salvata sul dispositivo Android, consente all'iPhone di fissare
+/// lo stesso certificato tra un riavvio e l'altro (in LAN o da remoto su 5G/4G).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostIdentity {
+    /// Certificato X.509 autofirmato in formato DER.
+    pub cert_der: Vec<u8>,
+    /// Chiave privata PKCS#8 in formato DER.
+    pub key_der: Vec<u8>,
+}
+
+/// Genera una nuova identità TLS autofirmata (`cert_der` + `key_der`) pronta per essere salvata e
+/// passata a [`HostEndpoint::bind_with_identity`].
+pub fn generate_host_identity() -> Result<HostIdentity, QuicError> {
+    let generated = rcgen::generate_simple_self_signed(vec![SERVER_NAME.to_owned()]).map_err(QuicError::Certificate)?;
+    let cert_der = generated.cert.der().to_vec();
+    let key_der = generated.key_pair.serialize_der();
+    Ok(HostIdentity { cert_der, key_der })
+}
+
 /// Endpoint dell'host (server QUIC).
 ///
-/// Alla creazione genera un certificato autofirmato effimero: il client deve
-/// fissare [`HostEndpoint::certificate_der`] per autenticare l'host. Il
-/// certificato cambia a ogni avvio: nella fase 5 l'accoppiamento fornirà
-/// un'identità stabile.
+/// Può usare un certificato effimero ([`HostEndpoint::bind`]) oppure un'identità persistente
+/// salvata sul dispositivo ([`HostEndpoint::bind_with_identity`]): il client fissa
+/// [`HostEndpoint::certificate_der`] per autenticare l'host.
 #[derive(Debug)]
 pub struct HostEndpoint {
     endpoint: Endpoint,
@@ -140,16 +160,26 @@ pub struct HostEndpoint {
 
 impl HostEndpoint {
     /// Apre un endpoint in ascolto su `addr` (`127.0.0.1:0` per una porta
-    /// effimera) e genera il certificato autofirmato.
+    /// effimera) e genera un nuovo certificato autofirmato.
     pub fn bind(addr: SocketAddr) -> Result<Self, QuicError> {
+        let identity = generate_host_identity()?;
+        Self::bind_with_identity(addr, identity.cert_der, identity.key_der)
+    }
+
+    /// Apre un endpoint in ascolto su `addr` usando un certificato X.509 DER e una chiave privata
+    /// PKCS#8 DER persistenti (generati con [`generate_host_identity`]).
+    pub fn bind_with_identity(addr: SocketAddr, cert_der: Vec<u8>, key_der: Vec<u8>) -> Result<Self, QuicError> {
+        if cert_der.is_empty() || key_der.is_empty() {
+            return Err(QuicError::EmptyCertificate);
+        }
         let runtime = new_runtime()?;
-        let (certificate, key) = generate_certificate()?;
-        let server = server_config(&certificate, key)?;
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der));
+        let server = server_config(&cert_der, key)?;
         let endpoint = {
             let _guard = runtime.enter();
             Endpoint::server(server, addr).map_err(QuicError::Io)?
         };
-        Ok(HostEndpoint { endpoint, certificate, runtime: Arc::new(runtime) })
+        Ok(HostEndpoint { endpoint, certificate: cert_der, runtime: Arc::new(runtime) })
     }
 
     /// Indirizzo locale su cui l'endpoint è in ascolto.
@@ -319,14 +349,12 @@ fn transport_config() -> Arc<TransportConfig> {
     let mut config = TransportConfig::default();
     // I datagrammi sono opzionali: senza buffer di ricezione QUIC li rifiuta.
     config.datagram_receive_buffer_size(Some(1 << 20)).datagram_send_buffer_size(1 << 20);
+    // Keep-alive e timeout calibrati anche per reti mobili (4G/5G / NAT / Tailscale).
+    config.keep_alive_interval(Some(Duration::from_secs(3)));
+    if let Ok(timeout) = IdleTimeout::try_from(Duration::from_secs(15)) {
+        config.max_idle_timeout(Some(timeout));
+    }
     Arc::new(config)
-}
-
-fn generate_certificate() -> Result<(Vec<u8>, PrivateKeyDer<'static>), QuicError> {
-    let generated = rcgen::generate_simple_self_signed(vec![SERVER_NAME.to_owned()]).map_err(QuicError::Certificate)?;
-    let certificate = generated.cert.der().to_vec();
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(generated.key_pair.serialize_der()));
-    Ok((certificate, key))
 }
 
 fn server_config(certificate: &[u8], key: PrivateKeyDer<'static>) -> Result<ServerConfig, QuicError> {

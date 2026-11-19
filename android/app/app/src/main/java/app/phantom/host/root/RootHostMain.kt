@@ -1,6 +1,7 @@
 package app.phantom.host.root
 
 import android.os.Looper
+import app.phantom.host.HostIdentityStore
 import app.phantom.host.core.ThermalGuard
 import app.phantom.host.stream.CaptureMode
 import app.phantom.host.stream.HostRunConfig
@@ -16,7 +17,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.system.exitProcess
 
 /**
- * Worker eseguibile tramite `su` + `app_process` on-demand.
+ * Worker eseguibile tramite `su` + `app_process64` on-demand.
  * Comunica con `HostForegroundService` via stdout/stdin a righe (`READY|...`, `STATS|...`, `STOP`).
  */
 object RootHostMain {
@@ -46,8 +47,11 @@ object RootHostMain {
         val profile = StreamProfile.entries.firstOrNull { it.name == profileName } ?: StreamProfile.P1080_120
         val preferHevc = args.getOrNull(2)?.toBooleanStrictOrNull() ?: true
         val libDir = args.getOrNull(3).orEmpty()
+        val certPath = args.getOrNull(4)
+        val keyPath = args.getOrNull(5)
 
         preloadNativeLibs(libDir)
+        val identity = HostIdentityStore.loadFromPaths(certPath, keyPath)
 
         val config = HostRunConfig(
             port = port,
@@ -58,17 +62,19 @@ object RootHostMain {
 
         val (srcW, srcH) = RootDisplayCapture.readPrimaryDisplaySize()
         val injector = RootInputInjector(srcW, srcH)
-        emit("LOG|Display rilevato ${srcW}×${srcH} · input injector=${injector.isAvailable}")
+        emit("LOG|Display rilevato ${srcW}×${srcH} · input injector=${injector.isAvailable} · identità=${identity != null}")
 
         val currentPolicy = AtomicReference(ThermalGuard.evaluate(null, 0))
         val session = PhantomHostSession(
             config = config,
-            sourceWidth = srcW,
-            sourceHeight = srcH,
-            captureFactory = SurfaceCaptureFactory { surface, width, height ->
-                RootDisplayCapture.attachVirtualDisplay(surface, width, height, srcW, srcH)
+            sourceSizeProvider = { RootDisplayCapture.readPrimaryDisplaySize() },
+            captureFactory = SurfaceCaptureFactory { surface, width, height, curSrcW, curSrcH ->
+                RootDisplayCapture.attachVirtualDisplay(surface, width, height, curSrcW, curSrcH)
             },
             thermalProvider = { currentPolicy.get() },
+            identityCertDer = identity?.first,
+            identityKeyDer = identity?.second,
+            onSourceSizeChanged = { w, h -> injector.setDisplaySize(w, h) },
             onTouch = { injector.injectTouch(it) },
             onKey = { injector.injectKey(it) },
             onReady = { boundPort, certHex ->

@@ -1,6 +1,6 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `dbb6c13` (allineato a `origin/main`) più fix locale per `app_process64` (`java.library.path` + `/dev/urandom` invece di `SecureRandom`/Conscrypt).
+Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `f5d0aa3` (allineato a `origin/main`) più implementazione locale di Fase 3/4/5 (identità persistente, QR 1-tap, Bonjour/mDNS, 5G/4G remoto + Tailscale/DDNS, rotazione live Portrait ↔ Landscape, riconnessione automatica e multi-codec).
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Dove siamo
@@ -296,11 +296,18 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 - Diagnostica `dbb6c13` in modalità Root: il preload di `libjnidispatch.so` e `libphantom_ffi.so` è riuscito senza errori, ma `-Djava.library.path=<libDir>` sovrascriveva `/system/lib64`, facendo fallire `com.android.org.conscrypt.NativeCrypto.get_cipher_names` all'inizializzazione di `SecureRandom()`.
 - Fix locale: rimosso `-Djava.library.path` dal comando `app_process64` (mantenendo `/system/lib64:/vendor/lib64` in `LD_LIBRARY_PATH`) e sostituito `SecureRandom` in `PhantomHostSession` con `/dev/urandom`.
 
+- **Modalità Root verificata end-to-end (`f5d0aa3`)**: LDPlayer (`x86_64`, Root + Network Bridging) controllato dal vivo da iPhone (schermo nitido + tocco/tastiera + navigazione Android).
+- **Implementazione Fasi 3/4/5 (LAN + 5G/4G remoto, locale non committata)**:
+  - Core Rust (`phantom-quic`, `phantom-core`, `phantom-ffi`): identità TLS persistente (`HostIdentity`, `generate_host_identity`, `bind_with_identity`), keep-alive QUIC 3s / idle timeout 15s per reti mobili 4G/5G, risoluzione DNS (`ToSocketAddrs`, IPv4-first) per Tailscale MagicDNS/DDNS, e `PhantomClient::new_multi_codec` (`H264 | H265`).
+  - Android (`android/app/`): identità salvata in `HostIdentityStore`, rilevamento automatico LAN + VPN/Tailscale (`100.64.0.0/10` / `tun*`/`wg*`), annuncio mDNS `_phantom._udp.`, codice QR live (`com.google.zxing:core`) con `phantom://pair?...`, campo indirizzo remoto 5G/4G e rotazione display live Portrait ↔ Landscape sulla stessa connessione QUIC (in Root e MediaProjection).
+  - iOS (`ios/`): scanner QR nativo (`QRScannerView`), `PairedDeviceStore` 1-tap, scoperta LAN Bonjour (`BonjourDiscovery`), failover automatico LAN → Remoto 5G/4G, riconnessione automatica con backoff, reset tocchi su cambio orientamento video e nuova suite di test `PairingModelsTests.swift`.
+  - **Nota verifiche**: non essendoci Docker/Rust/Swift/Gradle attivi in locale su Windows, la compilazione e i test di tutti e 3 i target gireranno su GitHub Actions al push.
+
 ## Prossimo passo
 
-Modifiche locali pronte su `dbb6c13` (da committare e pushare dall'utente su `origin/main`):
-- `android/app/app/src/main/java/app/phantom/host/HostForegroundService.kt`
-- `android/app/app/src/main/java/app/phantom/host/stream/PhantomHostSession.kt`
-- `HANDOFF.md`, `PROGRESS.md`
+Modifiche locali pronte su `f5d0aa3` (da committare e pushare dall'utente su `origin/main` per far girare `Core · Rust`, `iOS · Phantom F0` e `Android · Phantom Host APK` e rigenerare sia `PhantomHost-debug.apk` sia `PhantomF0.ipa` in `f0-latest`).
 
-Dopo il push, scaricare il nuovo `PhantomHost-debug.apk` da `f0-latest` e riprovare la modalità **Root (cattura + tocco/tastiera)** su LDPlayer verso l'iPhone.
+Dopo il push, aggiornare sia l'APK su Android/LDPlayer sia l'IPA su iPhone e provare:
+1. Scansione QR 1-tap da iPhone + connessione automatica in LAN (Bonjour).
+2. Rotazione Portrait ↔ Landscape aprendo un gioco/app orizzontale.
+3. Connessione da fuori casa in 5G/4G (es. con Tailscale installato su entrambi i telefoni, o DDNS/port-forwarding UDP 47800 sul router).

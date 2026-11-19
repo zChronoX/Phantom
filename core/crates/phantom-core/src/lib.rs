@@ -69,6 +69,8 @@ pub struct SessionConfig {
     pub nonce: [u8; 16],
     /// Intervallo tra due `Hello` finché l'host non risponde (µs): l'ack può perdersi, quindi si ritenta.
     pub hello_retry_us: u64,
+    /// Bit di capacità aggiuntivi annunciati dal client in `Hello` (es. secondo codec decodificabile).
+    pub extra_caps: u32,
 }
 
 impl Default for SessionConfig {
@@ -91,6 +93,7 @@ impl Default for SessionConfig {
             codec: Codec::H265,
             nonce: [0; 16],
             hello_retry_us: 250_000,
+            extra_caps: 0,
         }
     }
 }
@@ -470,7 +473,12 @@ impl Client {
     /// Le funzioni che il client dichiara nell'apertura.
     fn caps(&self) -> u32 {
         // la parità la manda l'host, ma il ricevitore del client la sa ricostruire: per questo la annuncia
-        self.cfg.codec.caps_bit() | caps::NACK | caps::KEYFRAME_REQUEST | caps::QUEUE_DELAY | caps::XOR_PARITY
+        self.cfg.codec.caps_bit()
+            | self.cfg.extra_caps
+            | caps::NACK
+            | caps::KEYFRAME_REQUEST
+            | caps::QUEUE_DELAY
+            | caps::XOR_PARITY
     }
 
     /// Frame consegnati dal ricevitore dall'ultima chiamata, nell'ordine di arrivo: chi usa il client per un'app li
@@ -855,6 +863,23 @@ mod negotiation {
             .unwrap_or_default();
         client.on_datagram(0, &ack);
         assert_eq!(client.negotiated(), None);
+    }
+
+    /// Un client capace di decodificare entrambi i codec negozia H.264 quando l'host sceglie H.264.
+    #[test]
+    fn client_with_extra_caps_negotiates_fallback_codec() {
+        let mut client = Client::new(SessionConfig {
+            codec: Codec::H265,
+            extra_caps: caps::H264 | caps::H265,
+            ..SessionConfig::default()
+        });
+        let mut host = Host::new(SessionConfig { codec: Codec::H264, ..SessionConfig::default() });
+        let hello = client.tick(0).remove(0);
+        let ack = host.on_datagram(0, &hello).remove(0);
+        client.on_datagram(1_000, &ack);
+        let n = client.negotiated().expect("negoziata");
+        assert_ne!(n.caps & caps::H264, 0, "H.264 negoziato");
+        assert_eq!(n.caps & caps::H265, 0, "solo il codec reale dell'host");
     }
 }
 

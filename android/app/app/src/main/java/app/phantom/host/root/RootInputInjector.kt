@@ -22,9 +22,16 @@ import java.lang.reflect.Method
  */
 @SuppressLint("PrivateApi", "DiscouragedPrivateApi")
 class RootInputInjector(
-    private val displayWidth: Int,
-    private val displayHeight: Int,
+    initialWidth: Int,
+    initialHeight: Int,
 ) {
+    @Volatile
+    private var displayWidth: Int = initialWidth.coerceAtLeast(1)
+
+    @Volatile
+    private var displayHeight: Int = initialHeight.coerceAtLeast(1)
+
+    private val inputLock = Any()
     private val synthesizer = TouchEventSynthesizer()
     private val modifierState = KeyModifierState()
     private val props = Array(10) { MotionEvent.PointerProperties() }
@@ -42,6 +49,18 @@ class RootInputInjector(
 
     val isAvailable: Boolean get() = inputManagerInstance != null && injectMethod != null
 
+    fun setDisplaySize(width: Int, height: Int) {
+        val w = width.coerceAtLeast(1)
+        val h = height.coerceAtLeast(1)
+        synchronized(inputLock) {
+            if (displayWidth != w || displayHeight != h) {
+                displayWidth = w
+                displayHeight = h
+                synthesizer.reset()
+            }
+        }
+    }
+
     fun injectTouch(state: TouchState) {
         val fingers = state.fingers.map {
             NormalizedInputFinger(
@@ -51,87 +70,93 @@ class RootInputInjector(
                 pressure = it.pressure.toInt(),
             )
         }
-        val steps = synthesizer.update(fingers, displayWidth, displayHeight)
-        for (step in steps) {
-            val nowMs = SystemClock.uptimeMillis()
-            if (step.action == SynthAction.DOWN) {
-                touchDownTimeMs = nowMs
-            }
-            val pointerCount = step.pointers.size.coerceAtMost(10)
-            if (pointerCount == 0) continue
+        synchronized(inputLock) {
+            val steps = synthesizer.update(fingers, displayWidth, displayHeight)
+            for (step in steps) {
+                val nowMs = SystemClock.uptimeMillis()
+                if (step.action == SynthAction.DOWN) {
+                    touchDownTimeMs = nowMs
+                }
+                val pointerCount = step.pointers.size.coerceAtMost(10)
+                if (pointerCount == 0) continue
 
-            for (i in 0 until pointerCount) {
-                val p = step.pointers[i]
-                props[i].clear()
-                props[i].id = p.id
-                props[i].toolType = MotionEvent.TOOL_TYPE_FINGER
+                for (i in 0 until pointerCount) {
+                    val p = step.pointers[i]
+                    props[i].clear()
+                    props[i].id = p.id
+                    props[i].toolType = MotionEvent.TOOL_TYPE_FINGER
 
-                coords[i].clear()
-                coords[i].x = p.x
-                coords[i].y = p.y
-                coords[i].pressure = p.pressure
-                coords[i].size = 1.0f
-            }
+                    coords[i].clear()
+                    coords[i].x = p.x
+                    coords[i].y = p.y
+                    coords[i].pressure = p.pressure
+                    coords[i].size = 1.0f
+                }
 
-            val androidAction = when (step.action) {
-                SynthAction.DOWN -> MotionEvent.ACTION_DOWN
-                SynthAction.UP -> MotionEvent.ACTION_UP
-                SynthAction.MOVE -> MotionEvent.ACTION_MOVE
-                SynthAction.POINTER_DOWN ->
-                    MotionEvent.ACTION_POINTER_DOWN or (step.actionIndex shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
-                SynthAction.POINTER_UP ->
-                    MotionEvent.ACTION_POINTER_UP or (step.actionIndex shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
-            }
+                val androidAction = when (step.action) {
+                    SynthAction.DOWN -> MotionEvent.ACTION_DOWN
+                    SynthAction.UP -> MotionEvent.ACTION_UP
+                    SynthAction.MOVE -> MotionEvent.ACTION_MOVE
+                    SynthAction.POINTER_DOWN ->
+                        MotionEvent.ACTION_POINTER_DOWN or (step.actionIndex shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
+                    SynthAction.POINTER_UP ->
+                        MotionEvent.ACTION_POINTER_UP or (step.actionIndex shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
+                }
 
-            @Suppress("DEPRECATION")
-            val event = MotionEvent.obtain(
-                touchDownTimeMs,
-                nowMs,
-                androidAction,
-                pointerCount,
-                props,
-                coords,
-                0,
-                0,
-                1.0f,
-                1.0f,
-                0,
-                0,
-                InputDevice.SOURCE_TOUCHSCREEN,
-                0,
-            )
-            try {
-                inject(event)
-            } finally {
-                event.recycle()
+                @Suppress("DEPRECATION")
+                val event = MotionEvent.obtain(
+                    touchDownTimeMs,
+                    nowMs,
+                    androidAction,
+                    pointerCount,
+                    props,
+                    coords,
+                    0,
+                    0,
+                    1.0f,
+                    1.0f,
+                    0,
+                    0,
+                    InputDevice.SOURCE_TOUCHSCREEN,
+                    0,
+                )
+                try {
+                    inject(event)
+                } finally {
+                    event.recycle()
+                }
             }
         }
     }
 
     fun injectKey(key: KeyInput) {
-        val hid = key.code.toInt()
-        val meta = modifierState.onKey(hid, key.down)
-        val androidCode = HidToAndroidKeyMap.androidKeyCode(hid) ?: return
-        val nowMs = SystemClock.uptimeMillis()
-        val action = if (key.down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP
-        val event = KeyEvent(
-            nowMs,
-            nowMs,
-            action,
-            androidCode,
-            0,
-            meta,
-            KeyCharacterMap.VIRTUAL_KEYBOARD,
-            0,
-            0,
-            InputDevice.SOURCE_KEYBOARD,
-        )
-        inject(event)
+        synchronized(inputLock) {
+            val hid = key.code.toInt()
+            val meta = modifierState.onKey(hid, key.down)
+            val androidCode = HidToAndroidKeyMap.androidKeyCode(hid) ?: return
+            val nowMs = SystemClock.uptimeMillis()
+            val action = if (key.down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP
+            val event = KeyEvent(
+                nowMs,
+                nowMs,
+                action,
+                androidCode,
+                0,
+                meta,
+                KeyCharacterMap.VIRTUAL_KEYBOARD,
+                0,
+                0,
+                InputDevice.SOURCE_KEYBOARD,
+            )
+            inject(event)
+        }
     }
 
     fun reset() {
-        synthesizer.reset()
-        modifierState.reset()
+        synchronized(inputLock) {
+            synthesizer.reset()
+            modifierState.reset()
+        }
     }
 
     private fun inject(event: InputEvent) {

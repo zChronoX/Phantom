@@ -277,7 +277,12 @@ private struct RemoteDisplayControllerRepresentable: UIViewControllerRepresentab
 
     func updateUIViewController(_ uiViewController: RemoteDisplayViewController, context: Context) {
         let uiView = uiViewController.displayView
-        uiView.videoSize = session.videoSize
+        let prevSize = uiView.videoSize
+        let nextSize = session.videoSize
+        if prevSize.isValid && nextSize.isValid && prevSize != nextSize {
+            uiView.resetTouches()
+        }
+        uiView.videoSize = nextSize
         uiView.showTouchIndicators = showTouchIndicators
         if context.coordinator.lastResetTouchesToken != resetTouchesToken {
             context.coordinator.lastResetTouchesToken = resetTouchesToken
@@ -499,7 +504,8 @@ struct RemoteSessionView: View {
         let m = session.metrics
         guard m.connected else { return session.statusText }
         let rtt = m.rttMs.map { String(format: "%.1f ms", $0) } ?? "–"
-        return String(format: "%.0f fps · %.1f Mbps · RTT %@", m.fps, m.bitrateMbps, rtt)
+        let prefix = m.endpointLabel.isEmpty ? "" : "\(m.endpointLabel) · "
+        return String(format: "%@%.0f fps · %.1f Mbps · RTT %@", prefix, m.fps, m.bitrateMbps, rtt)
     }
 
     private func quickButton(_ title: String, systemImage: String, action: RemoteQuickAction) -> some View {

@@ -15,6 +15,8 @@ import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
 import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
@@ -22,7 +24,6 @@ import android.os.PowerManager
 import android.view.WindowManager
 import app.phantom.host.core.HostFormatHelpers
 import app.phantom.host.core.ThermalGuard
-import app.phantom.host.core.ThermalPolicy
 import app.phantom.host.stream.CaptureMode
 import app.phantom.host.stream.HostRunConfig
 import app.phantom.host.stream.PhantomHostSession
@@ -39,7 +40,8 @@ import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Servizio in primo piano (stile FKM) visibile nella barra delle notifiche durante tutta la sessione.
- * In modalità Root esegue `app_process` solo finché lo stream è attivo; in modalità Standard usa `MediaProjection`.
+ * Usa identità TLS persistente (`HostIdentityStore`), annuncia il servizio via mDNS (`_phantom._udp.`)
+ * per scoperta automatica in LAN e rileva anche eventuali IP VPN/Tailscale per accesso remoto in 5G/4G.
  */
 class HostForegroundService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
@@ -51,6 +53,10 @@ class HostForegroundService : Service() {
     private var rootStdin: BufferedWriter? = null
     private var projectionSession: PhantomHostSession? = null
     private var mediaProjection: MediaProjection? = null
+
+    private var nsdManager: NsdManager? = null
+    private var nsdListener: NsdManager.RegistrationListener? = null
+    private var activeIdentity: StoredHostIdentity? = null
 
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -141,7 +147,17 @@ class HostForegroundService : Service() {
     }
 
     private fun startRootMode(config: HostRunConfig) {
-        val ip = localWifiIpv4()
+        val ifaces = collectActiveIpv4Interfaces()
+        val ip = HostFormatHelpers.selectPreferredLanIpv4(ifaces)
+        val vpnIp = HostFormatHelpers.selectPreferredVpnIpv4(ifaces)
+        val identity = try {
+            HostIdentityStore.loadOrCreate(this)
+        } catch (t: Throwable) {
+            HostStateStore.addLog("Errore identità persistente: ${t.message}")
+            null
+        }
+        activeIdentity = identity
+
         HostStateStore.update {
             it.copy(
                 running = true,
@@ -152,8 +168,11 @@ class HostForegroundService : Service() {
                 preferHevc = config.preferHevc,
                 statusText = "Richiesta privilegi root…",
                 ipAddress = ip,
+                vpnIpAddress = vpnIp,
                 port = config.port,
-                certificateHex = "",
+                certificateHex = identity?.let { id -> HostFormatHelpers.toHex(id.certDer) } ?: "",
+                certificateDer = identity?.certDer ?: ByteArray(0),
+                fingerprintHex = identity?.fingerprintHex ?: "",
             )
         }
         HostStateStore.addLog("Avvio Root · ${config.profile.label}")
@@ -163,10 +182,13 @@ class HostForegroundService : Service() {
             try {
                 val apkPath = applicationInfo.sourceDir
                 val libDir = applicationInfo.nativeLibraryDir
-                val ifacesSummary = describeActiveIpv4Interfaces()
+                val ifacesSummary = ifaces.joinToString(", ") { (name, addr) -> "$name=$addr" }
                 if (ifacesSummary.isNotBlank()) {
                     HostStateStore.addLog("Interfacce IPv4: $ifacesSummary")
                 }
+                val certPathArg = identity?.certFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
+                val keyPathArg = identity?.keyFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
+
                 val cmd = "export CLASSPATH=${shellQuote(apkPath)} LD_LIBRARY_PATH=${shellQuote(libDir)}:/system/lib64:/vendor/lib64; " +
                     "APP_PROC=/system/bin/app_process64; [ -x \"\$APP_PROC\" ] || APP_PROC=app_process; " +
                     "exec \"\$APP_PROC\" " +
@@ -174,7 +196,7 @@ class HostForegroundService : Service() {
                     "-Djna.boot.library.path=${shellQuote(libDir)} " +
                     "-Djna.nounpack=true " +
                     "/system/bin --nice-name=phantom-host app.phantom.host.root.RootHostMain " +
-                    "${config.port} ${config.profile.name} ${config.preferHevc} ${shellQuote(libDir)}"
+                    "${config.port} ${config.profile.name} ${config.preferHevc} ${shellQuote(libDir)}$certPathArg$keyPathArg"
 
                 val pb = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true)
                 proc = pb.start()
@@ -198,6 +220,7 @@ class HostForegroundService : Service() {
             } catch (t: Throwable) {
                 HostStateStore.addLog("Errore avvio root: ${t.message}")
             } finally {
+                unregisterMdns()
                 rootStdin = null
                 rootProcess = null
                 proc?.destroy()
@@ -215,18 +238,25 @@ class HostForegroundService : Service() {
             line.startsWith("READY|") -> {
                 val parts = line.split('|', limit = 3)
                 val boundPort = parts.getOrNull(1)?.toIntOrNull() ?: 47800
-                val cert = parts.getOrNull(2).orEmpty()
-                val ip = localWifiIpv4()
+                val certHex = parts.getOrNull(2).orEmpty()
+                val ifaces = collectActiveIpv4Interfaces()
+                val ip = HostFormatHelpers.selectPreferredLanIpv4(ifaces)
+                val vpnIp = HostFormatHelpers.selectPreferredVpnIpv4(ifaces)
+                val id = activeIdentity
                 HostStateStore.update {
                     it.copy(
                         running = true,
                         starting = false,
                         ipAddress = ip,
+                        vpnIpAddress = vpnIp,
                         port = boundPort,
-                        certificateHex = cert,
+                        certificateHex = certHex,
+                        certificateDer = id?.certDer ?: it.certificateDer,
+                        fingerprintHex = id?.fingerprintHex ?: it.fingerprintHex,
                         statusText = "In ascolto su ${formatAddr(ip, boundPort)}",
                     )
                 }
+                registerMdns(boundPort, id?.fingerprintHex.orEmpty())
                 updateNotification("In ascolto su ${formatAddr(ip, boundPort)}")
             }
             line.startsWith("STATS|") -> {
@@ -272,11 +302,21 @@ class HostForegroundService : Service() {
     }
 
     private fun startProjectionMode(config: HostRunConfig, resultCode: Int, resultData: Intent) {
-        val ip = localWifiIpv4()
-        val ifacesSummary = describeActiveIpv4Interfaces()
+        val ifaces = collectActiveIpv4Interfaces()
+        val ip = HostFormatHelpers.selectPreferredLanIpv4(ifaces)
+        val vpnIp = HostFormatHelpers.selectPreferredVpnIpv4(ifaces)
+        val ifacesSummary = ifaces.joinToString(", ") { (name, addr) -> "$name=$addr" }
         if (ifacesSummary.isNotBlank()) {
             HostStateStore.addLog("Interfacce IPv4: $ifacesSummary")
         }
+        val identity = try {
+            HostIdentityStore.loadOrCreate(this)
+        } catch (t: Throwable) {
+            HostStateStore.addLog("Errore identità persistente: ${t.message}")
+            null
+        }
+        activeIdentity = identity
+
         HostStateStore.update {
             it.copy(
                 running = true,
@@ -287,8 +327,11 @@ class HostForegroundService : Service() {
                 preferHevc = config.preferHevc,
                 statusText = "Avvio MediaProjection…",
                 ipAddress = ip,
+                vpnIpAddress = vpnIp,
                 port = config.port,
-                certificateHex = "",
+                certificateHex = identity?.let { id -> HostFormatHelpers.toHex(id.certDer) } ?: "",
+                certificateDer = identity?.certDer ?: ByteArray(0),
+                fingerprintHex = identity?.fingerprintHex ?: "",
             )
         }
 
@@ -309,14 +352,12 @@ class HostForegroundService : Service() {
             }
         }, null)
 
-        val (srcW, srcH) = readDisplayMetrics()
         val densityDpi = resources.displayMetrics.densityDpi.coerceAtLeast(160)
 
         val session = PhantomHostSession(
             config = config,
-            sourceWidth = srcW,
-            sourceHeight = srcH,
-            captureFactory = SurfaceCaptureFactory { surface, width, height ->
+            sourceSizeProvider = { readDisplayMetrics() },
+            captureFactory = SurfaceCaptureFactory { surface, width, height, _, _ ->
                 val vd: VirtualDisplay = projection.createVirtualDisplay(
                     "phantom-host",
                     width,
@@ -335,6 +376,8 @@ class HostForegroundService : Service() {
                 }
             },
             thermalProvider = { currentThermalPolicy.get() },
+            identityCertDer = identity?.certDer,
+            identityKeyDer = identity?.keyDer,
             onTouch = {},
             onKey = {},
             onReady = { boundPort, certHex ->
@@ -344,11 +387,15 @@ class HostForegroundService : Service() {
                         running = true,
                         starting = false,
                         ipAddress = ip,
+                        vpnIpAddress = vpnIp,
                         port = boundPort,
                         certificateHex = certHex,
+                        certificateDer = identity?.certDer ?: it.certificateDer,
+                        fingerprintHex = identity?.fingerprintHex ?: it.fingerprintHex,
                         statusText = "In ascolto su $addr",
                     )
                 }
+                registerMdns(boundPort, identity?.fingerprintHex.orEmpty())
                 updateNotification("In ascolto su $addr")
             },
             onStats = { s ->
@@ -380,6 +427,7 @@ class HostForegroundService : Service() {
             try {
                 session.runBlocking()
             } finally {
+                unregisterMdns()
                 try {
                     projection.stop()
                 } catch (_: Throwable) {
@@ -396,6 +444,7 @@ class HostForegroundService : Service() {
     }
 
     private fun stopAllWork() {
+        unregisterMdns()
         projectionSession?.stop()
         projectionSession = null
         try {
@@ -427,6 +476,53 @@ class HostForegroundService : Service() {
         workerThread = null
         releaseWakeLock()
         markStopped("Fermo")
+    }
+
+    private fun registerMdns(port: Int, fingerprintHex: String) {
+        unregisterMdns()
+        try {
+            val mgr = getSystemService(Context.NSD_SERVICE) as? NsdManager ?: return
+            val safeName = "Phantom-${Build.MODEL.ifBlank { "Android" }}".take(40)
+            val info = NsdServiceInfo().apply {
+                serviceName = safeName
+                serviceType = "_phantom._udp."
+                setPort(port)
+                if (fingerprintHex.isNotBlank()) {
+                    setAttribute("fp", fingerprintHex)
+                }
+                setAttribute("name", Build.MODEL.ifBlank { "Android" }.take(32))
+            }
+            val listener = object : NsdManager.RegistrationListener {
+                override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
+                    HostStateStore.addLog("mDNS attivo: ${serviceInfo.serviceName} (_phantom._udp)")
+                }
+
+                override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                    HostStateStore.addLog("mDNS registrazione fallita (code $errorCode)")
+                }
+
+                override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {}
+                override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
+            }
+            nsdManager = mgr
+            nsdListener = listener
+            mgr.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
+        } catch (t: Throwable) {
+            HostStateStore.addLog("mDNS non disponibile: ${t.message}")
+        }
+    }
+
+    private fun unregisterMdns() {
+        val mgr = nsdManager
+        val listener = nsdListener
+        nsdManager = null
+        nsdListener = null
+        if (mgr != null && listener != null) {
+            try {
+                mgr.unregisterService(listener)
+            } catch (_: Throwable) {
+            }
+        }
     }
 
     private fun markStopped(status: String) {
@@ -544,36 +640,6 @@ class HostForegroundService : Service() {
         nm.notify(NOTIFICATION_ID, buildNotification(text))
     }
 
-    private fun collectActiveIpv4Interfaces(): List<Pair<String, String>> {
-        return try {
-            val ifaces = NetworkInterface.getNetworkInterfaces() ?: return emptyList()
-            val candidates = ArrayList<Pair<String, String>>()
-            while (ifaces.hasMoreElements()) {
-                val iface = ifaces.nextElement()
-                if (!iface.isUp || iface.isLoopback) continue
-                val addrs = iface.inetAddresses
-                while (addrs.hasMoreElements()) {
-                    val addr = addrs.nextElement()
-                    if (addr is Inet4Address && !addr.isLoopbackAddress) {
-                        val host = addr.hostAddress.orEmpty()
-                        if (host.isNotBlank()) {
-                            candidates.add(iface.name to host)
-                        }
-                    }
-                }
-            }
-            candidates
-        } catch (_: Throwable) {
-            emptyList()
-        }
-    }
-
-    private fun describeActiveIpv4Interfaces(): String =
-        collectActiveIpv4Interfaces().joinToString(", ") { (name, ip) -> "$name=$ip" }
-
-    private fun localWifiIpv4(): String =
-        HostFormatHelpers.selectPreferredLanIpv4(collectActiveIpv4Interfaces())
-
     private fun formatAddr(ip: String, port: Int): String = if (ip.isBlank()) ":$port" else "$ip:$port"
 
     private fun shellQuote(s: String): String = "'" + s.replace("'", "'\"'\"'") + "'"
@@ -591,5 +657,29 @@ class HostForegroundService : Service() {
 
         private const val CHANNEL_ID = "phantom_host"
         private const val NOTIFICATION_ID = 4780
+
+        fun collectActiveIpv4Interfaces(): List<Pair<String, String>> {
+            return try {
+                val ifaces = NetworkInterface.getNetworkInterfaces() ?: return emptyList()
+                val candidates = ArrayList<Pair<String, String>>()
+                while (ifaces.hasMoreElements()) {
+                    val iface = ifaces.nextElement()
+                    if (!iface.isUp || iface.isLoopback) continue
+                    val addrs = iface.inetAddresses
+                    while (addrs.hasMoreElements()) {
+                        val addr = addrs.nextElement()
+                        if (addr is Inet4Address && !addr.isLoopbackAddress) {
+                            val host = addr.hostAddress.orEmpty()
+                            if (host.isNotBlank()) {
+                                candidates.add(iface.name to host)
+                            }
+                        }
+                    }
+                }
+                candidates
+            } catch (_: Throwable) {
+                emptyList()
+            }
+        }
     }
 }

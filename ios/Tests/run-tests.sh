@@ -45,3 +45,10 @@ mkdir -p "$OUT/remote"
 cp RemoteInputTests.swift "$OUT/remote/main.swift"
 swiftc -O -o "$OUT/run-remote" ../PhantomF0/TouchMapper.swift ../PhantomF0/RemoteInputMap.swift "$OUT/remote/main.swift"
 "$OUT/run-remote"
+
+echo
+echo "== accoppiamento QR, SHA-256 e failover LAN -> 5G/Remoto"
+mkdir -p "$OUT/pairing"
+cp PairingModelsTests.swift "$OUT/pairing/main.swift"
+swiftc -O -o "$OUT/run-pairing" ../PhantomF0/TouchMapper.swift ../PhantomF0/PairingModels.swift "$OUT/pairing/main.swift"
+"$OUT/run-pairing"

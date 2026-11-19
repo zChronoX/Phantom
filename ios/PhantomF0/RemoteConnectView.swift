@@ -1,8 +1,11 @@
 import SwiftUI
 import UIKit
 
-/// Schermata di configurazione e avvio del controllo remoto QUIC (verso Android o in loopback locale).
+/// Schermata di accoppiamento QR, dispositivi salvati (1-tap LAN + 5G/4G) e controllo remoto QUIC.
 struct RemoteConnectView: View {
+    @StateObject private var deviceStore = PairedDeviceStore()
+    @StateObject private var bonjour = BonjourDiscovery()
+
     @AppStorage("remoteAddress") private var address = "192.168.1.118:47800"
     @AppStorage("remoteCert") private var certInput = ""
     @AppStorage("remoteCodec") private var codecRaw = "h265"
@@ -10,23 +13,26 @@ struct RemoteConnectView: View {
     @AppStorage("loopbackFps") private var loopbackFps = 120
 
     @State private var activeMode: ActiveRoute?
+    @State private var showScanner = false
+    @State private var editingDevice: PairedDevice?
     @State private var errorMessage = ""
+    @State private var infoMessage = ""
 
     private enum ActiveRoute: Identifiable {
-        case remote(address: String, cert: Data, codec: VideoCodec)
+        case remote(id: String, endpoints: [RemoteEndpointCandidate], cert: Data, codec: VideoCodec)
         case loopback(fps: Int)
 
         var id: String {
             switch self {
-            case let .remote(address, _, _): return "remote-\(address)"
+            case let .remote(id, _, _, _): return "remote-\(id)"
             case let .loopback(fps): return "loopback-\(fps)"
             }
         }
 
         var sessionMode: RemoteSessionMode {
             switch self {
-            case let .remote(address, cert, codec):
-                return .remote(address: address, certificateDer: cert, codec: codec)
+            case let .remote(_, endpoints, cert, codec):
+                return .remote(endpoints: endpoints, certificateDer: cert, codec: codec, autoReconnect: true)
             case let .loopback(fps):
                 return .localQuicLoopback(fps: fps, width: 1080, height: 2400)
             }
@@ -35,9 +41,54 @@ struct RemoteConnectView: View {
 
     var body: some View {
         Form {
-            Section("Telefono Android (QUIC)") {
-                TextField("IP:porta (es. 192.168.1.118:47800)", text: $address)
-                    .keyboardType(.numbersAndPunctuation)
+            Section {
+                Button {
+                    errorMessage = ""
+                    infoMessage = ""
+                    showScanner = true
+                } label: {
+                    Label("Scansiona QR da Android", systemImage: "qrcode.viewfinder")
+                        .frame(maxWidth: .infinity)
+                        .fontWeight(.semibold)
+                }
+
+                if deviceStore.devices.isEmpty {
+                    Text("Inquadra una sola volta il QR mostrato in Phantom Host su Android. Da quel momento potrai connetterti con 1 tap sia a casa (Wi-Fi) sia fuori in 5G/4G.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(deviceStore.devices) { device in
+                        savedDeviceRow(device)
+                    }
+                    .onDelete { offsets in
+                        deviceStore.remove(at: offsets)
+                    }
+                }
+
+                if !infoMessage.isEmpty {
+                    Text(infoMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.green)
+                }
+            } header: {
+                Text("Dispositivi salvati (1-tap · LAN + 5G/4G)")
+            } footer: {
+                if !bonjour.hosts.isEmpty {
+                    Text("In rete locale rilevati: \(bonjour.hosts.map(\.displayName).joined(separator: ", "))")
+                }
+            }
+
+            Section("Opzioni sessione") {
+                Picker("Codec preferito", selection: $codecRaw) {
+                    Text("HEVC (H.265)").tag("h265")
+                    Text("H.264 (AVC)").tag("h264")
+                }
+                Toggle("Mostra cerchi sul tocco", isOn: $showTouchIndicators)
+            }
+
+            Section("Connessione manuale (IP, Tailscale o DDNS)") {
+                TextField("IP o hostname:porta (es. casa.duckdns.org:47800)", text: $address)
+                    .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
 
@@ -50,7 +101,12 @@ struct RemoteConnectView: View {
                 HStack {
                     Button {
                         if let text = UIPasteboard.general.string {
-                            certInput = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if let parsed = PairingURI.parse(cleaned) {
+                                handleScannedPairing(parsed)
+                            } else {
+                                certInput = cleaned
+                            }
                         }
                     } label: {
                         Label("Incolla dagli appunti", systemImage: "doc.on.clipboard")
@@ -64,17 +120,10 @@ struct RemoteConnectView: View {
                     }
                 }
 
-                Picker("Codec preferito", selection: $codecRaw) {
-                    Text("HEVC (H.265)").tag("h265")
-                    Text("H.264 (AVC)").tag("h264")
-                }
-
-                Toggle("Mostra cerchi sul tocco", isOn: $showTouchIndicators)
-
                 Button {
-                    launchRemote()
+                    launchManualRemote()
                 } label: {
-                    Label("Avvia controllo remoto", systemImage: "play.display")
+                    Label("Connetti manualmente", systemImage: "play.display")
                         .frame(maxWidth: .infinity)
                         .fontWeight(.semibold)
                 }
@@ -86,7 +135,7 @@ struct RemoteConnectView: View {
                 }
             }
 
-            Section("Prova sull'iPhone (senza il POCO)") {
+            Section("Prova locale su iPhone") {
                 Picker("Frequenza loopback", selection: $loopbackFps) {
                     Text("60 fps").tag(60)
                     Text("120 fps").tag(120)
@@ -99,17 +148,105 @@ struct RemoteConnectView: View {
                     Label("Avvia in loopback QUIC locale", systemImage: "arrow.triangle.2.circlepath")
                         .frame(maxWidth: .infinity)
                 }
-
-                Text("Apre una vera connessione QUIC (TLS 1.3 con certificato fissato) sullo stesso iPhone, codifica in HEVC hardware, riceve il video e invia davvero tocchi multi-finger, tastiera e azioni Android all'host.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
         }
         .navigationTitle("Controllo remoto (QUIC)")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { bonjour.start() }
+        .onDisappear { bonjour.stop() }
+        .sheet(isPresented: $showScanner) {
+            QRScannerSheet { scannedText in
+                if let parsed = PairingURI.parse(scannedText) {
+                    handleScannedPairing(parsed)
+                } else {
+                    errorMessage = "Codice QR non riconosciuto (atteso QR di Phantom Host)."
+                }
+            }
+        }
+        .sheet(item: $editingDevice) { device in
+            EditPairedDeviceSheet(device: device) { name, lan, remote in
+                deviceStore.update(id: device.id, name: name, lanAddress: .some(lan), remoteAddress: .some(remote))
+            }
+        }
         .fullScreenCover(item: $activeMode) { route in
             RemoteSessionView(mode: route.sessionMode, showTouchIndicators: showTouchIndicators)
         }
+    }
+
+    @ViewBuilder
+    private func savedDeviceRow(_ device: PairedDevice) -> some View {
+        let liveLan = bonjour.resolvedAddress(forFingerprint: device.id)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(device.name)
+                            .font(.headline)
+                        if liveLan != nil {
+                            Text("In LAN")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(.green, in: Capsule())
+                        }
+                    }
+                    Text("ID \(device.id)")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    editingDevice = device
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+            }
+
+            if let lan = liveLan ?? device.lanAddress {
+                Label("Casa: \(lan)", systemImage: "wifi")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            if let remote = device.remoteAddress {
+                Label("5G/Remoto: \(remote)", systemImage: "antenna.radiowaves.left.and.right")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.blue)
+            } else {
+                Text("Tocca l'icona a destra per aggiungere un indirizzo 5G/Tailscale/DDNS")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Button {
+                launchSavedDevice(device, liveLan: liveLan)
+            } label: {
+                Label("Connetti", systemImage: "play.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .padding(.top, 2)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func handleScannedPairing(_ parsed: ParsedPairing) {
+        let saved = deviceStore.upsert(from: parsed)
+        errorMessage = ""
+        infoMessage = "Dispositivo \"\(saved.name)\" salvato (ID \(saved.id))."
+    }
+
+    private func launchSavedDevice(_ device: PairedDevice, liveLan: String?) {
+        let candidates = EndpointCandidateSelector.candidates(for: device, discoveredLan: liveLan)
+        guard !candidates.isEmpty else {
+            errorMessage = "Aggiungi almeno un indirizzo LAN o remoto (5G/Tailscale/DDNS) per \(device.name)."
+            return
+        }
+        errorMessage = ""
+        let codec: VideoCodec = codecRaw == "h264" ? .h264 : .h265
+        activeMode = .remote(id: device.id, endpoints: candidates, cert: device.certificateDer, codec: codec)
     }
 
     private var certificateStatusText: (text: String, valid: Bool)? {
@@ -121,9 +258,9 @@ struct RemoteConnectView: View {
         return ("Formato non valido (atteso Hex o Base64)", false)
     }
 
-    private func launchRemote() {
+    private func launchManualRemote() {
         guard let normalized = EndpointParser.normalizeAddress(address) else {
-            errorMessage = "Inserisci un indirizzo valido (es. 192.168.1.118 o 192.168.1.118:47800)."
+            errorMessage = "Inserisci un indirizzo valido (es. 192.168.1.118:47800 o casa.duckdns.org:47800)."
             return
         }
         guard let cert = CertificateCodec.decode(certInput), !cert.isEmpty else {
@@ -132,6 +269,73 @@ struct RemoteConnectView: View {
         }
         errorMessage = ""
         let codec: VideoCodec = codecRaw == "h264" ? .h264 : .h265
-        activeMode = .remote(address: normalized, cert: cert, codec: codec)
+        let candidate = RemoteEndpointCandidate(address: normalized, label: "Manuale", timeoutMs: 5_000)
+        activeMode = .remote(id: normalized, endpoints: [candidate], cert: cert, codec: codec)
+    }
+}
+
+private struct EditPairedDeviceSheet: View {
+    let device: PairedDevice
+    let onSave: (String, String?, String?) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+    @State private var lan: String
+    @State private var remote: String
+
+    init(device: PairedDevice, onSave: @escaping (String, String?, String?) -> Void) {
+        self.device = device
+        self.onSave = onSave
+        _name = State(initialValue: device.name)
+        _lan = State(initialValue: device.lanAddress ?? "")
+        _remote = State(initialValue: device.remoteAddress ?? "")
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Dispositivo") {
+                    TextField("Nome", text: $name)
+                    Text("ID certificato: \(device.id)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+
+                Section {
+                    TextField("LAN casa (es. 192.168.1.42:47800)", text: $lan)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                } header: {
+                    Text("Indirizzo Wi-Fi di casa")
+                }
+
+                Section {
+                    TextField("Remoto (es. 100.x.y.z:47800 o casa.duckdns.org:47800)", text: $remote)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                } header: {
+                    Text("Indirizzo remoto 5G/4G")
+                } footer: {
+                    Text("Quando sei fuori casa in 5G/4G Phantom prova la LAN per ~1,6 s e poi passa subito automaticamente all'indirizzo remoto (Tailscale, WireGuard o DDNS).")
+                }
+            }
+            .navigationTitle("Modifica dispositivo")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Annulla") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Salva") {
+                        let lanVal = lan.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let remVal = remote.trimmingCharacters(in: .whitespacesAndNewlines)
+                        onSave(name, lanVal.isEmpty ? nil : lanVal, remVal.isEmpty ? nil : remVal)
+                        dismiss()
+                    }
+                }
+            }
+        }
     }
 }

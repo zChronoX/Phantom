@@ -1,7 +1,7 @@
 # Handoff
 
 Scritto: 2026-11-19 da Particle-1 (Kilo); aggiornato dopo la creazione della nuova app host Android (`android/app/`).
-Branch: main - Commit locale: `dbb6c13` (allineato a `origin/main`) + fix locale `app_process64` (`java.library.path` + `/dev/urandom` al posto di `SecureRandom`/Conscrypt)
+Branch: main - Commit locale: `f5d0aa3` (allineato a `origin/main`) + modifiche locali non committate (identità persistente, QR 1-tap, Bonjour/mDNS, supporto 5G/4G + Tailscale/DDNS, rotazione schermo live, riconnessione automatica, multi-codec)
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -176,6 +176,19 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- `android/app/app/src/main/java/app/phantom/host/HostForegroundService.kt`: rimosso `-Djava.library.path` dal lancio di `app_process64` (per non sovrascrivere `/system/lib64`) e preservati `/system/lib64:/vendor/lib64` in `LD_LIBRARY_PATH`.
-- `android/app/app/src/main/java/app/phantom/host/stream/PhantomHostSession.kt`: sostituito `SecureRandom()` (che inizializza Conscrypt JNI) con lettura diretta da `/dev/urandom` per il nonce a 16 byte e aggiunti classe+causa nel log errori sessione client.
+- **Core Rust + QUIC + FFI**:
+  - `core/crates/phantom-quic/src/lib.rs` + `tests/quic_loopback.rs`: `HostIdentity`, `generate_host_identity()`, `HostEndpoint::bind_with_identity`, keep-alive QUIC 3s + idle timeout 15s (per 5G/4G/NAT/Tailscale).
+  - `core/crates/phantom-core/src/lib.rs`: `SessionConfig.extra_caps` per annunciare entrambi i codec dal client + test.
+  - `core/crates/phantom-ffi/src/lib.rs`: esposti `HostIdentity`, `generate_host_identity`, `QuicHostEndpoint::bind_with_identity`, `PhantomClient::new_multi_codec`, risoluzione DNS (`ToSocketAddrs`, IPv4-first) in `QuicClientEndpoint::connect` per DDNS/Tailscale MagicDNS + test.
+- **Android Host APK (`android/app/`)**:
+  - `app/build.gradle.kts`, `AndroidManifest.xml`: aggiunto `com.google.zxing:core:3.5.3` e `CHANGE_WIFI_MULTICAST_STATE`.
+  - `core/PairingCodec.kt` + `PairingCodecTest.kt`, `core/AnnexBFramePrep.kt`: URI `phantom://pair?...`, SHA-256 fingerprint, Base64URL e `selectPreferredVpnIpv4` (Tailscale/WireGuard).
+  - `HostIdentityStore.kt`: identità TLS persistente salvata in `filesDir/identity/`.
+  - `stream/PhantomHostSession.kt`, `root/RootHostMain.kt`, `root/RootInputInjector.kt`: identità persistente, rotazione display live Portrait ↔ Landscape sulla stessa connessione QUIC, floor bitrate 1 Mbps per 4G/5G.
+  - `HostStateStore.kt`, `HostForegroundService.kt`, `MainActivity.kt`: annuncio mDNS `_phantom._udp.`, codice QR live (LAN + VPN/remoto), campo indirizzo remoto 5G/4G (Tailscale/DDNS) e rigenerazione chiave.
+- **Client iOS (`ios/`)**:
+  - `project.yml`: aggiunti `NSCameraUsageDescription` e `NSBonjourServices` (`_phantom._udp`).
+  - `PairingModels.swift`, `PairedDeviceStore.swift`, `BonjourDiscovery.swift`, `QRScannerView.swift`: dispositivi salvati 1-tap, scanner QR nativo, scoperta Bonjour LAN, failover LAN → Remoto 5G/VPN, backoff riconnessione.
+  - `RemoteSession.swift`, `RemoteControlSurface.swift`, `RemoteConnectView.swift`: failover multi-endpoint, riconnessione automatica su drop, `PhantomClient.newMultiCodec`, reset tocchi su cambio orientamento video.
+  - `Tests/PairingModelsTests.swift` + `Tests/run-tests.sh`: nuova suite test per SHA-256, `PairingURI`, DNS, failover candidati e backoff.
 - `HANDOFF.md`, `PROGRESS.md`: aggiornati.

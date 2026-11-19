@@ -14,7 +14,7 @@
 //! - gli oggetti si possono usare da più thread: dentro c'è un blocco che serializza le chiamate.
 
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -454,6 +454,14 @@ impl PhantomClient {
         Arc::new(PhantomClient { inner: Mutex::new(Client::new(settings.into())) })
     }
 
+    /// Crea un client che annuncia il supporto sia ad H.264 sia ad HEVC (H.265) nell'`Hello`.
+    #[uniffi::constructor]
+    pub fn new_multi_codec(settings: SessionSettings) -> Arc<Self> {
+        let mut cfg: SessionConfig = settings.into();
+        cfg.extra_caps |= caps::H264 | caps::H265;
+        Arc::new(PhantomClient { inner: Mutex::new(Client::new(cfg)) })
+    }
+
     /// Elabora un datagramma arrivato dall'host; `now_us` è l'ora locale del client. Restituisce i datagrammi da
     /// rimandare all'host (richieste di ritrasmissione e di keyframe).
     pub fn on_datagram(&self, now_us: u64, data: Vec<u8>) -> Vec<Vec<u8>> {
@@ -619,6 +627,41 @@ fn parse_socket_addr(addr: &str) -> Result<SocketAddr, QuicTransportError> {
     addr.parse::<SocketAddr>().map_err(|e| QuicTransportError::InvalidAddress { detail: e.to_string() })
 }
 
+/// Risolve sia indirizzi IP numerici (`ip:porta`) sia nomi DNS (`host.esempio:porta`, es. Tailscale/DDNS),
+/// preferendo IPv4 per compatibilità con il bind client `0.0.0.0:0`.
+fn resolve_socket_addr(addr: &str) -> Result<SocketAddr, QuicTransportError> {
+    if let Ok(parsed) = addr.parse::<SocketAddr>() {
+        return Ok(parsed);
+    }
+    let addrs = addr.to_socket_addrs().map_err(|e| QuicTransportError::InvalidAddress { detail: e.to_string() })?;
+    let mut first = None;
+    for candidate in addrs {
+        if candidate.is_ipv4() {
+            return Ok(candidate);
+        }
+        if first.is_none() {
+            first = Some(candidate);
+        }
+    }
+    first.ok_or_else(|| QuicTransportError::InvalidAddress { detail: format!("nessun indirizzo risolto per {addr}") })
+}
+
+/// Identità TLS persistente dell'host (certificato DER e chiave privata PKCS#8 DER).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct HostIdentity {
+    /// Certificato autofirmato X.509 in formato DER.
+    pub cert_der: Vec<u8>,
+    /// Chiave privata PKCS#8 in formato DER.
+    pub key_der: Vec<u8>,
+}
+
+/// Genera una nuova identità TLS persistente da salvare sull'host e riusare con [`QuicHostEndpoint::bind_with_identity`].
+#[uniffi::export]
+pub fn generate_host_identity() -> Result<HostIdentity, QuicTransportError> {
+    let id = phantom_quic::generate_host_identity()?;
+    Ok(HostIdentity { cert_der: id.cert_der, key_der: id.key_der })
+}
+
 /// Mantiene vivo l'endpoint (e il suo socket UDP) finché esiste almeno una [`QuicConnection`] aperta.
 #[allow(dead_code)]
 enum QuicEndpointKeepAlive {
@@ -626,7 +669,7 @@ enum QuicEndpointKeepAlive {
     Client(Arc<ClientEndpoint>),
 }
 
-/// Endpoint QUIC lato host (server): genera un certificato autofirmato effimero e accetta una connessione.
+/// Endpoint QUIC lato host (server): usa un certificato effimero o persistente e accetta una connessione.
 #[derive(uniffi::Object)]
 pub struct QuicHostEndpoint {
     inner: Arc<HostEndpoint>,
@@ -639,6 +682,18 @@ impl QuicHostEndpoint {
     pub fn bind(addr: String) -> Result<Arc<Self>, QuicTransportError> {
         let addr = parse_socket_addr(&addr)?;
         let inner = Arc::new(HostEndpoint::bind(addr)?);
+        Ok(Arc::new(Self { inner }))
+    }
+
+    /// Apre l'endpoint in ascolto su `addr` usando un'identità persistente generata da [`generate_host_identity`].
+    #[uniffi::constructor]
+    pub fn bind_with_identity(
+        addr: String,
+        cert_der: Vec<u8>,
+        key_der: Vec<u8>,
+    ) -> Result<Arc<Self>, QuicTransportError> {
+        let addr = parse_socket_addr(&addr)?;
+        let inner = Arc::new(HostEndpoint::bind_with_identity(addr, cert_der, key_der)?);
         Ok(Arc::new(Self { inner }))
     }
 
@@ -676,7 +731,8 @@ impl QuicClientEndpoint {
         Ok(Arc::new(Self { inner }))
     }
 
-    /// Si collega a `addr` verificando che il certificato sia esattamente `pinned_certificate_der`.
+    /// Si collega a `addr` (`ip:porta` oppure `hostname:porta`) verificando che il certificato sia esattamente
+    /// `pinned_certificate_der`.
     pub fn connect(
         &self,
         addr: String,
@@ -684,7 +740,7 @@ impl QuicClientEndpoint {
         pinned_certificate_der: Vec<u8>,
         timeout_ms: u64,
     ) -> Result<Arc<QuicConnection>, QuicTransportError> {
-        let addr = parse_socket_addr(&addr)?;
+        let addr = resolve_socket_addr(&addr)?;
         let link =
             self.inner.connect(addr, &server_name, &pinned_certificate_der, Duration::from_millis(timeout_ms))?;
         let keep_alive = QuicEndpointKeepAlive::Client(Arc::clone(&self.inner));
@@ -1098,5 +1154,38 @@ mod tests {
 
         client_link.close(0, Vec::new());
         host_link.close(0, Vec::new());
+    }
+
+    #[test]
+    fn persistent_identity_dns_hostname_and_multi_codec_work() {
+        let identity = generate_host_identity().expect("genera identità");
+        let host_ep = QuicHostEndpoint::bind_with_identity(
+            "127.0.0.1:0".to_owned(),
+            identity.cert_der.clone(),
+            identity.key_der.clone(),
+        )
+        .expect("bind identità");
+        let port = host_ep.local_addr().expect("addr").rsplit(':').next().expect("porta").to_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let accept_thread = std::thread::spawn(move || {
+            let link = host_ep.accept(5_000).expect("accept");
+            let _ = tx.send(link);
+        });
+
+        let client_ep = QuicClientEndpoint::bind("0.0.0.0:0".to_owned()).expect("bind client");
+        let client_link = client_ep
+            .connect(format!("localhost:{port}"), default_quic_server_name(), identity.cert_der, 5_000)
+            .expect("connect tramite hostname DNS");
+        let host_link = rx.recv_timeout(Duration::from_secs(5)).expect("host link");
+        accept_thread.join().expect("join accept");
+        client_link.close(0, Vec::new());
+        host_link.close(0, Vec::new());
+
+        let host = PhantomHost::new(SessionSettings { codec: VideoCodec::H264, ..default_session_settings() });
+        let client = PhantomClient::new_multi_codec(default_session_settings());
+        open(&host, &client);
+        let n = client.negotiated().expect("negoziata");
+        assert!(caps_contains(n.caps, Capability::H264), "H.264 negoziato con client multi-codec");
+        assert!(!caps_contains(n.caps, Capability::H265));
     }
 }
