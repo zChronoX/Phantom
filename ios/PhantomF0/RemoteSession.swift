@@ -47,11 +47,15 @@ final class RemoteSession: ObservableObject {
     private var reconnectAttempt = 0
     private var hasConnectedOnce = false
     private var activeEndpointLabel = ""
+    private var activeTargetIsLan = false
+    private var waitingForReconnect = false
 
     private var client: PhantomClient?
     private var clientEndpoint: QuicClientEndpoint?
+    private var p2pClientEndpoint: P2pClientEndpoint?
     private var connection: QuicConnection?
     private var hostLoopback: LocalQuicHostRunner?
+    private var pathObserver: NetworkPathObserver?
 
     private let ioQueue = DispatchQueue(label: "app.phantom.remote.io", qos: .userInteractive)
     private let recvQueue = DispatchQueue(label: "app.phantom.remote.recv", qos: .userInteractive)
@@ -74,6 +78,7 @@ final class RemoteSession: ObservableObject {
     func start(mode: RemoteSessionMode) {
         stop()
 
+        let observer = NetworkPathObserver()
         let currentGen: UInt64 = withLock {
             generation &+= 1
             stopRequested = false
@@ -81,9 +86,16 @@ final class RemoteSession: ObservableObject {
             reconnectAttempt = 0
             hasConnectedOnce = false
             activeEndpointLabel = ""
+            activeTargetIsLan = false
+            waitingForReconnect = false
+            pathObserver = observer
             touchDispatch.reset()
             return generation
         }
+        observer.onNetworkChanged = { [weak self] isCellularOnly, isSatisfied in
+            self?.handleNetworkPathChange(isCellularOnly: isCellularOnly, isSatisfied: isSatisfied)
+        }
+        observer.start()
         resetDecoderWindow()
 
         DispatchQueue.main.async {
@@ -111,28 +123,37 @@ final class RemoteSession: ObservableObject {
     }
 
     func stop() {
-        let (activeClient, activeConn, activeEp, activeHost): (PhantomClient?, QuicConnection?, QuicClientEndpoint?, LocalQuicHostRunner?) = withLock {
+        let (activeClient, activeConn, activeEp, activeP2p, activeHost, activeObserver):
+            (PhantomClient?, QuicConnection?, QuicClientEndpoint?, P2pClientEndpoint?, LocalQuicHostRunner?, NetworkPathObserver?) = withLock {
             generation &+= 1
             stopRequested = true
+            waitingForReconnect = false
+            activeTargetIsLan = false
             touchDispatch.reset()
             tickTimer?.cancel()
             tickTimer = nil
             let c = client
             let q = connection
             let ep = clientEndpoint
+            let p2p = p2pClientEndpoint
             let h = hostLoopback
+            let obs = pathObserver
             client = nil
             connection = nil
             clientEndpoint = nil
+            p2pClientEndpoint = nil
             hostLoopback = nil
-            return (c, q, ep, h)
+            pathObserver = nil
+            return (c, q, ep, p2p, h, obs)
         }
 
+        activeObserver?.stop()
         if let c = activeClient, let q = activeConn, let closeDatagram = c.close(reason: 0) {
             try? q.sendDatagram(datagram: closeDatagram)
         }
         activeConn?.close(code: 0, reason: Data())
         _ = activeEp
+        _ = activeP2p
         activeHost?.stop()
 
         DispatchQueue.main.async {
@@ -175,6 +196,7 @@ final class RemoteSession: ObservableObject {
 
     private func runConnect(mode: RemoteSessionMode, gen: UInt64) {
         guard isGenerationActive(gen) else { return }
+        withLock { waitingForReconnect = false }
         do {
             let candidates: [RemoteEndpointCandidate]
             let bindAddr: String
@@ -188,11 +210,12 @@ final class RemoteSession: ObservableObject {
                     publishError("Nessun indirizzo configurato per il dispositivo")
                     return
                 }
-                guard !certificateDer.isEmpty else {
-                    publishError("Certificato dell'host mancante")
-                    return
+                let cellularOnly = withLock { pathObserver?.cellularOnlySnapshot ?? false }
+                let nonLan = endpoints.filter {
+                    if case let .directQuic(_, isLan) = $0.target { return !isLan }
+                    return true
                 }
-                candidates = endpoints
+                candidates = (cellularOnly && !nonLan.isEmpty) ? nonLan : endpoints
                 bindAddr = "0.0.0.0:0"
                 certDer = certificateDer
                 preferredCodec = codec
@@ -200,7 +223,13 @@ final class RemoteSession: ObservableObject {
             case let .localQuicLoopback(fps, width, height):
                 let runner = try LocalQuicHostRunner(fps: fps, width: width, height: height)
                 runner.start()
-                candidates = [RemoteEndpointCandidate(address: runner.address, label: "Loopback", timeoutMs: 5_000)]
+                candidates = [
+                    RemoteEndpointCandidate(
+                        target: .directQuic(address: runner.address, isLan: true),
+                        label: "Loopback",
+                        timeoutMs: 5_000
+                    ),
+                ]
                 bindAddr = "127.0.0.1:0"
                 certDer = runner.certificateDer
                 preferredCodec = .h265
@@ -212,9 +241,11 @@ final class RemoteSession: ObservableObject {
                 return
             }
 
-            var connectedEndpoint: QuicClientEndpoint?
+            var connectedDirectEp: QuicClientEndpoint?
+            var connectedP2pEp: P2pClientEndpoint?
             var connectedLink: QuicConnection?
             var chosenLabel = ""
+            var chosenIsLan = false
             var lastConnectError: Error?
 
             for candidate in candidates {
@@ -223,26 +254,44 @@ final class RemoteSession: ObservableObject {
                     return
                 }
                 DispatchQueue.main.async {
-                    self.statusText = "Connessione (\(candidate.label)): \(candidate.address)…"
+                    self.statusText = "Connessione (\(candidate.label)): \(candidate.displayAddress)…"
                 }
                 do {
-                    let ep = try QuicClientEndpoint.bind(addr: bindAddr)
-                    let link = try ep.connect(
-                        addr: candidate.address,
-                        serverName: defaultQuicServerName(),
-                        pinnedCertificateDer: certDer,
-                        timeoutMs: candidate.timeoutMs
-                    )
-                    connectedEndpoint = ep
-                    connectedLink = link
-                    chosenLabel = candidate.label
+                    switch candidate.target {
+                    case let .directQuic(address, isLan):
+                        guard !certDer.isEmpty else {
+                            throw QuicTransportError.EmptyCertificate
+                        }
+                        let ep = try QuicClientEndpoint.bind(addr: bindAddr)
+                        let link = try ep.connect(
+                            addr: address,
+                            serverName: defaultQuicServerName(),
+                            pinnedCertificateDer: certDer,
+                            timeoutMs: candidate.timeoutMs
+                        )
+                        connectedDirectEp = ep
+                        connectedLink = link
+                        chosenLabel = candidate.label
+                        chosenIsLan = isLan
+
+                    case let .p2pIroh(endpointId):
+                        let ep = try P2pClientEndpoint.bind(onlineTimeoutMs: 4_000)
+                        let link = try ep.connect(
+                            remoteEndpointId: endpointId,
+                            timeoutMs: candidate.timeoutMs
+                        )
+                        connectedP2pEp = ep
+                        connectedLink = link
+                        chosenLabel = candidate.label
+                        chosenIsLan = false
+                    }
                     break
                 } catch {
                     lastConnectError = error
                 }
             }
 
-            guard let clientEp = connectedEndpoint, let conn = connectedLink else {
+            guard let conn = connectedLink else {
                 loopback?.stop()
                 let desc = lastConnectError.map { "\($0)" } ?? "timeout"
                 handleDisconnect(reason: "Connessione QUIC fallita: \(desc)", orderly: false, gen: gen)
@@ -261,10 +310,12 @@ final class RemoteSession: ObservableObject {
             let installed = withLock { () -> Bool in
                 guard generation == gen && !stopRequested else { return false }
                 self.client = phantomClient
-                self.clientEndpoint = clientEp
+                self.clientEndpoint = connectedDirectEp
+                self.p2pClientEndpoint = connectedP2pEp
                 self.connection = conn
                 self.hostLoopback = loopback
                 self.activeEndpointLabel = chosenLabel
+                self.activeTargetIsLan = chosenIsLan
                 self.reconnectAttempt = 0
                 self.hasConnectedOnce = true
                 return true
@@ -443,6 +494,50 @@ final class RemoteSession: ObservableObject {
         }
     }
 
+    private func handleNetworkPathChange(isCellularOnly: Bool, isSatisfied: Bool) {
+        enum PathAction {
+            case none
+            case migrateP2p(P2pClientEndpoint)
+            case triggerFastReconnect(gen: UInt64)
+            case retryNow(mode: RemoteSessionMode, nextGen: UInt64)
+        }
+
+        let action: PathAction = withLock {
+            guard !stopRequested, let mode = currentMode, case .remote = mode else { return .none }
+            if waitingForReconnect && isSatisfied {
+                waitingForReconnect = false
+                reconnectAttempt = 0
+                generation &+= 1
+                return .retryNow(mode: mode, nextGen: generation)
+            }
+            if let p2p = p2pClientEndpoint {
+                return .migrateP2p(p2p)
+            }
+            if activeTargetIsLan && (isCellularOnly || !isSatisfied) {
+                return .triggerFastReconnect(gen: generation)
+            }
+            return .none
+        }
+
+        switch action {
+        case .none:
+            break
+        case let .migrateP2p(p2p):
+            DispatchQueue.global(qos: .userInitiated).async {
+                p2p.networkChange()
+            }
+        case let .triggerFastReconnect(gen):
+            handleDisconnect(reason: "Cambio rete (Wi-Fi ↔ 5G/4G)", orderly: false, gen: gen)
+        case let .retryNow(mode, nextGen):
+            DispatchQueue.main.async {
+                self.statusText = "Nuova rete rilevata · riconnessione…"
+            }
+            ioQueue.async { [weak self] in
+                self?.runConnect(mode: mode, gen: nextGen)
+            }
+        }
+    }
+
     private func handleDisconnect(reason: String, orderly: Bool, gen: UInt64) {
         let decision: (retryMode: RemoteSessionMode, nextGen: UInt64, attempt: Int, delay: Double)? = withLock {
             guard generation == gen && !stopRequested else { return nil }
@@ -452,6 +547,8 @@ final class RemoteSession: ObservableObject {
             client = nil
             connection = nil
             clientEndpoint = nil
+            p2pClientEndpoint = nil
+            activeTargetIsLan = false
             hostLoopback?.stop()
             hostLoopback = nil
             touchDispatch.reset()
@@ -466,6 +563,7 @@ final class RemoteSession: ObservableObject {
                 return nil
             }
             reconnectAttempt += 1
+            waitingForReconnect = true
             generation &+= 1
             return (mode, generation, reconnectAttempt, ReconnectBackoff.delaySeconds(attempt: reconnectAttempt))
         }
@@ -478,7 +576,7 @@ final class RemoteSession: ObservableObject {
         resetDecoderWindow()
         DispatchQueue.main.async {
             self.metrics.connected = false
-            self.statusText = "Connessione persa · riconnessione (\(retry.attempt)/\(ReconnectBackoff.maxAttempts))…"
+            self.statusText = "Cambio rete / riconnessione (\(retry.attempt)/\(ReconnectBackoff.maxAttempts))…"
         }
 
         ioQueue.asyncAfter(deadline: .now() + retry.delay) { [weak self] in

@@ -6,6 +6,7 @@ import app.phantom.host.core.HostFormatHelpers
 import app.phantom.host.core.ThermalGuard
 import app.phantom.host.core.ThermalPolicy
 import uniffi.phantom_ffi.KeyInput
+import uniffi.phantom_ffi.P2pHostEndpoint
 import uniffi.phantom_ffi.PhantomHost
 import uniffi.phantom_ffi.QuicConnection
 import uniffi.phantom_ffi.QuicHostEndpoint
@@ -14,6 +15,8 @@ import uniffi.phantom_ffi.TouchState
 import uniffi.phantom_ffi.defaultSessionSettings
 import uniffi.phantom_ffi.videoPayloadForDatagram
 import java.io.FileInputStream
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
@@ -44,10 +47,12 @@ class PhantomHostSession(
     private val thermalProvider: () -> ThermalPolicy,
     private val identityCertDer: ByteArray? = null,
     private val identityKeyDer: ByteArray? = null,
+    private val p2pSecretKey: ByteArray? = null,
     private val onSourceSizeChanged: (Int, Int) -> Unit = { _, _ -> },
     private val onTouch: (TouchState) -> Unit,
     private val onKey: (KeyInput) -> Unit,
     private val onReady: (port: Int, certHex: String) -> Unit,
+    private val onP2pReady: (endpointId: String) -> Unit = {},
     private val onStats: (HostLiveStats) -> Unit,
     private val onLog: (String) -> Unit,
     private val onThermalStop: () -> Unit,
@@ -55,6 +60,7 @@ class PhantomHostSession(
 ) {
     private val running = AtomicBoolean(false)
     private val activeConnection = AtomicReference<QuicConnection?>(null)
+    private val activeP2pEndpoint = AtomicReference<P2pHostEndpoint?>(null)
 
     private fun randomNonce16(): ByteArray {
         val out = ByteArray(16)
@@ -76,18 +82,85 @@ class PhantomHostSession(
     fun runBlocking() {
         if (!running.compareAndSet(false, true)) return
         var endpoint: QuicHostEndpoint? = null
+        var lanAcceptThread: Thread? = null
+        var p2pAcceptThread: Thread? = null
+        val incomingQueue = LinkedBlockingQueue<Pair<String, QuicConnection>>()
+
         try {
             val cert = identityCertDer
             val key = identityKeyDer
-            endpoint = if (cert != null && key != null && cert.isNotEmpty() && key.isNotEmpty()) {
+            val lanEp = if (cert != null && key != null && cert.isNotEmpty() && key.isNotEmpty()) {
                 QuicHostEndpoint.bindWithIdentity("0.0.0.0:${config.port}", cert, key)
             } else {
                 QuicHostEndpoint.bind("0.0.0.0:${config.port}")
             }
-            val localPort = endpoint.localAddr().substringAfterLast(':').toIntOrNull() ?: config.port
-            val certHex = HostFormatHelpers.toHex(endpoint.certificateDer())
+            endpoint = lanEp
+            val localPort = lanEp.localAddr().substringAfterLast(':').toIntOrNull() ?: config.port
+            val certHex = HostFormatHelpers.toHex(lanEp.certificateDer())
             onReady(localPort, certHex)
-            onLog("Endpoint QUIC pronto sulla porta $localPort")
+            onLog("Endpoint QUIC LAN pronto sulla porta $localPort")
+
+            lanAcceptThread = Thread({
+                while (running.get()) {
+                    try {
+                        val conn = lanEp.accept(400uL)
+                        incomingQueue.offer("LAN" to conn)
+                    } catch (_: QuicTransportException.Timeout) {
+                        continue
+                    } catch (e: QuicTransportException) {
+                        if (running.get()) {
+                            onLog("Errore accept LAN: ${e.message}")
+                        }
+                        break
+                    } catch (_: Throwable) {
+                        break
+                    }
+                }
+            }, "phantom-accept-lan").apply {
+                isDaemon = true
+                start()
+            }
+
+            val secret = p2pSecretKey
+            if (secret != null && secret.size == 32) {
+                p2pAcceptThread = Thread({
+                    var p2pEp: P2pHostEndpoint? = null
+                    try {
+                        val ep = P2pHostEndpoint.bind(secret, 6_000uL)
+                        p2pEp = ep
+                        activeP2pEndpoint.set(ep)
+                        val eid = ep.endpointId()
+                        onP2pReady(eid)
+                        onLog("P2P integrato (iroh) pronto · ID ${eid.take(12)}…")
+                        while (running.get()) {
+                            try {
+                                val conn = ep.accept(400uL)
+                                incomingQueue.offer("P2P" to conn)
+                            } catch (_: QuicTransportException.Timeout) {
+                                continue
+                            } catch (e: QuicTransportException) {
+                                if (running.get()) {
+                                    onLog("Errore accept P2P: ${e.message}")
+                                }
+                                break
+                            }
+                        }
+                    } catch (t: Throwable) {
+                        if (running.get()) {
+                            onLog("P2P integrato non disponibile (LAN resta attiva): ${t.javaClass.simpleName}: ${t.message}")
+                        }
+                    } finally {
+                        activeP2pEndpoint.compareAndSet(p2pEp, null)
+                        try {
+                            p2pEp?.close()
+                        } catch (_: Throwable) {
+                        }
+                    }
+                }, "phantom-accept-p2p").apply {
+                    isDaemon = true
+                    start()
+                }
+            }
 
             while (running.get()) {
                 val policy = thermalProvider()
@@ -97,17 +170,8 @@ class PhantomHostSession(
                     break
                 }
 
-                val conn = try {
-                    endpoint.accept(400uL)
-                } catch (_: QuicTransportException.Timeout) {
-                    continue
-                } catch (e: QuicTransportException) {
-                    if (running.get()) {
-                        onLog("Errore accept QUIC: ${e.message}")
-                    }
-                    break
-                }
-                serveClient(conn)
+                val item = incomingQueue.poll(400L, TimeUnit.MILLISECONDS) ?: continue
+                serveClient(item.second, item.first)
             }
         } catch (t: Throwable) {
             if (running.get()) {
@@ -120,11 +184,38 @@ class PhantomHostSession(
                 activeConnection.getAndSet(null)?.close(0u, ByteArray(0))
             } catch (_: Throwable) {
             }
+            while (true) {
+                val leftover = incomingQueue.poll() ?: break
+                try {
+                    leftover.second.close(0u, ByteArray(0))
+                    leftover.second.close()
+                } catch (_: Throwable) {
+                }
+            }
+            try {
+                lanAcceptThread?.join(700)
+            } catch (_: Throwable) {
+            }
+            try {
+                p2pAcceptThread?.join(900)
+            } catch (_: Throwable) {
+            }
             try {
                 endpoint?.close()
             } catch (_: Throwable) {
             }
         }
+    }
+
+    fun notifyNetworkChanged() {
+        val ep = activeP2pEndpoint.get() ?: return
+        Thread({
+            try {
+                ep.networkChange()
+                onLog("Cambio rete rilevato: percorsi P2P aggiornati")
+            } catch (_: Throwable) {
+            }
+        }, "phantom-p2p-netchg").start()
     }
 
     fun stop() {
@@ -135,7 +226,7 @@ class PhantomHostSession(
         }
     }
 
-    private fun serveClient(conn: QuicConnection) {
+    private fun serveClient(conn: QuicConnection, transportLabel: String) {
         activeConnection.set(conn)
         val defaults = defaultSessionSettings().copy(minBitrateBps = 1_000_000uL)
         val initialPolicy = thermalProvider()
@@ -180,7 +271,7 @@ class PhantomHostSession(
             host = phantomHost
 
             val profileRef = AtomicReference("${enc.actualWidth}×${enc.actualHeight} @ ${enc.actualFps} fps (${enc.actualCodec.name})")
-            onLog("Client connesso su QUIC · ${profileRef.get()}")
+            onLog("Client connesso ($transportLabel) · ${profileRef.get()}")
 
             val clientActive = AtomicBoolean(true)
             val negotiatedOnce = AtomicBoolean(false)

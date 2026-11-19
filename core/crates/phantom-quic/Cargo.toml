@@ -11,18 +11,10 @@ workspace = true
 
 [dependencies]
 bytes = "1"
-# Versioni bloccate: le ultime alzano l'MSRV oltre 1.82 (vedi PLAN.md T9).
-# `quinn-proto`, `quinn-udp`, `time` e `zeroize` non si usano direttamente:
-# servono solo a fissare le versioni compatibili con `rust-version` del
-# workspace.
-quinn = { version = "=0.11.8", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
-quinn-proto = "=0.11.12"
-quinn-udp = "=0.5.13"
-rcgen = { version = "=0.13.2", default-features = false, features = ["ring"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-time = "=0.3.36"
-tokio = { version = "=1.47.1", features = ["net", "rt-multi-thread", "time"] }
-zeroize = "=1.8.1"
+tokio = { version = "1", features = ["net", "rt-multi-thread", "time"] }
 
 [dev-dependencies]
 phantom-core = { path = "../phantom-core" }

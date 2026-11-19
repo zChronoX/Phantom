@@ -101,19 +101,19 @@ jobs:
       - run: cargo check --workspace --lib --release --target ${{ matrix.target }}
 
   msrv:
-    name: Versione minima di Rust (1.82)
+    name: Versione minima di Rust (1.91)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Rust 1.82
-        run: rustup toolchain install 1.82 --profile minimal
+      - name: Rust 1.91
+        run: rustup toolchain install 1.91 --profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
-          key: msrv
-      # il binding UniFFI richiede un compilatore più recente: l'MSRV riguarda il nucleo che gira dappertutto
-      - run: cargo +1.82 check --workspace --lib --exclude phantom-ffi --exclude uniffi-bindgen
+          key: msrv-191
+      # `iroh` richiede Rust 1.91 (edition 2024): l'MSRV verifica il workspace completo di libreria
+      - run: cargo +1.91 check --workspace --lib --exclude phantom-ffi --exclude uniffi-bindgen
 
   # I binding: il core Rust visto da Swift (app iPhone) e da Kotlin (server Android).
   # Il test Swift compila i binding generati insieme a un programma che pilota host e client in memoria.

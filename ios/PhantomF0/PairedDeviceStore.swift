@@ -21,6 +21,9 @@ final class PairedDeviceStore: ObservableObject {
             if let lan = parsed.lanAddress {
                 updated.lanAddress = lan
             }
+            if let p2p = parsed.p2pEndpointId {
+                updated.p2pEndpointId = p2p
+            }
             if let wan = parsed.remoteAddress {
                 updated.remoteAddress = wan
             }
@@ -33,6 +36,7 @@ final class PairedDeviceStore: ObservableObject {
         let created = PairedDevice(
             name: parsed.name,
             lanAddress: parsed.lanAddress,
+            p2pEndpointId: parsed.p2pEndpointId,
             remoteAddress: parsed.remoteAddress,
             certificateDer: parsed.certificateDer
         )

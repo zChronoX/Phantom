@@ -12,11 +12,13 @@ private func check(_ cond: Bool, _ msg: String) {
 let abcFp = PhantomSHA256.fingerprintHex(Data("abc".utf8), length: 16)
 check(abcFp == "ba7816bf8f01cfea", "SHA-256 fingerprint 'abc' coerente con Android")
 
-// 2. Roundtrip PairingURI con LAN + WAN 5G/Tailscale + nome con spazi
+// 2. Roundtrip PairingURI con LAN + P2P integrato + WAN opzionale + nome con spazi
 let sampleCert = Data([0x30, 0x82, 0x01, 0x0A, 0x05, 0xFF, 0x7E, 0x11])
+let sampleP2p = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 let uri = PairingURI.build(
     name: "Redmi Note 11 Pro",
     lan: "192.168.1.42:47800",
+    p2pId: sampleP2p,
     wan: "100.88.12.5:47800",
     certDer: sampleCert
 )
@@ -24,43 +26,48 @@ let parsed = PairingURI.parse(uri)
 check(parsed != nil, "PairingURI parsato correttamente")
 check(parsed?.name == "Redmi Note 11 Pro", "nome dispositivo preservato")
 check(parsed?.lanAddress == "192.168.1.42:47800", "indirizzo LAN preservato")
-check(parsed?.remoteAddress == "100.88.12.5:47800", "indirizzo remoto 5G/Tailscale preservato")
+check(parsed?.p2pEndpointId == sampleP2p, "EndpointId P2P preservato")
+check(parsed?.remoteAddress == "100.88.12.5:47800", "indirizzo remoto opzionale preservato")
 check(parsed?.certificateDer == sampleCert, "certificato DER intatto dopo Base64URL")
 check(PairingURI.parse("https://example.com") == nil, "URI non Phantom rifiutato")
 check(PairingURI.parse("phantom://pair?name=solo") == nil, "URI senza certificato rifiutato")
 
-// 3. Supporto hostname DNS (Tailscale MagicDNS / DDNS) in EndpointParser
+// 3. Supporto hostname DNS in EndpointParser
 check(
     EndpointParser.normalizeAddress("casa.duckdns.org") == "casa.duckdns.org:47800",
     "hostname DDNS senza porta ottiene porta predefinita 47800"
 )
 check(
     EndpointParser.normalizeAddress("redmi.tailnet.ts.net:47800") == "redmi.tailnet.ts.net:47800",
-    "hostname Tailscale MagicDNS con porta preservato"
+    "hostname con porta preservato"
 )
 
-// 4. Selezione candidati LAN live -> LAN salvata -> Remoto 5G con timeout rapido e deduplicazione
+// 4. Selezione candidati in Wi-Fi: Bonjour LAN -> LAN salvata -> P2P integrato -> Remoto manuale
 let dev = PairedDevice(
     name: "Redmi",
     lanAddress: "192.168.1.42:47800",
-    remoteAddress: "100.88.12.5:47800",
+    p2pEndpointId: sampleP2p,
+    remoteAddress: "casa.duckdns.org:47800",
     certificateDer: sampleCert
 )
-let withBonjour = EndpointCandidateSelector.candidates(for: dev, discoveredLan: "192.168.1.99:47800")
-check(withBonjour.count == 3, "tre candidati distinti (Bonjour + LAN salvato + Remoto 5G)")
-check(withBonjour[0].address == "192.168.1.99:47800", "priorità 1: LAN live Bonjour")
-check(withBonjour[1].address == "192.168.1.42:47800" && withBonjour[1].timeoutMs == 1_600, "priorità 2: LAN salvato con timeout breve per failover 5G")
-check(withBonjour[2].address == "100.88.12.5:47800" && withBonjour[2].timeoutMs == 5_000, "priorità 3: Remoto 5G/VPN")
+let onWifi = EndpointCandidateSelector.candidates(for: dev, discoveredLan: "192.168.1.99:47800", cellularOnly: false)
+check(onWifi.count == 4, "in Wi-Fi: 4 candidati (Bonjour + LAN + P2P + Remoto)")
+check(onWifi[0].target == .directQuic(address: "192.168.1.99:47800", isLan: true), "priorità 1: LAN live Bonjour")
+check(onWifi[1].target == .directQuic(address: "192.168.1.42:47800", isLan: true), "priorità 2: LAN salvata")
+check(onWifi[2].target == .p2pIroh(endpointId: sampleP2p), "priorità 3: P2P integrato iroh")
+check(onWifi[3].target == .directQuic(address: "casa.duckdns.org:47800", isLan: false), "priorità 4: Remoto manuale")
 
-let deduped = EndpointCandidateSelector.candidates(for: dev, discoveredLan: "192.168.1.42:47800")
-check(deduped.count == 2, "deduplicazione quando Bonjour coincide con LAN salvato")
+// 5. In 5G/4G (cellularOnly): salta la LAN e va subito su P2P integrato
+let on5g = EndpointCandidateSelector.candidates(for: dev, discoveredLan: "192.168.1.99:47800", cellularOnly: true)
+check(on5g.count == 2, "in 5G salta le LAN e prova solo P2P + remoto")
+check(on5g[0].target == .p2pIroh(endpointId: sampleP2p), "in 5G primo tentativo immediato su P2P integrato")
 
-let lanOnly = PairedDevice(name: "SoloCasa", lanAddress: "192.168.1.42", remoteAddress: nil, certificateDer: sampleCert)
-let lanOnlyCands = EndpointCandidateSelector.candidates(for: lanOnly, discoveredLan: nil)
-check(lanOnlyCands.count == 1 && lanOnlyCands[0].timeoutMs == 5_000, "senza remoto la LAN usa timeout pieno 5s")
+// 6. Deduplicazione quando Bonjour coincide con LAN salvata
+let deduped = EndpointCandidateSelector.candidates(for: dev, discoveredLan: "192.168.1.42:47800", cellularOnly: false)
+check(deduped.count == 3, "deduplicazione quando Bonjour coincide con LAN salvata")
 
-// 5. Backoff riconnessione automatica
-check(ReconnectBackoff.delaySeconds(attempt: 1) == 1.0, "primo tentativo dopo 1s")
-check(ReconnectBackoff.delaySeconds(attempt: 8) == 8.0, "backoff limitato a 8s")
+// 7. Backoff riconnessione automatica
+check(ReconnectBackoff.delaySeconds(attempt: 1) < 1.0, "primo tentativo rapido (< 1s)")
+check(ReconnectBackoff.delaySeconds(attempt: 12) == 8.0, "backoff limitato a 8s")
 
 print("Tutti i test superati.")

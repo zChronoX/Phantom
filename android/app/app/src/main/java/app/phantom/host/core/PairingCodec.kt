@@ -8,6 +8,7 @@ data class ParsedPairing(
     val name: String,
     val lan: String?,
     val wan: String?,
+    val p2pId: String?,
     val certDer: ByteArray,
 )
 
@@ -82,13 +83,18 @@ object PairingCodec {
         lan: String?,
         wan: String?,
         certDer: ByteArray,
+        p2pId: String? = null,
     ): String {
-        val params = ArrayList<String>(4)
+        val params = ArrayList<String>(5)
         val cleanName = name.trim().ifEmpty { "Android" }
         params.add("name=${urlEncode(cleanName)}")
         val cleanLan = lan?.trim().orEmpty()
         if (cleanLan.isNotEmpty()) {
             params.add("lan=${urlEncode(cleanLan)}")
+        }
+        val cleanP2p = p2pId?.trim().orEmpty()
+        if (cleanP2p.isNotEmpty()) {
+            params.add("p2p=${urlEncode(cleanP2p)}")
         }
         val cleanWan = wan?.trim().orEmpty()
         if (cleanWan.isNotEmpty()) {
@@ -117,6 +123,7 @@ object PairingCodec {
             name = map["name"]?.trim().orEmpty().ifEmpty { "Android" },
             lan = map["lan"]?.trim()?.takeIf { it.isNotEmpty() },
             wan = map["wan"]?.trim()?.takeIf { it.isNotEmpty() },
+            p2pId = map["p2p"]?.trim()?.takeIf { it.isNotEmpty() },
             certDer = cert,
         )
     }

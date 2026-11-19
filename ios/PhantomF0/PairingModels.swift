@@ -1,18 +1,36 @@
 import Foundation
 
-/// Candidato di connessione ordinato (es. prima LAN scoperta via Bonjour, poi LAN salvata, poi Remoto 5G/VPN).
-struct RemoteEndpointCandidate: Equatable {
-    var address: String
-    var label: String
-    var timeoutMs: UInt64
+/// Tipo di trasporto per un candidato di connessione verso l'host Android.
+enum RemoteTransportKind: Equatable {
+    /// QUIC diretto su IP/hostname (usato in LAN domestica o su indirizzo manuale).
+    case directQuic(address: String, isLan: Bool)
+    /// Trasporto P2P integrato (`iroh`: UDP hole punching + relay cifrato E2E, funziona ovunque in 5G/4G/Wi-Fi).
+    case p2pIroh(endpointId: String)
+
+    var displayAddress: String {
+        switch self {
+        case let .directQuic(address, _): return address
+        case let .p2pIroh(endpointId): return "ID \(endpointId.prefix(12))…"
+        }
+    }
 }
 
-/// Dispositivo Android accoppiato e salvato su iPhone (supporta sia LAN domestica sia 5G/4G remoto).
+/// Candidato di connessione ordinato (es. prima LAN scoperta via Bonjour, poi LAN salvata, poi P2P integrato 5G/4G).
+struct RemoteEndpointCandidate: Equatable {
+    var target: RemoteTransportKind
+    var label: String
+    var timeoutMs: UInt64
+
+    var displayAddress: String { target.displayAddress }
+}
+
+/// Dispositivo Android accoppiato e salvato su iPhone (supporta LAN domestica + P2P integrato 5G/4G senza VPN).
 struct PairedDevice: Codable, Identifiable, Equatable {
     /// Prime 16 cifre esadecimali dello SHA-256 del certificato DER (identità stabile dell'host).
     var id: String
     var name: String
     var lanAddress: String?
+    var p2pEndpointId: String?
     var remoteAddress: String?
     var certificateDer: Data
     var preferredCodec: String
@@ -20,13 +38,16 @@ struct PairedDevice: Codable, Identifiable, Equatable {
     init(
         name: String,
         lanAddress: String?,
-        remoteAddress: String?,
+        p2pEndpointId: String? = nil,
+        remoteAddress: String? = nil,
         certificateDer: Data,
         preferredCodec: String = "h265"
     ) {
         self.id = PhantomSHA256.fingerprintHex(certificateDer)
         self.name = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Android" : name
         self.lanAddress = lanAddress.flatMap { EndpointParser.normalizeAddress($0) }
+        let cleanedP2p = p2pEndpointId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.p2pEndpointId = cleanedP2p.isEmpty ? nil : cleanedP2p
         self.remoteAddress = remoteAddress.flatMap { EndpointParser.normalizeAddress($0) }
         self.certificateDer = certificateDer
         self.preferredCodec = preferredCodec == "h264" ? "h264" : "h265"
@@ -37,12 +58,13 @@ struct PairedDevice: Codable, Identifiable, Equatable {
 struct ParsedPairing: Equatable {
     var name: String
     var lanAddress: String?
+    var p2pEndpointId: String?
     var remoteAddress: String?
     var certificateDer: Data
     var fingerprintHex: String
 }
 
-/// Codifica e decodifica dell'URI `phantom://pair?name=...&lan=...&wan=...&cert=...`.
+/// Codifica e decodifica dell'URI `phantom://pair?name=...&lan=...&p2p=...&wan=...&cert=...`.
 enum PairingURI {
     static func parse(_ raw: String) -> ParsedPairing? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -68,16 +90,18 @@ enum PairingURI {
         let name = (map["name"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let lan = map["lan"].flatMap { EndpointParser.normalizeAddress($0) }
         let wan = map["wan"].flatMap { EndpointParser.normalizeAddress($0) }
+        let p2p = (map["p2p"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return ParsedPairing(
             name: name.isEmpty ? "Android" : name,
             lanAddress: lan,
+            p2pEndpointId: p2p.isEmpty ? nil : p2p,
             remoteAddress: wan,
             certificateDer: certDer,
             fingerprintHex: PhantomSHA256.fingerprintHex(certDer)
         )
     }
 
-    static func build(name: String, lan: String?, wan: String?, certDer: Data) -> String {
+    static func build(name: String, lan: String?, p2pId: String? = nil, wan: String? = nil, certDer: Data) -> String {
         var components = URLComponents()
         components.scheme = "phantom"
         components.host = "pair"
@@ -86,6 +110,9 @@ enum PairingURI {
         ]
         if let lan = lan, !lan.isEmpty {
             items.append(URLQueryItem(name: "lan", value: lan))
+        }
+        if let p2pId = p2pId, !p2pId.isEmpty {
+            items.append(URLQueryItem(name: "p2p", value: p2pId))
         }
         if let wan = wan, !wan.isEmpty {
             items.append(URLQueryItem(name: "wan", value: wan))
@@ -120,34 +147,57 @@ enum PairingURI {
     }
 }
 
-/// Costruisce la sequenza di indirizzi da tentare: prima LAN live (Bonjour), poi LAN salvata, poi Remoto 5G/4G.
+/// Costruisce la sequenza di trasporti da tentare: in Wi-Fi prova prima LAN diretta poi P2P integrato;
+/// quando l'iPhone è solo in 5G/4G (`cellularOnly == true`) salta la LAN e va subito su P2P integrato.
 enum EndpointCandidateSelector {
-    static func candidates(for device: PairedDevice, discoveredLan: String?) -> [RemoteEndpointCandidate] {
+    static func candidates(
+        for device: PairedDevice,
+        discoveredLan: String?,
+        cellularOnly: Bool = false
+    ) -> [RemoteEndpointCandidate] {
         var out: [RemoteEndpointCandidate] = []
-        var seen: Set<String> = []
-        let hasRemote = device.remoteAddress.flatMap { EndpointParser.normalizeAddress($0) } != nil
+        var seenAddresses: Set<String> = []
 
-        func appendUnique(_ raw: String?, label: String, timeoutMs: UInt64) {
-            guard let raw = raw, let norm = EndpointParser.normalizeAddress(raw), !seen.contains(norm) else {
+        let hasP2p = device.p2pEndpointId.map { !$0.isEmpty } ?? false
+        let normalizedRemote = device.remoteAddress.flatMap { EndpointParser.normalizeAddress($0) }
+        let hasWideArea = hasP2p || normalizedRemote != nil
+
+        func appendDirect(_ raw: String?, label: String, isLan: Bool, timeoutMs: UInt64) {
+            guard let raw = raw, let norm = EndpointParser.normalizeAddress(raw), !seenAddresses.contains(norm) else {
                 return
             }
-            seen.insert(norm)
-            out.append(RemoteEndpointCandidate(address: norm, label: label, timeoutMs: timeoutMs))
+            seenAddresses.insert(norm)
+            out.append(RemoteEndpointCandidate(target: .directQuic(address: norm, isLan: isLan), label: label, timeoutMs: timeoutMs))
         }
 
-        appendUnique(discoveredLan, label: "LAN (trovato)", timeoutMs: hasRemote ? 2_000 : 5_000)
-        appendUnique(device.lanAddress, label: "LAN", timeoutMs: hasRemote ? 1_600 : 5_000)
-        appendUnique(device.remoteAddress, label: "Remoto 5G/VPN", timeoutMs: 5_000)
+        if !cellularOnly {
+            appendDirect(discoveredLan, label: "LAN (trovato)", isLan: true, timeoutMs: hasWideArea ? 1_600 : 5_000)
+            appendDirect(device.lanAddress, label: "LAN", isLan: true, timeoutMs: hasWideArea ? 1_300 : 5_000)
+        }
+
+        if let p2p = device.p2pEndpointId, !p2p.isEmpty {
+            out.append(RemoteEndpointCandidate(target: .p2pIroh(endpointId: p2p), label: "P2P 5G/Ovunque", timeoutMs: 12_000))
+        }
+
+        if let remote = normalizedRemote {
+            appendDirect(remote, label: "Remoto", isLan: false, timeoutMs: 5_000)
+        }
+
+        // Se in 5G non esistono candidati P2P/remoti, mantieni comunque la LAN come ripiego
+        if out.isEmpty {
+            appendDirect(discoveredLan, label: "LAN (trovato)", isLan: true, timeoutMs: 5_000)
+            appendDirect(device.lanAddress, label: "LAN", isLan: true, timeoutMs: 5_000)
+        }
         return out
     }
 }
 
-/// Politica di backoff per la riconnessione automatica (es. cambio Wi-Fi ↔ 5G).
+/// Politica di backoff per la riconnessione automatica (es. cambio Wi-Fi ↔ 5G/4G).
 enum ReconnectBackoff {
-    static let maxAttempts = 8
+    static let maxAttempts = 12
 
     static func delaySeconds(attempt: Int) -> Double {
-        let table = [1.0, 2.0, 3.0, 5.0, 6.0, 8.0]
+        let table = [0.6, 1.5, 2.5, 4.0, 6.0, 8.0]
         let idx = max(0, min(attempt - 1, table.count - 1))
         return table[idx]
     }

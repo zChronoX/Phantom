@@ -1,7 +1,7 @@
 # Handoff
 
 Scritto: 2026-11-19 da Particle-1 (Kilo); aggiornato dopo la creazione della nuova app host Android (`android/app/`).
-Branch: main - Commit locale: `f5d0aa3` (allineato a `origin/main`) + modifiche locali non committate (identità persistente, QR 1-tap, Bonjour/mDNS, supporto 5G/4G + Tailscale/DDNS, rotazione schermo live, riconnessione automatica, multi-codec)
+Branch: main - Commit locale: `ea6b1da` (allineato a `origin/main`) + modifiche locali non committate (trasporto P2P integrato `iroh` per 5G/4G senza VPN + `NWPathMonitor` su iPhone + doppio listener LAN+P2P su Android)
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -176,19 +176,14 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- **Core Rust + QUIC + FFI**:
-  - `core/crates/phantom-quic/src/lib.rs` + `tests/quic_loopback.rs`: `HostIdentity`, `generate_host_identity()`, `HostEndpoint::bind_with_identity`, keep-alive QUIC 3s + idle timeout 15s (per 5G/4G/NAT/Tailscale).
-  - `core/crates/phantom-core/src/lib.rs`: `SessionConfig.extra_caps` per annunciare entrambi i codec dal client + test.
-  - `core/crates/phantom-ffi/src/lib.rs`: esposti `HostIdentity`, `generate_host_identity`, `QuicHostEndpoint::bind_with_identity`, `PhantomClient::new_multi_codec`, risoluzione DNS (`ToSocketAddrs`, IPv4-first) in `QuicClientEndpoint::connect` per DDNS/Tailscale MagicDNS + test.
+- **Nuovo crate P2P integrato (`core/crates/phantom-p2p/`) + FFI unificato**:
+  - `core/crates/phantom-p2p/{Cargo.toml,src/lib.rs}`: wrapper su `iroh = "1"` (TLS `ring`, `presets::N0` con UDP hole punching + relay cifrato E2E, `network_change`, chiave Ed25519 persistente da 32 byte, test loopback offline su `presets::Minimal`).
+  - `core/Cargo.toml`, `core/crates/phantom-quic/Cargo.toml`, `.github/workflows/core.yml`: aggiunto `phantom-p2p` al workspace, rimossi pin strict pre-1.91 in `phantom-quic` e aggiornato job MSRV CI da `1.82` a `1.91` (richiesto da `iroh 1.x`).
+  - `core/crates/phantom-ffi/{Cargo.toml,src/lib.rs}`: `QuicConnection` unificato (`Direct(QuicLink)` | `P2p(P2pLink)`), esposti `generate_p2p_secret_key`, `p2p_endpoint_id_from_secret`, `P2pHostEndpoint`, `P2pClientEndpoint`.
 - **Android Host APK (`android/app/`)**:
-  - `app/build.gradle.kts`, `AndroidManifest.xml`: aggiunto `com.google.zxing:core:3.5.3` e `CHANGE_WIFI_MULTICAST_STATE`.
-  - `core/PairingCodec.kt` + `PairingCodecTest.kt`, `core/AnnexBFramePrep.kt`: URI `phantom://pair?...`, SHA-256 fingerprint, Base64URL e `selectPreferredVpnIpv4` (Tailscale/WireGuard).
-  - `HostIdentityStore.kt`: identità TLS persistente salvata in `filesDir/identity/`.
-  - `stream/PhantomHostSession.kt`, `root/RootHostMain.kt`, `root/RootInputInjector.kt`: identità persistente, rotazione display live Portrait ↔ Landscape sulla stessa connessione QUIC, floor bitrate 1 Mbps per 4G/5G.
-  - `HostStateStore.kt`, `HostForegroundService.kt`, `MainActivity.kt`: annuncio mDNS `_phantom._udp.`, codice QR live (LAN + VPN/remoto), campo indirizzo remoto 5G/4G (Tailscale/DDNS) e rigenerazione chiave.
+  - `HostIdentityStore.kt`, `core/PairingCodec.kt` (+ `PairingCodecTest.kt`), `HostStateStore.kt`: chiave P2P Ed25519 persistente + `&p2p=<EndpointId>` incluso automaticamente nel QR code.
+  - `stream/PhantomHostSession.kt`, `root/RootHostMain.kt`, `HostForegroundService.kt`, `MainActivity.kt`: doppio listener simultaneo LAN QUIC + P2P `iroh`, monitor `ConnectivityManager.NetworkCallback` con `NET_CHANGE` verso `iroh`, stato P2P integrato in UI.
 - **Client iOS (`ios/`)**:
-  - `project.yml`: aggiunti `NSCameraUsageDescription` e `NSBonjourServices` (`_phantom._udp`).
-  - `PairingModels.swift`, `PairedDeviceStore.swift`, `BonjourDiscovery.swift`, `QRScannerView.swift`: dispositivi salvati 1-tap, scanner QR nativo, scoperta Bonjour LAN, failover LAN → Remoto 5G/VPN, backoff riconnessione.
-  - `RemoteSession.swift`, `RemoteControlSurface.swift`, `RemoteConnectView.swift`: failover multi-endpoint, riconnessione automatica su drop, `PhantomClient.newMultiCodec`, reset tocchi su cambio orientamento video.
-  - `Tests/PairingModelsTests.swift` + `Tests/run-tests.sh`: nuova suite test per SHA-256, `PairingURI`, DNS, failover candidati e backoff.
+  - `NetworkPathObserver.swift` (nuovo): `NWPathMonitor` per rilevare istantaneamente Wi-Fi ↔ 5G/4G.
+  - `PairingModels.swift`, `PairedDeviceStore.swift`, `RemoteSession.swift`, `RemoteConnectView.swift`, `Tests/PairingModelsTests.swift`: trasporto `.p2pIroh(endpointId)` integrato, skip LAN immediato quando su solo 5G/4G, migrazione live `p2pEndpoint.networkChange()` e failover rapido su cambio rete Wi-Fi ↔ 5G/4G senza VPN né configurazione router.
 - `HANDOFF.md`, `PROGRESS.md`: aggiornati.

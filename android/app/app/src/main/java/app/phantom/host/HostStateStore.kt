@@ -21,6 +21,8 @@ data class HostUiState(
     val certificateHex: String = "",
     val certificateDer: ByteArray = ByteArray(0),
     val fingerprintHex: String = "",
+    val p2pEndpointId: String = "",
+    val p2pReady: Boolean = false,
     val activeProfileText: String = "",
     val fps: Double = 0.0,
     val mbps: Double = 0.0,

@@ -4,7 +4,7 @@ description = "Binding UniFFI (Swift e Kotlin) del core di Phantom"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-rust-version = "1.88"
+rust-version = "1.91"
 
 [lib]
 name = "phantom_ffi"
@@ -12,6 +12,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
 phantom-core = { path = "../phantom-core" }
+phantom-p2p = { path = "../phantom-p2p" }
 phantom-quic = { path = "../phantom-quic" }
 uniffi = "0.32"
 

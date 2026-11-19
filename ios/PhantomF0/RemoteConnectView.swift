@@ -5,6 +5,7 @@ import UIKit
 struct RemoteConnectView: View {
     @StateObject private var deviceStore = PairedDeviceStore()
     @StateObject private var bonjour = BonjourDiscovery()
+    @StateObject private var networkPath = NetworkPathObserver()
 
     @AppStorage("remoteAddress") private var address = "192.168.1.118:47800"
     @AppStorage("remoteCert") private var certInput = ""
@@ -71,10 +72,12 @@ struct RemoteConnectView: View {
                         .foregroundStyle(.green)
                 }
             } header: {
-                Text("Dispositivi salvati (1-tap · LAN + 5G/4G)")
+                Text("Dispositivi salvati (1-tap · Wi-Fi + 5G/4G)")
             } footer: {
                 if !bonjour.hosts.isEmpty {
-                    Text("In rete locale rilevati: \(bonjour.hosts.map(\.displayName).joined(separator: ", "))")
+                    Text("Rete iPhone: \(networkPath.summaryLabel) · In LAN: \(bonjour.hosts.map(\.displayName).joined(separator: ", "))")
+                } else {
+                    Text("Rete iPhone: \(networkPath.summaryLabel) · In 5G/4G usa automaticamente il P2P integrato (senza VPN).")
                 }
             }
 
@@ -152,8 +155,14 @@ struct RemoteConnectView: View {
         }
         .navigationTitle("Controllo remoto (QUIC)")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { bonjour.start() }
-        .onDisappear { bonjour.stop() }
+        .onAppear {
+            bonjour.start()
+            networkPath.start()
+        }
+        .onDisappear {
+            bonjour.stop()
+            networkPath.stop()
+        }
         .sheet(isPresented: $showScanner) {
             QRScannerSheet { scannedText in
                 if let parsed = PairingURI.parse(scannedText) {
@@ -206,16 +215,22 @@ struct RemoteConnectView: View {
             }
 
             if let lan = liveLan ?? device.lanAddress {
-                Label("Casa: \(lan)", systemImage: "wifi")
+                Label("Casa (LAN): \(lan)", systemImage: "wifi")
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
             }
+            if let p2p = device.p2pEndpointId {
+                Label("5G/4G P2P integrato · \(p2p.prefix(12))…", systemImage: "globe")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.green)
+            }
             if let remote = device.remoteAddress {
-                Label("5G/Remoto: \(remote)", systemImage: "antenna.radiowaves.left.and.right")
+                Label("Remoto manuale: \(remote)", systemImage: "antenna.radiowaves.left.and.right")
                     .font(.caption.monospaced())
                     .foregroundStyle(.blue)
-            } else {
-                Text("Tocca l'icona a destra per aggiungere un indirizzo 5G/Tailscale/DDNS")
+            }
+            if device.p2pEndpointId == nil && device.remoteAddress == nil {
+                Text("Riscansiona il QR dal nuovo Phantom Host per abilitare il 5G/4G P2P integrato (senza VPN)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -239,9 +254,13 @@ struct RemoteConnectView: View {
     }
 
     private func launchSavedDevice(_ device: PairedDevice, liveLan: String?) {
-        let candidates = EndpointCandidateSelector.candidates(for: device, discoveredLan: liveLan)
+        let candidates = EndpointCandidateSelector.candidates(
+            for: device,
+            discoveredLan: liveLan,
+            cellularOnly: networkPath.isOnCellularOnly
+        )
         guard !candidates.isEmpty else {
-            errorMessage = "Aggiungi almeno un indirizzo LAN o remoto (5G/Tailscale/DDNS) per \(device.name)."
+            errorMessage = "Nessun indirizzo o ID P2P salvato per \(device.name)."
             return
         }
         errorMessage = ""
@@ -269,7 +288,11 @@ struct RemoteConnectView: View {
         }
         errorMessage = ""
         let codec: VideoCodec = codecRaw == "h264" ? .h264 : .h265
-        let candidate = RemoteEndpointCandidate(address: normalized, label: "Manuale", timeoutMs: 5_000)
+        let candidate = RemoteEndpointCandidate(
+            target: .directQuic(address: normalized, isLan: false),
+            label: "Manuale",
+            timeoutMs: 5_000
+        )
         activeMode = .remote(id: normalized, endpoints: [candidate], cert: cert, codec: codec)
     }
 }

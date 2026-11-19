@@ -1,0 +1,15 @@
+[package]
+name = "phantom-p2p"
+description = "Phantom: trasporto P2P QUIC con NAT traversal e relay cifrato integrato (iroh)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version = "1.91"
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes = "1"
+iroh = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }

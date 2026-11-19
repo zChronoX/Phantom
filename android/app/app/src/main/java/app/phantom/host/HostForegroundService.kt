@@ -15,6 +15,8 @@ import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.BatteryManager
@@ -56,6 +58,8 @@ class HostForegroundService : Service() {
 
     private var nsdManager: NsdManager? = null
     private var nsdListener: NsdManager.RegistrationListener? = null
+    private var connectivityManager: ConnectivityManager? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var activeIdentity: StoredHostIdentity? = null
 
     private val batteryReceiver = object : BroadcastReceiver() {
@@ -173,8 +177,11 @@ class HostForegroundService : Service() {
                 certificateHex = identity?.let { id -> HostFormatHelpers.toHex(id.certDer) } ?: "",
                 certificateDer = identity?.certDer ?: ByteArray(0),
                 fingerprintHex = identity?.fingerprintHex ?: "",
+                p2pEndpointId = identity?.p2pEndpointId ?: "",
+                p2pReady = false,
             )
         }
+        registerNetworkMonitor()
         HostStateStore.addLog("Avvio Root · ${config.profile.label}")
 
         val thread = Thread({
@@ -188,6 +195,7 @@ class HostForegroundService : Service() {
                 }
                 val certPathArg = identity?.certFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
                 val keyPathArg = identity?.keyFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
+                val p2pPathArg = identity?.p2pSecretFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
 
                 val cmd = "export CLASSPATH=${shellQuote(apkPath)} LD_LIBRARY_PATH=${shellQuote(libDir)}:/system/lib64:/vendor/lib64; " +
                     "APP_PROC=/system/bin/app_process64; [ -x \"\$APP_PROC\" ] || APP_PROC=app_process; " +
@@ -196,7 +204,7 @@ class HostForegroundService : Service() {
                     "-Djna.boot.library.path=${shellQuote(libDir)} " +
                     "-Djna.nounpack=true " +
                     "/system/bin --nice-name=phantom-host app.phantom.host.root.RootHostMain " +
-                    "${config.port} ${config.profile.name} ${config.preferHevc} ${shellQuote(libDir)}$certPathArg$keyPathArg"
+                    "${config.port} ${config.profile.name} ${config.preferHevc} ${shellQuote(libDir)}$certPathArg$keyPathArg$p2pPathArg"
 
                 val pb = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true)
                 proc = pb.start()
@@ -258,6 +266,15 @@ class HostForegroundService : Service() {
                 }
                 registerMdns(boundPort, id?.fingerprintHex.orEmpty())
                 updateNotification("In ascolto su ${formatAddr(ip, boundPort)}")
+            }
+            line.startsWith("P2P_READY|") -> {
+                val eid = line.removePrefix("P2P_READY|").trim()
+                HostStateStore.update {
+                    it.copy(
+                        p2pEndpointId = eid.ifBlank { it.p2pEndpointId },
+                        p2pReady = true,
+                    )
+                }
             }
             line.startsWith("STATS|") -> {
                 val p = line.split('|', limit = 7)
@@ -332,8 +349,11 @@ class HostForegroundService : Service() {
                 certificateHex = identity?.let { id -> HostFormatHelpers.toHex(id.certDer) } ?: "",
                 certificateDer = identity?.certDer ?: ByteArray(0),
                 fingerprintHex = identity?.fingerprintHex ?: "",
+                p2pEndpointId = identity?.p2pEndpointId ?: "",
+                p2pReady = false,
             )
         }
+        registerNetworkMonitor()
 
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         val projection = mpm.getMediaProjection(resultCode, resultData)
@@ -378,6 +398,7 @@ class HostForegroundService : Service() {
             thermalProvider = { currentThermalPolicy.get() },
             identityCertDer = identity?.certDer,
             identityKeyDer = identity?.keyDer,
+            p2pSecretKey = identity?.p2pSecretKey,
             onTouch = {},
             onKey = {},
             onReady = { boundPort, certHex ->
@@ -392,11 +413,20 @@ class HostForegroundService : Service() {
                         certificateHex = certHex,
                         certificateDer = identity?.certDer ?: it.certificateDer,
                         fingerprintHex = identity?.fingerprintHex ?: it.fingerprintHex,
+                        p2pEndpointId = identity?.p2pEndpointId ?: it.p2pEndpointId,
                         statusText = "In ascolto su $addr",
                     )
                 }
                 registerMdns(boundPort, identity?.fingerprintHex.orEmpty())
                 updateNotification("In ascolto su $addr")
+            },
+            onP2pReady = { endpointId ->
+                HostStateStore.update {
+                    it.copy(
+                        p2pEndpointId = endpointId.ifBlank { it.p2pEndpointId },
+                        p2pReady = true,
+                    )
+                }
             },
             onStats = { s ->
                 val cur = HostStateStore.snapshot()
@@ -444,6 +474,7 @@ class HostForegroundService : Service() {
     }
 
     private fun stopAllWork() {
+        unregisterNetworkMonitor()
         unregisterMdns()
         projectionSession?.stop()
         projectionSession = null
@@ -525,12 +556,64 @@ class HostForegroundService : Service() {
         }
     }
 
+    private fun registerNetworkMonitor() {
+        unregisterNetworkMonitor()
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    notifyNetworkChanged()
+                }
+
+                override fun onLost(network: Network) {
+                    notifyNetworkChanged()
+                }
+            }
+            connectivityManager = cm
+            networkCallback = cb
+            cm.registerDefaultNetworkCallback(cb)
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun unregisterNetworkMonitor() {
+        val cm = connectivityManager
+        val cb = networkCallback
+        connectivityManager = null
+        networkCallback = null
+        if (cm != null && cb != null) {
+            try {
+                cm.unregisterNetworkCallback(cb)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private fun notifyNetworkChanged() {
+        val ifaces = collectActiveIpv4Interfaces()
+        val ip = HostFormatHelpers.selectPreferredLanIpv4(ifaces)
+        val vpnIp = HostFormatHelpers.selectPreferredVpnIpv4(ifaces)
+        HostStateStore.update { cur ->
+            cur.copy(ipAddress = ip.ifBlank { cur.ipAddress }, vpnIpAddress = vpnIp)
+        }
+        projectionSession?.notifyNetworkChanged()
+        val writer = rootStdin
+        if (writer != null) {
+            try {
+                writer.write("NET_CHANGE\n")
+                writer.flush()
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
     private fun markStopped(status: String) {
         HostStateStore.update {
             it.copy(
                 running = false,
                 starting = false,
                 connected = false,
+                p2pReady = false,
                 fps = 0.0,
                 mbps = 0.0,
                 activeProfileText = "",

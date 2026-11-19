@@ -49,9 +49,11 @@ object RootHostMain {
         val libDir = args.getOrNull(3).orEmpty()
         val certPath = args.getOrNull(4)
         val keyPath = args.getOrNull(5)
+        val p2pSecretPath = args.getOrNull(6)
 
         preloadNativeLibs(libDir)
         val identity = HostIdentityStore.loadFromPaths(certPath, keyPath)
+        val p2pSecret = HostIdentityStore.loadP2pSecretFromPath(p2pSecretPath)
 
         val config = HostRunConfig(
             port = port,
@@ -62,7 +64,7 @@ object RootHostMain {
 
         val (srcW, srcH) = RootDisplayCapture.readPrimaryDisplaySize()
         val injector = RootInputInjector(srcW, srcH)
-        emit("LOG|Display rilevato ${srcW}×${srcH} · input injector=${injector.isAvailable} · identità=${identity != null}")
+        emit("LOG|Display rilevato ${srcW}×${srcH} · input injector=${injector.isAvailable} · identità=${identity != null} · p2p=${p2pSecret != null}")
 
         val currentPolicy = AtomicReference(ThermalGuard.evaluate(null, 0))
         val session = PhantomHostSession(
@@ -74,11 +76,15 @@ object RootHostMain {
             thermalProvider = { currentPolicy.get() },
             identityCertDer = identity?.first,
             identityKeyDer = identity?.second,
+            p2pSecretKey = p2pSecret,
             onSourceSizeChanged = { w, h -> injector.setDisplaySize(w, h) },
             onTouch = { injector.injectTouch(it) },
             onKey = { injector.injectKey(it) },
             onReady = { boundPort, certHex ->
                 emit("READY|$boundPort|$certHex")
+            },
+            onP2pReady = { endpointId ->
+                emit("P2P_READY|$endpointId")
             },
             onStats = { s ->
                 emit("STATS|${if (s.connected) 1 else 0}|${s.fps}|${s.mbps}|${s.touches}|${s.keys}|${s.activeProfile}")
@@ -103,6 +109,9 @@ object RootHostMain {
                         line == "STOP" -> {
                             session.stop()
                             break
+                        }
+                        line == "NET_CHANGE" -> {
+                            session.notifyNetworkChanged()
                         }
                         line.startsWith("THERMAL|") -> {
                             val parts = line.split('|')

@@ -7,6 +7,7 @@ members = [
     "crates/phantom-video",
     "crates/phantom-core",
     "crates/phantom-quic",
+    "crates/phantom-p2p",
     "crates/phantom-ffi",
     "crates/uniffi-bindgen",
 ]

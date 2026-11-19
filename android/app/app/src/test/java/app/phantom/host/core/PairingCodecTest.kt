@@ -32,12 +32,14 @@ class PairingCodecTest {
             lan = "192.168.1.42:47800",
             wan = "100.88.12.5:47800",
             certDer = cert,
+            p2pId = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
         )
         val parsed = PairingCodec.parsePairingUri(uri)
         assertNotNull(parsed)
         assertEquals("Redmi Note 11 Pro", parsed!!.name)
         assertEquals("192.168.1.42:47800", parsed.lan)
         assertEquals("100.88.12.5:47800", parsed.wan)
+        assertEquals("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", parsed.p2pId)
         assertArrayEquals(cert, parsed.certDer)
 
         assertNull(PairingCodec.parsePairingUri("https://example.com"))

@@ -1,6 +1,6 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `f5d0aa3` (allineato a `origin/main`) più implementazione locale di Fase 3/4/5 (identità persistente, QR 1-tap, Bonjour/mDNS, 5G/4G remoto + Tailscale/DDNS, rotazione live Portrait ↔ Landscape, riconnessione automatica e multi-codec).
+Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `ea6b1da` (allineato a `origin/main`) più implementazione locale del trasporto P2P integrato (`phantom-p2p` su `iroh 1.x`, zero VPN/router, switch automatico Wi-Fi ↔ 5G/4G con `NWPathMonitor`).
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Dove siamo
@@ -303,11 +303,16 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
   - iOS (`ios/`): scanner QR nativo (`QRScannerView`), `PairedDeviceStore` 1-tap, scoperta LAN Bonjour (`BonjourDiscovery`), failover automatico LAN → Remoto 5G/4G, riconnessione automatica con backoff, reset tocchi su cambio orientamento video e nuova suite di test `PairingModelsTests.swift`.
   - **Nota verifiche**: non essendoci Docker/Rust/Swift/Gradle attivi in locale su Windows, la compilazione e i test di tutti e 3 i target gireranno su GitHub Actions al push.
 
+- **Pairing QR e build 3-target verificati (`ea6b1da`)**: tutti e 3 i workflow CI verdi al primo colpo; accoppiamento QR verificato dall'utente su dispositivi reali.
+- **Trasporto P2P integrato `iroh` + switch automatico Wi-Fi ↔ 5G/4G (locale non committato)**:
+  - Nuovo crate `core/crates/phantom-p2p` su `iroh = "1"` (TLS `ring`, UDP hole punching + relay cifrato E2E, `network_change`, chiave Ed25519 persistente) unificato dentro `QuicConnection` di `phantom-ffi`; MSRV workspace CI aggiornato a Rust 1.91 (richiesto da `iroh 1.x`).
+  - Android (`android/app/`): chiave P2P salvata in `HostIdentityStore`, `&p2p=<EndpointId>` incluso nel QR code, doppio listener simultaneo LAN QUIC + P2P `iroh` in `PhantomHostSession`, monitor rete `ConnectivityManager` → `NET_CHANGE`.
+  - iOS (`ios/`): nuovo `NetworkPathObserver` (`NWPathMonitor`), skip immediato LAN quando su solo 5G/4G per connettersi subito via P2P, migrazione live `p2pEndpoint.networkChange()` e failover rapido su passaggio Wi-Fi ↔ 5G/4G — tutto dentro l'app senza Tailscale né port-forwarding.
+
 ## Prossimo passo
 
-Modifiche locali pronte su `f5d0aa3` (da committare e pushare dall'utente su `origin/main` per far girare `Core · Rust`, `iOS · Phantom F0` e `Android · Phantom Host APK` e rigenerare sia `PhantomHost-debug.apk` sia `PhantomF0.ipa` in `f0-latest`).
+Modifiche locali pronte su `ea6b1da` (da committare e pushare dall'utente su `origin/main` per far girare `Core · Rust`, `iOS · Phantom F0` e `Android · Phantom Host APK` e rigenerare `PhantomHost-debug.apk` e `PhantomF0.ipa` in `f0-latest`).
 
-Dopo il push, aggiornare sia l'APK su Android/LDPlayer sia l'IPA su iPhone e provare:
-1. Scansione QR 1-tap da iPhone + connessione automatica in LAN (Bonjour).
-2. Rotazione Portrait ↔ Landscape aprendo un gioco/app orizzontale.
-3. Connessione da fuori casa in 5G/4G (es. con Tailscale installato su entrambi i telefoni, o DDNS/port-forwarding UDP 47800 sul router).
+Dopo il push, aggiornare sia APK sia IPA, riscansionare il QR una volta (per salvare il nuovo `EndpointId` P2P) e provare lo switch Wi-Fi ↔ 5G/4G. Poi resteranno solo:
+1. Validazione completa sul Redmi Note 11 Pro 5G (Standard subito, Root appena sbloccato il bootloader).
+2. Rifinitura UI/UX finale (iOS + Android) ed eventuali extra opzionali (audio Opus / controllo schermo).

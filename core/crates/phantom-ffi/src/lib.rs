@@ -22,6 +22,7 @@ use phantom_core::phantom_proto::{
     caps, Codec, Finger, HEADER_LEN, MAX_DATAGRAM, MAX_FINGERS, MAX_VIDEO_PAYLOAD, VIDEO_HEADER_LEN,
 };
 use phantom_core::{Client, Delivered, Host, KeyEvent, Negotiated, SessionConfig};
+use phantom_p2p::{P2pEndpoint, P2pError, P2pLink};
 use phantom_quic::{ClientEndpoint, HostEndpoint, QuicError, QuicLink};
 
 uniffi::setup_scaffolding!();
@@ -623,6 +624,28 @@ impl From<QuicError> for QuicTransportError {
     }
 }
 
+impl From<P2pError> for QuicTransportError {
+    fn from(error: P2pError) -> Self {
+        match error {
+            P2pError::InvalidSecretKey => QuicTransportError::EmptyCertificate,
+            P2pError::InvalidEndpointId(detail) => QuicTransportError::InvalidAddress { detail },
+            P2pError::Timeout => QuicTransportError::Timeout,
+            P2pError::EndpointClosed => QuicTransportError::EndpointClosed,
+            P2pError::DatagramsUnsupported => QuicTransportError::DatagramsUnsupported,
+            P2pError::DatagramTooLarge { len, max } => QuicTransportError::DatagramTooLarge {
+                len: u32::try_from(len).unwrap_or(u32::MAX),
+                max: u32::try_from(max).unwrap_or(u32::MAX),
+            },
+            P2pError::BufferTooSmall { len, capacity } => QuicTransportError::BufferTooSmall {
+                len: u32::try_from(len).unwrap_or(u32::MAX),
+                capacity: u32::try_from(capacity).unwrap_or(u32::MAX),
+            },
+            P2pError::Connection(detail) => QuicTransportError::ConnectionFailed { detail },
+            P2pError::Transport(detail) => QuicTransportError::Transport { detail },
+        }
+    }
+}
+
 fn parse_socket_addr(addr: &str) -> Result<SocketAddr, QuicTransportError> {
     addr.parse::<SocketAddr>().map_err(|e| QuicTransportError::InvalidAddress { detail: e.to_string() })
 }
@@ -662,11 +685,30 @@ pub fn generate_host_identity() -> Result<HostIdentity, QuicTransportError> {
     Ok(HostIdentity { cert_der: id.cert_der, key_der: id.key_der })
 }
 
+/// Genera una nuova chiave segreta Ed25519 (32 byte) per il trasporto P2P integrato (`iroh`).
+#[uniffi::export]
+pub fn generate_p2p_secret_key() -> Vec<u8> {
+    phantom_p2p::generate_secret_key().to_vec()
+}
+
+/// Ricava l'`EndpointId` pubblico P2P dalla chiave segreta di 32 byte salvata sull'host.
+#[uniffi::export]
+pub fn p2p_endpoint_id_from_secret(secret_key: Vec<u8>) -> Result<String, QuicTransportError> {
+    Ok(phantom_p2p::endpoint_id_from_secret_key(&secret_key)?)
+}
+
 /// Mantiene vivo l'endpoint (e il suo socket UDP) finché esiste almeno una [`QuicConnection`] aperta.
 #[allow(dead_code)]
 enum QuicEndpointKeepAlive {
     Host(Arc<HostEndpoint>),
     Client(Arc<ClientEndpoint>),
+    P2p(Arc<P2pEndpoint>),
+}
+
+/// Backend effettivo di una [`QuicConnection`]: QUIC diretto (LAN) oppure P2P integrato (`iroh`, 5G/4G/ovunque).
+enum ConnectionBackend {
+    Direct(QuicLink),
+    P2p(P2pLink),
 }
 
 /// Endpoint QUIC lato host (server): usa un certificato effimero o persistente e accetta una connessione.
@@ -709,7 +751,7 @@ impl QuicHostEndpoint {
 
     /// Aspetta una connessione in ingresso e completa il handshake entro `timeout_ms` millisecondi.
     pub fn accept(&self, timeout_ms: u64) -> Result<Arc<QuicConnection>, QuicTransportError> {
-        let link = self.inner.accept(Duration::from_millis(timeout_ms))?;
+        let link = ConnectionBackend::Direct(self.inner.accept(Duration::from_millis(timeout_ms))?);
         let keep_alive = QuicEndpointKeepAlive::Host(Arc::clone(&self.inner));
         Ok(Arc::new(QuicConnection { link, _keep_alive: keep_alive }))
     }
@@ -741,21 +783,87 @@ impl QuicClientEndpoint {
         timeout_ms: u64,
     ) -> Result<Arc<QuicConnection>, QuicTransportError> {
         let addr = resolve_socket_addr(&addr)?;
-        let link =
-            self.inner.connect(addr, &server_name, &pinned_certificate_der, Duration::from_millis(timeout_ms))?;
+        let timeout = Duration::from_millis(timeout_ms);
+        let direct = self.inner.connect(addr, &server_name, &pinned_certificate_der, timeout)?;
+        let link = ConnectionBackend::Direct(direct);
         let keep_alive = QuicEndpointKeepAlive::Client(Arc::clone(&self.inner));
         Ok(Arc::new(QuicConnection { link, _keep_alive: keep_alive }))
     }
 }
 
-/// Connessione QUIC aperta che sposta datagrammi non affidabili (RFC 9221).
+/// Endpoint P2P integrato lato host (`iroh`): raggiungibile ovunque (5G/4G/Wi-Fi) tramite `EndpointId` senza VPN né router.
+#[derive(uniffi::Object)]
+pub struct P2pHostEndpoint {
+    inner: Arc<P2pEndpoint>,
+}
+
+#[uniffi::export]
+impl P2pHostEndpoint {
+    /// Apre l'endpoint P2P host usando la chiave persistente di 32 byte generata da [`generate_p2p_secret_key`].
+    #[uniffi::constructor]
+    pub fn bind(secret_key: Vec<u8>, online_timeout_ms: u64) -> Result<Arc<Self>, QuicTransportError> {
+        let inner = Arc::new(P2pEndpoint::bind_host(&secret_key, Duration::from_millis(online_timeout_ms))?);
+        Ok(Arc::new(Self { inner }))
+    }
+
+    /// Identificatore pubblico (`EndpointId`) da includere nel QR di accoppiamento.
+    pub fn endpoint_id(&self) -> String {
+        self.inner.endpoint_id()
+    }
+
+    /// Aspetta una connessione P2P in ingresso entro `timeout_ms` millisecondi.
+    pub fn accept(&self, timeout_ms: u64) -> Result<Arc<QuicConnection>, QuicTransportError> {
+        let link = ConnectionBackend::P2p(self.inner.accept(Duration::from_millis(timeout_ms))?);
+        let keep_alive = QuicEndpointKeepAlive::P2p(Arc::clone(&self.inner));
+        Ok(Arc::new(QuicConnection { link, _keep_alive: keep_alive }))
+    }
+
+    /// Notifica un cambio di rete sull'host (es. riconnessione Wi-Fi) per aggiornare i percorsi P2P.
+    pub fn network_change(&self) {
+        self.inner.network_change();
+    }
+}
+
+/// Endpoint P2P integrato lato client (`iroh`): si collega all'host tramite `EndpointId` da 5G/4G o Wi-Fi.
+#[derive(uniffi::Object)]
+pub struct P2pClientEndpoint {
+    inner: Arc<P2pEndpoint>,
+}
+
+#[uniffi::export]
+impl P2pClientEndpoint {
+    /// Apre un endpoint P2P client pronto per il collegamento remoto.
+    #[uniffi::constructor]
+    pub fn bind(online_timeout_ms: u64) -> Result<Arc<Self>, QuicTransportError> {
+        let inner = Arc::new(P2pEndpoint::bind_client(Duration::from_millis(online_timeout_ms))?);
+        Ok(Arc::new(Self { inner }))
+    }
+
+    /// Si collega all'host remoto identificato da `remote_endpoint_id` (hole punching diretto o relay cifrato E2E).
+    pub fn connect(
+        &self,
+        remote_endpoint_id: String,
+        timeout_ms: u64,
+    ) -> Result<Arc<QuicConnection>, QuicTransportError> {
+        let link = ConnectionBackend::P2p(self.inner.connect(&remote_endpoint_id, Duration::from_millis(timeout_ms))?);
+        let keep_alive = QuicEndpointKeepAlive::P2p(Arc::clone(&self.inner));
+        Ok(Arc::new(QuicConnection { link, _keep_alive: keep_alive }))
+    }
+
+    /// Notifica un cambio di rete sul client (es. passaggio Wi-Fi ↔ 5G/4G) per migrare i percorsi P2P.
+    pub fn network_change(&self) {
+        self.inner.network_change();
+    }
+}
+
+/// Connessione QUIC aperta (diretta in LAN o P2P integrata `iroh`) che sposta datagrammi non affidabili (RFC 9221).
 ///
 /// Invio e ricezione possono avvenire in contemporanea da thread diversi senza bloccarsi a vicenda.
 #[derive(uniffi::Object)]
 pub struct QuicConnection {
     // `link` deve stare prima di `_keep_alive`: Rust droppa i campi in ordine di dichiarazione, quindi la connessione
     // si chiude prima dell'endpoint/runtime che la ospita.
-    link: QuicLink,
+    link: ConnectionBackend,
     _keep_alive: QuicEndpointKeepAlive,
 }
 
@@ -763,31 +871,48 @@ pub struct QuicConnection {
 impl QuicConnection {
     /// Spedisce subito un datagramma, se sta entro [`QuicConnection::max_datagram_size`].
     pub fn send_datagram(&self, datagram: Vec<u8>) -> Result<(), QuicTransportError> {
-        Ok(self.link.send_datagram(&datagram)?)
+        match &self.link {
+            ConnectionBackend::Direct(link) => Ok(link.send_datagram(&datagram)?),
+            ConnectionBackend::P2p(link) => Ok(link.send_datagram(&datagram)?),
+        }
     }
 
     /// Aspetta un datagramma fino a `timeout_ms` millisecondi, con buffer massimo di `max_bytes`.
     pub fn recv_datagram(&self, max_bytes: u32, timeout_ms: u64) -> Result<Vec<u8>, QuicTransportError> {
         let capacity = (max_bytes as usize).clamp(1, 65_536);
         let mut buf = vec![0u8; capacity];
-        let n = self.link.recv_datagram(&mut buf, Duration::from_millis(timeout_ms))?;
+        let timeout = Duration::from_millis(timeout_ms);
+        let n = match &self.link {
+            ConnectionBackend::Direct(link) => link.recv_datagram(&mut buf, timeout)?,
+            ConnectionBackend::P2p(link) => link.recv_datagram(&mut buf, timeout)?,
+        };
         buf.truncate(n);
         Ok(buf)
     }
 
     /// Massimo datagramma accettato in questo momento (dipende dalla path MTU); `None` se non supportato.
     pub fn max_datagram_size(&self) -> Option<u32> {
-        self.link.max_datagram_size().and_then(|n| u32::try_from(n).ok())
+        let max = match &self.link {
+            ConnectionBackend::Direct(link) => link.max_datagram_size(),
+            ConnectionBackend::P2p(link) => link.max_datagram_size(),
+        };
+        max.and_then(|n| u32::try_from(n).ok())
     }
 
     /// Chiude la connessione con un codice e un motivo applicativo.
     pub fn close(&self, code: u32, reason: Vec<u8>) {
-        self.link.close(code, &reason);
+        match &self.link {
+            ConnectionBackend::Direct(link) => link.close(code, &reason),
+            ConnectionBackend::P2p(link) => link.close(code, &reason),
+        }
     }
 
     /// `true` se la connessione QUIC è già chiusa.
     pub fn is_closed(&self) -> bool {
-        self.link.is_closed()
+        match &self.link {
+            ConnectionBackend::Direct(link) => link.is_closed(),
+            ConnectionBackend::P2p(link) => link.is_closed(),
+        }
     }
 }
 
@@ -1187,5 +1312,11 @@ mod tests {
         let n = client.negotiated().expect("negoziata");
         assert!(caps_contains(n.caps, Capability::H264), "H.264 negoziato con client multi-codec");
         assert!(!caps_contains(n.caps, Capability::H265));
+
+        let p2p_secret = generate_p2p_secret_key();
+        assert_eq!(p2p_secret.len(), 32);
+        let p2p_id = p2p_endpoint_id_from_secret(p2p_secret).expect("endpoint id P2P");
+        assert!(!p2p_id.is_empty());
+        assert!(matches!(p2p_endpoint_id_from_secret(vec![1, 2, 3]), Err(QuicTransportError::EmptyCertificate)));
     }
 }

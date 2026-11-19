@@ -105,6 +105,7 @@ class MainActivity : Activity() {
                         certificateDer = id.certDer,
                         certificateHex = HostFormatHelpers.toHex(id.certDer),
                         fingerprintHex = id.fingerprintHex,
+                        p2pEndpointId = id.p2pEndpointId,
                     )
                 }
             } catch (t: Throwable) {
@@ -406,6 +407,8 @@ class MainActivity : Activity() {
                         certificateDer = id.certDer,
                         certificateHex = HostFormatHelpers.toHex(id.certDer),
                         fingerprintHex = id.fingerprintHex,
+                        p2pEndpointId = id.p2pEndpointId,
+                        p2pReady = false,
                     )
                 }
                 HostStateStore.addLog("Nuova identità TLS generata (ID ${id.fingerprintHex})")
@@ -459,14 +462,13 @@ class MainActivity : Activity() {
         thermalBadge.text = "$tempStr${s.thermalLabel}"
 
         addrText.text = if (s.ipAddress.isNotBlank()) "LAN: ${s.ipAddress}:${s.port}" else "In attesa Wi-Fi (porta ${s.port})"
-        val effectiveWan = effectiveRemoteAddress(s)
         remoteHintText.text = when {
-            s.vpnIpAddress.isNotBlank() && customRemoteHost.isBlank() ->
-                "VPN/Tailscale rilevato automaticamente: ${s.vpnIpAddress}:${s.port}"
-            effectiveWan != null ->
-                "Remoto 5G/4G nel QR: $effectiveWan"
+            s.p2pReady && s.p2pEndpointId.isNotBlank() ->
+                "P2P integrato (5G/4G ovunque): ATTIVO · ID ${s.p2pEndpointId.take(12)}…"
+            s.p2pEndpointId.isNotBlank() ->
+                "P2P integrato (5G/4G) pronto nel QR · nessuna VPN necessaria"
             else ->
-                "Per 5G/4G: attiva Tailscale o inserisci un indirizzo DDNS sotto"
+                "Inizializzazione identità P2P…"
         }
 
         fingerprintText.text = if (s.fingerprintHex.isNotBlank()) {
@@ -529,6 +531,7 @@ class MainActivity : Activity() {
             lan = lan,
             wan = wan,
             certDer = s.certificateDer,
+            p2pId = s.p2pEndpointId.takeIf { it.isNotBlank() },
         )
         qrImage.visibility = View.VISIBLE
         if (uri == lastQrUri) return
