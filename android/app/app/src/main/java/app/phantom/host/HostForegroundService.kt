@@ -163,6 +163,10 @@ class HostForegroundService : Service() {
             try {
                 val apkPath = applicationInfo.sourceDir
                 val libDir = applicationInfo.nativeLibraryDir
+                val ifacesSummary = describeActiveIpv4Interfaces()
+                if (ifacesSummary.isNotBlank()) {
+                    HostStateStore.addLog("Interfacce IPv4: $ifacesSummary")
+                }
                 val cmd = "export CLASSPATH=${shellQuote(apkPath)} LD_LIBRARY_PATH=${shellQuote(libDir)}; " +
                     "APP_PROC=/system/bin/app_process64; [ -x \"\$APP_PROC\" ] || APP_PROC=app_process; " +
                     "exec \"\$APP_PROC\" " +
@@ -171,7 +175,7 @@ class HostForegroundService : Service() {
                     "-Djna.boot.library.path=${shellQuote(libDir)} " +
                     "-Djna.nounpack=true " +
                     "/system/bin --nice-name=phantom-host app.phantom.host.root.RootHostMain " +
-                    "${config.port} ${config.profile.name} ${config.preferHevc}"
+                    "${config.port} ${config.profile.name} ${config.preferHevc} ${shellQuote(libDir)}"
 
                 val pb = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true)
                 proc = pb.start()
@@ -270,6 +274,10 @@ class HostForegroundService : Service() {
 
     private fun startProjectionMode(config: HostRunConfig, resultCode: Int, resultData: Intent) {
         val ip = localWifiIpv4()
+        val ifacesSummary = describeActiveIpv4Interfaces()
+        if (ifacesSummary.isNotBlank()) {
+            HostStateStore.addLog("Interfacce IPv4: $ifacesSummary")
+        }
         HostStateStore.update {
             it.copy(
                 running = true,
@@ -537,9 +545,9 @@ class HostForegroundService : Service() {
         nm.notify(NOTIFICATION_ID, buildNotification(text))
     }
 
-    private fun localWifiIpv4(): String {
+    private fun collectActiveIpv4Interfaces(): List<Pair<String, String>> {
         return try {
-            val ifaces = NetworkInterface.getNetworkInterfaces() ?: return ""
+            val ifaces = NetworkInterface.getNetworkInterfaces() ?: return emptyList()
             val candidates = ArrayList<Pair<String, String>>()
             while (ifaces.hasMoreElements()) {
                 val iface = ifaces.nextElement()
@@ -555,11 +563,17 @@ class HostForegroundService : Service() {
                     }
                 }
             }
-            HostFormatHelpers.selectPreferredLanIpv4(candidates)
+            candidates
         } catch (_: Throwable) {
-            ""
+            emptyList()
         }
     }
+
+    private fun describeActiveIpv4Interfaces(): String =
+        collectActiveIpv4Interfaces().joinToString(", ") { (name, ip) -> "$name=$ip" }
+
+    private fun localWifiIpv4(): String =
+        HostFormatHelpers.selectPreferredLanIpv4(collectActiveIpv4Interfaces())
 
     private fun formatAddr(ip: String, port: Int): String = if (ip.isBlank()) ":$port" else "$ip:$port"
 

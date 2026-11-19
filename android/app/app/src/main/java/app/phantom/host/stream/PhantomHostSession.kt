@@ -85,7 +85,8 @@ class PhantomHostSession(
             }
         } catch (t: Throwable) {
             if (running.get()) {
-                onLog("Errore fatale host: ${t.message}")
+                val cause = t.cause?.let { " (causa: ${it.javaClass.simpleName}: ${it.message})" }.orEmpty()
+                onLog("Errore fatale host: ${t.javaClass.simpleName}: ${t.message}$cause")
             }
         } finally {
             running.set(false)

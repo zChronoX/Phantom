@@ -1,7 +1,7 @@
 # Handoff
 
 Scritto: 2026-11-19 da Particle-1 (Kilo); aggiornato dopo la creazione della nuova app host Android (`android/app/`).
-Branch: main - Commit locale: `f58d355` (allineato a `origin/main`) + fix locale `QuicTransportError` per binding Kotlin UniFFI
+Branch: main - Commit locale: `72cf2df` (allineato a `origin/main`) + fix locale per preload `.so`/stacktrace in `RootHostMain` e diagnostica IPv4 LAN
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -175,6 +175,8 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- `core/crates/phantom-ffi/src/lib.rs`: rinominato il campo `message` → `detail` nelle varianti `InvalidAddress`, `ConnectionFailed` e `Transport` di `QuicTransportError` per evitare la collisione con `Throwable.message` nel binding Kotlin generato da UniFFI.
-- `android/app/app/src/main/AndroidManifest.xml`: rimosso `android:extractNativeLibs="true"` ridondante (già impostato automaticamente da AGP via `useLegacyPackaging = true`, elimina il warning di build).
+- `android/app/app/src/main/java/app/phantom/host/root/RootHostMain.kt`: preload esplicito di `libjnidispatch.so` e `libphantom_ffi.so` per path assoluto (`System.load` + `System.setProperty` per JNA), `try/catch` globale e `UncaughtExceptionHandler` che stampa lo stacktrace completo nel log UI.
+- `android/app/app/src/main/java/app/phantom/host/HostForegroundService.kt`: passa `libDir` a `RootHostMain` e registra nel log tutte le interfacce IPv4 attive (`iface=ip`).
+- `android/app/app/src/main/java/app/phantom/host/core/AnnexBFramePrep.kt` + `AnnexBFramePrepTest.kt`: tratta anche `172.16.1.*` (rete virtuale LDPlayer) come NAT emulatore da declassare se c'è un IP LAN reale.
+- `android/app/app/src/main/java/app/phantom/host/stream/PhantomHostSession.kt` e `MainActivity.kt`: errori fatali più dettagliati (classe + causa) e fino a 30 righe di log visibili in UI.
 - `HANDOFF.md`, `PROGRESS.md`: aggiornati.

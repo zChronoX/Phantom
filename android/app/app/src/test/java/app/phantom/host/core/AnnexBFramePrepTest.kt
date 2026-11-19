@@ -44,11 +44,17 @@ class AnnexBFramePrepTest {
                 listOf("rmnet0" to "100.64.0.10", "wlan0" to "192.168.1.42"),
             ),
         )
-        // LDPlayer in Network Bridging: NAT 10.0.2.15 + bridge LAN
+        // LDPlayer in Network Bridging: NAT 10.0.2.15 / 172.16.1.15 + bridge LAN
         assertEquals(
             "192.168.1.55",
             HostFormatHelpers.selectPreferredLanIpv4(
                 listOf("eth0" to "10.0.2.15", "eth1" to "192.168.1.55"),
+            ),
+        )
+        assertEquals(
+            "192.168.1.77",
+            HostFormatHelpers.selectPreferredLanIpv4(
+                listOf("eth0" to "172.16.1.15", "eth1" to "192.168.1.77"),
             ),
         )
         // Solo link-local vs Ethernet LAN

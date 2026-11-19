@@ -1,6 +1,6 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `f58d355` (allineato a `origin/main`) più fix locale per `QuicTransportError` nel binding Kotlin UniFFI (`core/crates/phantom-ffi/src/lib.rs`) e pulizia manifest Android.
+Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `72cf2df` (allineato a `origin/main`) più fix locale per `RootHostMain` (preload `.so`, stacktrace completo nel log, lista interfacce IPv4 e priorità IP LAN).
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Dove siamo
@@ -286,11 +286,17 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
   - La compilazione Rust (`arm64-v8a` + `x86_64`) e tutto il codice Kotlin in `android/app/` sono passati, ma `kotlinc` ha segnalato `Conflicting declarations: val message: String` nel file generato `uniffi/phantom_ffi/phantom_ffi.kt` perché le varianti `InvalidAddress`, `ConnectionFailed` e `Transport` di `QuicTransportError` avevano un campo chiamato `message` che collide con `Throwable.message` in Kotlin.
   - Rinominato il campo `message` → `detail` in `core/crates/phantom-ffi/src/lib.rs` (nessun chiamante Swift/Kotlin destruttura il nome del campo) e rimosso `android:extractNativeLibs="true"` ridondante da `AndroidManifest.xml` (già gestito da AGP `useLegacyPackaging = true`).
 
+- Prima prova su LDPlayer reale (`72cf2df`):
+  - **Modalità Standard (MediaProjection)**: avviata subito con `libphantom_ffi.so` (`x86_64`), endpoint QUIC in ascolto e certificato DER generato.
+  - **Rete LDPlayer**: rilevato `172.16.1.15` (rete virtuale interna LDPlayer) -> timeout QUIC dall'iPhone finché il bridge di rete non assegna un IP sulla stessa sottorete LAN del router.
+  - **Modalità Root (`app_process64`)**: `RootDisplayCapture` (`1080×1920`) e `RootInputInjector` (`true`) partiti, seguiti da eccezione non catturata in `RootHostMain` (loggata solo su logcat da `RuntimeInit$KillApplicationHandler`).
+  - Fix applicato in locale: preload esplicito di `libjnidispatch.so` e `libphantom_ffi.so` da `libDir` in `RootHostMain`, `UncaughtExceptionHandler` + `try/catch` con stacktrace nel log UI, log di tutte le interfacce IPv4 attive e declassamento di `172.16.1.*` quando esiste un IP LAN reale.
+
 ## Prossimo passo
 
-Modifiche locali pronte su `f58d355` (da committare e pushare dall'utente su `origin/main`):
-- `core/crates/phantom-ffi/src/lib.rs` (`message` → `detail` in `QuicTransportError`)
-- `android/app/app/src/main/AndroidManifest.xml` (rimosso attributo ridondante)
+Modifiche locali pronte su `72cf2df` (da committare e pushare dall'utente su `origin/main`):
+- `android/app/app/src/main/java/app/phantom/host/{root/RootHostMain,HostForegroundService,core/AnnexBFramePrep,stream/PhantomHostSession,MainActivity}.kt`
+- `android/app/app/src/test/java/app/phantom/host/core/AnnexBFramePrepTest.kt`
 - `HANDOFF.md`, `PROGRESS.md`
 
-Dopo il push, verificare che `Core · Rust`, `iOS · Phantom F0` e `Android · Phantom Host APK` siano tutti verdi e scaricare `PhantomHost-debug.apk` dalla release `f0-latest` per provarlo su LDPlayer (Root) e Redmi Note 11 Pro 5G (MediaProjection).
+Intanto è già possibile provare l'APK attuale (`72cf2df`) sul **Redmi Note 11 Pro 5G** in modalità **Standard senza root** (stesso Wi-Fi dell'iPhone, nessun bridge PC necessario) oppure su LDPlayer dopo aver verificato che il Network Bridging assegni un IP nella stessa sottorete dell'iPhone.

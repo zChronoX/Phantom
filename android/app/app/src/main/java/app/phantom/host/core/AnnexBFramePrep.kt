@@ -83,7 +83,7 @@ object HostFormatHelpers {
     private fun lanCandidateScore(iface: String, ip: String): Int {
         val lower = iface.lowercase()
         val isLinkLocal = ip.startsWith("169.254.")
-        val isEmulatorNat = ip.startsWith("10.0.2.")
+        val isEmulatorNat = ip.startsWith("10.0.2.") || ip.startsWith("172.16.1.")
         val isWifi = lower.startsWith("wlan")
         val isEthernet = lower.startsWith("eth") || lower.startsWith("en") || lower.startsWith("br")
         val isCellular = lower.startsWith("rmnet") || lower.startsWith("ccmni") || lower.startsWith("pdp")

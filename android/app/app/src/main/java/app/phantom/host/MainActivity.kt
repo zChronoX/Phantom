@@ -358,7 +358,7 @@ class MainActivity : Activity() {
             s.touches,
             s.keys,
         )
-        logsText.text = if (s.logs.isEmpty()) "(nessun evento)" else s.logs.takeLast(14).joinToString("\n")
+        logsText.text = if (s.logs.isEmpty()) "(nessun evento)" else s.logs.takeLast(30).joinToString("\n")
     }
 
     private fun copyToClipboard(label: String, text: String) {
