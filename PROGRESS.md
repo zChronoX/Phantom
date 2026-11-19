@@ -1,6 +1,6 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `39cac9e` (allineato a `origin/main`) più modifiche locali non committate per il supporto `x86_64`/LDPlayer nell'app host Android (`android/app/`, `ADR-010`, CI `android-app.yml`).
+Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `f58d355` (allineato a `origin/main`) più fix locale per `QuicTransportError` nel binding Kotlin UniFFI (`core/crates/phantom-ffi/src/lib.rs`) e pulizia manifest Android.
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Dove siamo
@@ -282,15 +282,15 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 - La CI `cross` per Android ora passa `CC`/`AR`/`RANLIB` dell'NDK perché `ring`
   compila C anche con `cargo check`. Il job iOS usa Xcode/`xcrun`.
 
+- Fix CI `Android · Phantom Host APK` (su `f58d355`):
+  - La compilazione Rust (`arm64-v8a` + `x86_64`) e tutto il codice Kotlin in `android/app/` sono passati, ma `kotlinc` ha segnalato `Conflicting declarations: val message: String` nel file generato `uniffi/phantom_ffi/phantom_ffi.kt` perché le varianti `InvalidAddress`, `ConnectionFailed` e `Transport` di `QuicTransportError` avevano un campo chiamato `message` che collide con `Throwable.message` in Kotlin.
+  - Rinominato il campo `message` → `detail` in `core/crates/phantom-ffi/src/lib.rs` (nessun chiamante Swift/Kotlin destruttura il nome del campo) e rimosso `android:extractNativeLibs="true"` ridondante da `AndroidManifest.xml` (già gestito da AGP `useLegacyPackaging = true`).
+
 ## Prossimo passo
 
-Modifiche locali pronte su `39cac9e` (da committare e pushare dall'utente su `origin/main` per
-far rigirare `.github/workflows/android-app.yml` con `arm64-v8a` + `x86_64` e rigenerare `PhantomHost-debug.apk`):
-- `android/app/app/build.gradle.kts`, `.github/workflows/android-app.yml`
-- `android/app/app/src/main/java/app/phantom/host/{HostForegroundService,core/AnnexBFramePrep,stream/VideoEncoder,stream/PhantomHostSession,root/RootHostMain}.kt`
-- `android/app/app/src/test/java/app/phantom/host/core/AnnexBFramePrepTest.kt`
-- `docs/adr/ADR-010-host-android-apk.md`, `HANDOFF.md`, `PROGRESS.md`
+Modifiche locali pronte su `f58d355` (da committare e pushare dall'utente su `origin/main`):
+- `core/crates/phantom-ffi/src/lib.rs` (`message` → `detail` in `QuicTransportError`)
+- `android/app/app/src/main/AndroidManifest.xml` (rimosso attributo ridondante)
+- `HANDOFF.md`, `PROGRESS.md`
 
-Dopo il push, scaricare `PhantomHost-debug.apk` dalla release `f0-latest` di GitHub Actions e
-testarlo sia in modalità Root su LDPlayer (`x86_64`, video + multi-touch + tastiera) sia in
-modalità Standard `MediaProjection` sul Redmi Note 11 Pro 5G (`arm64-v8a`, stream QUIC 1080p · 120 fps).
+Dopo il push, verificare che `Core · Rust`, `iOS · Phantom F0` e `Android · Phantom Host APK` siano tutti verdi e scaricare `PhantomHost-debug.apk` dalla release `f0-latest` per provarlo su LDPlayer (Root) e Redmi Note 11 Pro 5G (MediaProjection).

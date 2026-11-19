@@ -1,7 +1,7 @@
 # Handoff
 
 Scritto: 2026-11-19 da Particle-1 (Kilo); aggiornato dopo la creazione della nuova app host Android (`android/app/`).
-Branch: main - Commit locale: `39cac9e` (allineato a `origin/main`) + modifiche locali non committate (supporto `x86_64`/LDPlayer)
+Branch: main - Commit locale: `f58d355` (allineato a `origin/main`) + fix locale `QuicTransportError` per binding Kotlin UniFFI
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -136,6 +136,7 @@ Otto task della sessione precedente più T9 e T10 chiusi e verificati in Docker
   Rust 1.85 o l'edizione 2024.
 - Togliere `CC`/`AR`/`RANLIB` dell'NDK dal job `cross` Android: `ring` compila C
   anche con `cargo check`.
+- Usare un campo chiamato `message` nelle varianti di un enum `#[derive(uniffi::Error)]` in Rust: nel binding Kotlin generato da UniFFI collide con `Throwable.message` (`Conflicting declarations: val message: String`). Usare nomi come `detail`.
 - Mandare video, ping, tocco, tastiera o statistiche prima dell'apertura: il
   core ora le scarta (cancello T10). L'host deve aspettare `negotiated()` e il
   client l'ack; i test di ping e tastiera aprono prima la sessione. Non aggirare
@@ -174,10 +175,6 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- `android/app/app/build.gradle.kts`: aggiunto ABI `x86_64` accanto a `arm64-v8a` e abbassato `minSdk` a `26` per compatibilità con LDPlayer 9 (Android 9).
-- `.github/workflows/android-app.yml`: compilazione `libphantom_ffi.so` per `aarch64-linux-android` e `x86_64-linux-android`.
-- `android/app/app/src/main/java/app/phantom/host/core/AnnexBFramePrep.kt` + `AnnexBFramePrepTest.kt`: `selectPreferredLanIpv4` per scegliere correttamente l'IP LAN su Wi-Fi ed Ethernet bridge (evitando `10.0.2.*` e link-local).
-- `android/app/app/src/main/java/app/phantom/host/HostForegroundService.kt`: usa `selectPreferredLanIpv4` e lancia `app_process64` (con fallback a `app_process`).
-- `android/app/app/src/main/java/app/phantom/host/stream/VideoEncoder.kt`: aggiunto fallback finale `H.264 @ 30 fps` senza VBR esplicito per massima compatibilità emulatore.
-- `android/app/app/src/main/java/app/phantom/host/stream/PhantomHostSession.kt` e `RootHostMain.kt`: `onClientDisconnected` con `injector.reset()` e chiusura pulita degli handle FFI dal thread proprietario.
-- `docs/adr/ADR-010-host-android-apk.md`, `HANDOFF.md`, `PROGRESS.md`: aggiornati.
+- `core/crates/phantom-ffi/src/lib.rs`: rinominato il campo `message` → `detail` nelle varianti `InvalidAddress`, `ConnectionFailed` e `Transport` di `QuicTransportError` per evitare la collisione con `Throwable.message` nel binding Kotlin generato da UniFFI.
+- `android/app/app/src/main/AndroidManifest.xml`: rimosso `android:extractNativeLibs="true"` ridondante (già impostato automaticamente da AGP via `useLegacyPackaging = true`, elimina il warning di build).
+- `HANDOFF.md`, `PROGRESS.md`: aggiornati.

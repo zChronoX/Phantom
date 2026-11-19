@@ -533,7 +533,7 @@ pub enum QuicTransportError {
     /// Indirizzo IP/porta non valido (atteso `ip:porta`, es. `127.0.0.1:47800`).
     InvalidAddress {
         /// Dettaglio dell'errore di parsing.
-        message: String,
+        detail: String,
     },
     /// Il certificato da fissare è vuoto.
     EmptyCertificate,
@@ -560,19 +560,19 @@ pub enum QuicTransportError {
     /// Connessione chiusa o handshake TLS/QUIC fallito (incluso certificato diverso da quello fissato).
     ConnectionFailed {
         /// Descrizione dell'errore.
-        message: String,
+        detail: String,
     },
     /// Errore locale di I/O, TLS o configurazione dell'endpoint.
     Transport {
         /// Descrizione dell'errore.
-        message: String,
+        detail: String,
     },
 }
 
 impl fmt::Display for QuicTransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            QuicTransportError::InvalidAddress { message } => write!(f, "indirizzo non valido: {message}"),
+            QuicTransportError::InvalidAddress { detail } => write!(f, "indirizzo non valido: {detail}"),
             QuicTransportError::EmptyCertificate => write!(f, "il certificato da fissare è vuoto"),
             QuicTransportError::Timeout => write!(f, "nessuna risposta entro il timeout"),
             QuicTransportError::EndpointClosed => write!(f, "endpoint chiuso"),
@@ -581,8 +581,8 @@ impl fmt::Display for QuicTransportError {
             QuicTransportError::BufferTooSmall { len, capacity } => {
                 write!(f, "datagramma di {len} byte, buffer di {capacity}")
             }
-            QuicTransportError::ConnectionFailed { message } => write!(f, "{message}"),
-            QuicTransportError::Transport { message } => write!(f, "{message}"),
+            QuicTransportError::ConnectionFailed { detail } => write!(f, "{detail}"),
+            QuicTransportError::Transport { detail } => write!(f, "{detail}"),
         }
     }
 }
@@ -604,19 +604,19 @@ impl From<QuicError> for QuicTransportError {
                 len: u32::try_from(len).unwrap_or(u32::MAX),
                 capacity: u32::try_from(capacity).unwrap_or(u32::MAX),
             },
-            QuicError::Connection(_) => QuicTransportError::ConnectionFailed { message: error.to_string() },
+            QuicError::Connection(_) => QuicTransportError::ConnectionFailed { detail: error.to_string() },
             QuicError::Io(_)
             | QuicError::Tls(_)
             | QuicError::TlsConfig(_)
             | QuicError::Certificate(_)
             | QuicError::Connect(_)
-            | QuicError::SendDatagram(_) => QuicTransportError::Transport { message: error.to_string() },
+            | QuicError::SendDatagram(_) => QuicTransportError::Transport { detail: error.to_string() },
         }
     }
 }
 
 fn parse_socket_addr(addr: &str) -> Result<SocketAddr, QuicTransportError> {
-    addr.parse::<SocketAddr>().map_err(|e| QuicTransportError::InvalidAddress { message: e.to_string() })
+    addr.parse::<SocketAddr>().map_err(|e| QuicTransportError::InvalidAddress { detail: e.to_string() })
 }
 
 /// Mantiene vivo l'endpoint (e il suo socket UDP) finché esiste almeno una [`QuicConnection`] aperta.
