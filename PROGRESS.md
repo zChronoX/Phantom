@@ -1,6 +1,6 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `fea4038` (allineato a `origin/main`) più fix CI locale per linker iOS (`SystemConfiguration`/`resolv`), `rustfmt` e loopback IPv4 in `phantom-p2p`.
+Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `2562dd7` (allineato a `origin/main`) più fix `SIGABRT` in `Drop for P2pEndpoint` (`core/crates/phantom-p2p/src/lib.rs`).
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Dove siamo
@@ -314,11 +314,14 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
   - Aggiunti `-lresolv -framework SystemConfiguration -framework Security -framework Network` in `ios/project.yml` per i simboli di `n0_dns_resolver`/`netdev` in fase di link iOS.
   - Allineata la formattazione di `connect` in `core/crates/phantom-p2p/src/lib.rs` e fissato il test loopback su `127.0.0.1:<port>` esplicito (`bound_sockets()`).
 
+- Fix crash iOS `SIGABRT` su `2562dd7` (e test `phantom-p2p`):
+  - Il crash log su iPhone (`CrashLog`) ha mostrato `tokio::runtime::scheduler::Handle::current` chiamato da `P2pEndpoint::drop`: `tokio::time::timeout(...)` veniva valutato prima di entrare in `self.runtime.block_on(...)`.
+  - Avvolti `Drop for P2pEndpoint` e `network_change` in `self.runtime.block_on(async { ... })` e aggiunto `self.runtime.enter()` in `P2pLink::close` e `Drop for P2pLink`.
+
 ## Prossimo passo
 
-Modifiche locali pronte su `fea4038` (da committare e pushare dall'utente su `origin/main`):
-- `ios/project.yml`, `ios/PhantomF0/VideoDecoderSupport.swift`
+Modifiche locali pronte su `2562dd7` (da committare e pushare dall'utente su `origin/main`):
 - `core/crates/phantom-p2p/src/lib.rs`
 - `HANDOFF.md`, `PROGRESS.md`
 
-Dopo il push, verificare che `Core · Rust`, `iOS · Phantom F0` e `Android · Phantom Host APK` siano tutti verdi, aggiornare APK e IPA da `f0-latest`, riscansionare il QR una volta e provare lo switch Wi-Fi ↔ 5G/4G!
+Con la cache `iroh` ormai calda, tutte e 3 le build (`Core · Rust`, `iOS · Phantom F0`, `Android · Phantom Host APK`) saranno rapide e verdi; poi aggiornare APK + IPA da `f0-latest` e provare lo switch Wi-Fi ↔ 5G/4G!

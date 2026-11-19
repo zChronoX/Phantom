@@ -170,13 +170,15 @@ impl P2pEndpoint {
 
     /// Notifica a `iroh` un cambio di interfaccia di rete (es. passaggio Wi-Fi ↔ 5G/4G) per migrare i percorsi.
     pub fn network_change(&self) {
-        self.runtime.block_on(self.endpoint.network_change());
+        self.runtime.block_on(async { self.endpoint.network_change().await });
     }
 }
 
 impl Drop for P2pEndpoint {
     fn drop(&mut self) {
-        let _ = self.runtime.block_on(tokio::time::timeout(Duration::from_millis(400), self.endpoint.close()));
+        self.runtime.block_on(async {
+            let _ = tokio::time::timeout(Duration::from_millis(400), self.endpoint.close()).await;
+        });
     }
 }
 
@@ -222,6 +224,7 @@ impl P2pLink {
 
     /// Chiude la connessione con codice e motivo applicativo.
     pub fn close(&self, code: u32, reason: &[u8]) {
+        let _guard = self.runtime.enter();
         self.connection.close(VarInt::from_u32(code), reason);
     }
 
@@ -233,6 +236,7 @@ impl P2pLink {
 
 impl Drop for P2pLink {
     fn drop(&mut self) {
+        let _guard = self.runtime.enter();
         self.connection.close(VarInt::from_u32(0), b"");
     }
 }

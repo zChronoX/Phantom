@@ -1,7 +1,7 @@
 # Handoff
 
 Scritto: 2026-11-19 da Particle-1 (Kilo); aggiornato dopo la creazione della nuova app host Android (`android/app/`).
-Branch: main - Commit locale: `fea4038` (allineato a `origin/main`) + fix CI linker iOS (`SystemConfiguration`/`resolv`), `rustfmt` e loopback IPv4 in `phantom-p2p`
+Branch: main - Commit locale: `2562dd7` (allineato a `origin/main`) + fix `Drop for P2pEndpoint` (`tokio::time::timeout` dentro `async {}`)
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -136,6 +136,7 @@ Otto task della sessione precedente più T9 e T10 chiusi e verificati in Docker
   Rust 1.85 o l'edizione 2024.
 - Togliere `CC`/`AR`/`RANLIB` dell'NDK dal job `cross` Android: `ring` compila C
   anche con `cargo check`.
+- Passare `tokio::time::timeout(...)` direttamente a `runtime.block_on(...)` senza `async { ... }`: `timeout()` chiama `Handle::current()` prima che `block_on` entri nel runtime Tokio e va in panico (`SIGABRT` su iOS/Android). Avvolgere sempre in `runtime.block_on(async { tokio::time::timeout(...).await })`.
 - Passare `-Djava.library.path=<libDir>` ad `app_process64`: sovrascrive `/system/lib64` e rompe le librerie JNI di sistema come `Conscrypt`/`NativeCrypto` (usato da `SecureRandom`). Caricare invece `libjnidispatch.so`/`libphantom_ffi.so` via `System.load(path)` + `-Djna.*` e preservare `/system/lib64:/vendor/lib64` in `LD_LIBRARY_PATH`.
 - Usare un campo chiamato `message` nelle varianti di un enum `#[derive(uniffi::Error)]` in Rust: nel binding Kotlin generato da UniFFI collide con `Throwable.message` (`Conflicting declarations: val message: String`). Usare nomi come `detail`.
 - Mandare video, ping, tocco, tastiera o statistiche prima dell'apertura: il
@@ -176,7 +177,5 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- `ios/project.yml`: aggiunti `-lresolv -framework SystemConfiguration -framework Security -framework Network` a `OTHER_LDFLAGS` per risolvere i simboli Apple di `iroh` (`n0_dns_resolver` / `netdev`) in fase di link su iOS.
-- `ios/PhantomF0/VideoDecoderSupport.swift`: eliminato warning `result of call to 'withUnsafeBytes(of:_:)' is unused`.
-- `core/crates/phantom-p2p/src/lib.rs`: allineata la riga `let id =` a `cargo fmt --check` e usato `127.0.0.1:<port>` esplicito (`bound_sockets()` + `EndpointAddr::from(...).with_ip_addr(...)`) nel test `minimal_p2p_loopback_exchanges_datagrams` per renderlo deterministico anche su macOS CI.
+- `core/crates/phantom-p2p/src/lib.rs`: spostati `tokio::time::timeout` (in `Drop for P2pEndpoint`) e `self.endpoint.network_change()` dentro blocchi `async { ... }` in `runtime.block_on(...)` e aggiunto `let _guard = self.runtime.enter()` in `P2pLink::close` / `Drop for P2pLink` per evitare il panico `Handle::current()` («there is no reactor running») su iOS/Android/test.
 - `HANDOFF.md`, `PROGRESS.md`: aggiornati.
