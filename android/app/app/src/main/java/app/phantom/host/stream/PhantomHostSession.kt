@@ -13,10 +13,11 @@ import uniffi.phantom_ffi.QuicTransportException
 import uniffi.phantom_ffi.TouchState
 import uniffi.phantom_ffi.defaultSessionSettings
 import uniffi.phantom_ffi.videoPayloadForDatagram
-import java.security.SecureRandom
+import java.io.FileInputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
+import kotlin.random.Random
 
 fun interface SurfaceCaptureFactory {
     fun attachSurface(surface: Surface, width: Int, height: Int): AutoCloseable
@@ -51,7 +52,23 @@ class PhantomHostSession(
 ) {
     private val running = AtomicBoolean(false)
     private val activeConnection = AtomicReference<QuicConnection?>(null)
-    private val rng = SecureRandom()
+
+    private fun randomNonce16(): ByteArray {
+        val out = ByteArray(16)
+        try {
+            FileInputStream("/dev/urandom").use { stream ->
+                var off = 0
+                while (off < out.size) {
+                    val n = stream.read(out, off, out.size - off)
+                    if (n <= 0) break
+                    off += n
+                }
+                if (off == out.size) return out
+            }
+        } catch (_: Throwable) {
+        }
+        return Random.nextBytes(16)
+    }
 
     fun runBlocking() {
         if (!running.compareAndSet(false, true)) return
@@ -141,7 +158,7 @@ class PhantomHostSession(
             encoder = enc
 
             val maxDgram = conn.maxDatagramSize() ?: 1162u
-            val nonce = ByteArray(16).also { rng.nextBytes(it) }
+            val nonce = randomNonce16()
             val settings = defaults.copy(
                 codec = enc.actualCodec,
                 nonce = nonce,
@@ -279,7 +296,8 @@ class PhantomHostSession(
             recvThread.join(500)
         } catch (t: Throwable) {
             if (running.get()) {
-                onLog("Errore sessione client: ${t.message}")
+                val cause = t.cause?.let { " (causa: ${it.javaClass.simpleName}: ${it.message})" }.orEmpty()
+                onLog("Errore sessione client: ${t.javaClass.simpleName}: ${t.message}$cause")
             }
         } finally {
             try {

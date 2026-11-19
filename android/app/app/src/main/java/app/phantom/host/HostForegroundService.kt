@@ -167,10 +167,9 @@ class HostForegroundService : Service() {
                 if (ifacesSummary.isNotBlank()) {
                     HostStateStore.addLog("Interfacce IPv4: $ifacesSummary")
                 }
-                val cmd = "export CLASSPATH=${shellQuote(apkPath)} LD_LIBRARY_PATH=${shellQuote(libDir)}; " +
+                val cmd = "export CLASSPATH=${shellQuote(apkPath)} LD_LIBRARY_PATH=${shellQuote(libDir)}:/system/lib64:/vendor/lib64; " +
                     "APP_PROC=/system/bin/app_process64; [ -x \"\$APP_PROC\" ] || APP_PROC=app_process; " +
                     "exec \"\$APP_PROC\" " +
-                    "-Djava.library.path=${shellQuote(libDir)} " +
                     "-Djna.library.path=${shellQuote(libDir)} " +
                     "-Djna.boot.library.path=${shellQuote(libDir)} " +
                     "-Djna.nounpack=true " +

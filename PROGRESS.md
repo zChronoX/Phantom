@@ -1,6 +1,6 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `72cf2df` (allineato a `origin/main`) più fix locale per `RootHostMain` (preload `.so`, stacktrace completo nel log, lista interfacce IPv4 e priorità IP LAN).
+Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `dbb6c13` (allineato a `origin/main`) più fix locale per `app_process64` (`java.library.path` + `/dev/urandom` invece di `SecureRandom`/Conscrypt).
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Dove siamo
@@ -292,11 +292,15 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
   - **Modalità Root (`app_process64`)**: `RootDisplayCapture` (`1080×1920`) e `RootInputInjector` (`true`) partiti, seguiti da eccezione non catturata in `RootHostMain` (loggata solo su logcat da `RuntimeInit$KillApplicationHandler`).
   - Fix applicato in locale: preload esplicito di `libjnidispatch.so` e `libphantom_ffi.so` da `libDir` in `RootHostMain`, `UncaughtExceptionHandler` + `try/catch` con stacktrace nel log UI, log di tutte le interfacce IPv4 attive e declassamento di `172.16.1.*` quando esiste un IP LAN reale.
 
+- Primo streaming reale Android ↔ iPhone verificato (`192.168.1.128:47800`, RTT 6,7 ms, video `1088×1920 @ 60 fps H.264`, 407 tocchi e 4 tasti ricevuti in tempo reale in modalità Standard su LDPlayer con Network Bridging attivo).
+- Diagnostica `dbb6c13` in modalità Root: il preload di `libjnidispatch.so` e `libphantom_ffi.so` è riuscito senza errori, ma `-Djava.library.path=<libDir>` sovrascriveva `/system/lib64`, facendo fallire `com.android.org.conscrypt.NativeCrypto.get_cipher_names` all'inizializzazione di `SecureRandom()`.
+- Fix locale: rimosso `-Djava.library.path` dal comando `app_process64` (mantenendo `/system/lib64:/vendor/lib64` in `LD_LIBRARY_PATH`) e sostituito `SecureRandom` in `PhantomHostSession` con `/dev/urandom`.
+
 ## Prossimo passo
 
-Modifiche locali pronte su `72cf2df` (da committare e pushare dall'utente su `origin/main`):
-- `android/app/app/src/main/java/app/phantom/host/{root/RootHostMain,HostForegroundService,core/AnnexBFramePrep,stream/PhantomHostSession,MainActivity}.kt`
-- `android/app/app/src/test/java/app/phantom/host/core/AnnexBFramePrepTest.kt`
+Modifiche locali pronte su `dbb6c13` (da committare e pushare dall'utente su `origin/main`):
+- `android/app/app/src/main/java/app/phantom/host/HostForegroundService.kt`
+- `android/app/app/src/main/java/app/phantom/host/stream/PhantomHostSession.kt`
 - `HANDOFF.md`, `PROGRESS.md`
 
-Intanto è già possibile provare l'APK attuale (`72cf2df`) sul **Redmi Note 11 Pro 5G** in modalità **Standard senza root** (stesso Wi-Fi dell'iPhone, nessun bridge PC necessario) oppure su LDPlayer dopo aver verificato che il Network Bridging assegni un IP nella stessa sottorete dell'iPhone.
+Dopo il push, scaricare il nuovo `PhantomHost-debug.apk` da `f0-latest` e riprovare la modalità **Root (cattura + tocco/tastiera)** su LDPlayer verso l'iPhone.

@@ -1,7 +1,7 @@
 # Handoff
 
 Scritto: 2026-11-19 da Particle-1 (Kilo); aggiornato dopo la creazione della nuova app host Android (`android/app/`).
-Branch: main - Commit locale: `72cf2df` (allineato a `origin/main`) + fix locale per preload `.so`/stacktrace in `RootHostMain` e diagnostica IPv4 LAN
+Branch: main - Commit locale: `dbb6c13` (allineato a `origin/main`) + fix locale `app_process64` (`java.library.path` + `/dev/urandom` al posto di `SecureRandom`/Conscrypt)
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -136,6 +136,7 @@ Otto task della sessione precedente più T9 e T10 chiusi e verificati in Docker
   Rust 1.85 o l'edizione 2024.
 - Togliere `CC`/`AR`/`RANLIB` dell'NDK dal job `cross` Android: `ring` compila C
   anche con `cargo check`.
+- Passare `-Djava.library.path=<libDir>` ad `app_process64`: sovrascrive `/system/lib64` e rompe le librerie JNI di sistema come `Conscrypt`/`NativeCrypto` (usato da `SecureRandom`). Caricare invece `libjnidispatch.so`/`libphantom_ffi.so` via `System.load(path)` + `-Djna.*` e preservare `/system/lib64:/vendor/lib64` in `LD_LIBRARY_PATH`.
 - Usare un campo chiamato `message` nelle varianti di un enum `#[derive(uniffi::Error)]` in Rust: nel binding Kotlin generato da UniFFI collide con `Throwable.message` (`Conflicting declarations: val message: String`). Usare nomi come `detail`.
 - Mandare video, ping, tocco, tastiera o statistiche prima dell'apertura: il
   core ora le scarta (cancello T10). L'host deve aspettare `negotiated()` e il
@@ -175,8 +176,6 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- `android/app/app/src/main/java/app/phantom/host/root/RootHostMain.kt`: preload esplicito di `libjnidispatch.so` e `libphantom_ffi.so` per path assoluto (`System.load` + `System.setProperty` per JNA), `try/catch` globale e `UncaughtExceptionHandler` che stampa lo stacktrace completo nel log UI.
-- `android/app/app/src/main/java/app/phantom/host/HostForegroundService.kt`: passa `libDir` a `RootHostMain` e registra nel log tutte le interfacce IPv4 attive (`iface=ip`).
-- `android/app/app/src/main/java/app/phantom/host/core/AnnexBFramePrep.kt` + `AnnexBFramePrepTest.kt`: tratta anche `172.16.1.*` (rete virtuale LDPlayer) come NAT emulatore da declassare se c'è un IP LAN reale.
-- `android/app/app/src/main/java/app/phantom/host/stream/PhantomHostSession.kt` e `MainActivity.kt`: errori fatali più dettagliati (classe + causa) e fino a 30 righe di log visibili in UI.
+- `android/app/app/src/main/java/app/phantom/host/HostForegroundService.kt`: rimosso `-Djava.library.path` dal lancio di `app_process64` (per non sovrascrivere `/system/lib64`) e preservati `/system/lib64:/vendor/lib64` in `LD_LIBRARY_PATH`.
+- `android/app/app/src/main/java/app/phantom/host/stream/PhantomHostSession.kt`: sostituito `SecureRandom()` (che inizializza Conscrypt JNI) con lettura diretta da `/dev/urandom` per il nonce a 16 byte e aggiunti classe+causa nel log errori sessione client.
 - `HANDOFF.md`, `PROGRESS.md`: aggiornati.
