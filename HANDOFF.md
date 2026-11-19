@@ -1,7 +1,7 @@
 # Handoff
 
-Scritto: 2026-11-18 da Particle-1 (Kilo); aggiornato dopo integrazione QUIC nei binding UniFFI e nuovo client iOS di controllo remoto.
-Branch: main - Commit locale: `62ba082` (avanti di 1 rispetto a `origin/main` `e8070ca`) + modifiche locali non committate
+Scritto: 2026-11-19 da Particle-1 (Kilo); aggiornato dopo il fix di ciclo di vita `QuicConnection`/endpoint QUIC e i miglioramenti UI/feedback del loopback iOS.
+Branch: main - Commit locale: `1a97d97` (allineato a `origin/main`) + modifiche locali non committate
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -71,31 +71,36 @@ Otto task della sessione precedente più T9 e T10 chiusi e verificati in Docker
 
 ## In progress (exact state)
 
-- Il blocco precedente T1–T10 è stato committato dall'utente in `62ba082`
-  (ancora locale, da pushare quando vuole).
-- Esposto `phantom-quic` nei binding UniFFI (`phantom-ffi`), aggiornato
-  `swift-smoke` con prova QUIC loopback reale e aggiunti i flag NDK (`CC`/`AR`/`RANLIB`)
-  a `ffi-android` in `.github/workflows/core.yml`: **verificato** in Docker
-  `rust:1` (`fmt`, `clippy`, `cargo doc -Dwarnings`, `cargo test --workspace --release`)
-  e `swift:5.10` (`OK: 362 frame, 600 stati del tocco, 30 tasti, offset orologi 5000000 µs, bitrate 20 Mbps (QUIC ok)`).
-- Aggiunta la logica pura iOS per controllo remoto (`TouchMapper.swift`,
-  `RemoteInputMap.swift`) e il sesto blocco di test in `ios/Tests/run-tests.sh`
-  (`RemoteInputTests.swift`): **verificato** in Docker `swift:5.10` (6 blocchi su 6,
-  tutti superati).
-- Aggiunta la parte UI/sessione iOS (`VideoDecoderSupport.swift`,
-  `RemoteSession.swift`, `RemoteControlSurface.swift`, `RemoteConnectView.swift`,
-  voce in `ContentView.swift`, orientamenti Portrait+Landscape in `ios/project.yml`):
-  scrittura completata, ma **non ancora passata con `swiftc -parse` né compilata con Xcode**
-  perché Docker Desktop non era più raggiungibile a fine sessione (`npipe:////./pipe/dockerDesktopLinuxEngine`).
+- Il blocco precedente è stato committato e pushato in `1a97d97` (build CI verdi).
+- Nella prima prova su iPhone reale il loopback QUIC mostrava «Sessione chiusa: ancora aperta»
+  con spinner fisso sovrapposto all'HUD: `let clientEp = try QuicClientEndpoint.bind(...)` in
+  `RemoteSession.swift` usciva di scope a fine `runConnect`, e `Drop for ClientEndpoint` in
+  `phantom-quic` chiudeva l'endpoint e tutte le connessioni aperte.
+- Applicati i fix (non ancora committati):
+  - `core/crates/phantom-ffi/src/lib.rs`: `QuicHostEndpoint` e `QuicClientEndpoint` tengono
+    `Arc<HostEndpoint>`/`Arc<ClientEndpoint>` e ogni `QuicConnection` mantiene `_keep_alive`
+    (dichiarato dopo `link`, così `link` droppa sempre prima dell'endpoint/runtime). Aggiunto
+    test `quic_connection_survives_dropping_endpoints`.
+  - `core/crates/phantom-ffi/swift-smoke/main.swift`: aggiunto `runQuicEndpointLifetimeSmoke()`.
+  - `ios/PhantomF0/RemoteSession.swift`: mantenuto `clientEndpoint` in `RemoteSession` fino a
+    `stop()`, usato `127.0.0.1:0` in loopback, separato il messaggio tra chiusura protocollo e
+    chiusura trasporto QUIC, spostato `isIdleTimerDisabled` sul main thread, salvato l'ultimo
+    `TouchState` in `LocalQuicHostRunner` per disegnare i tocchi ricevuti nel frame HEVC
+    sintetico, aggiunto guard `!self.isStopped` + `VTCompressionSessionCompleteFrames`.
+  - `ios/PhantomF0/RemoteControlSurface.swift`: spinner mostrato solo con `session.running`,
+    icona di avviso quando fermo, banner centrato verticalmente senza sovrapposizione all'HUD.
+- **Verifiche locali non eseguite in questa sessione**: Docker Desktop spento
+  (`open //./pipe/dockerDesktopLinuxEngine: Impossibile trovare il file specificato`).
 
 ## Next steps (in order)
 
 1. Eseguire `powershell -NoProfile -ExecutionPolicy Bypass -File tools/repo-preflight.ps1`.
-2. Se Docker Desktop è avviato, verificare sintassi Swift dei file UI (`swiftc -parse`)
-   e/o fare commit + push su `main` per far compilare e produrre l'`.ipa` su Codemagic
-   (`codemagic.yaml` parte sui push che toccano `ios/`).
-3. Provare su iPhone reale la nuova schermata «Controllo remoto (QUIC)» in modalità
-   **loopback QUIC locale** (video HEVC, rotazione, multi-touch 10 dita, tastiera, azioni rapide).
+2. Committare e pushare su `origin/main` (oppure avviare Docker Desktop per eseguire prima in
+   locale i comandi nella sezione «How to verify»), poi scaricare il nuovo `PhantomF0.ipa`
+   dalla release `f0-latest` di GitHub Actions.
+3. Riprovare su iPhone «Controllo remoto → Schermo Android (QUIC) → Avvia in loopback QUIC locale»
+   (verifica video HEVC, barra animata, quadrati gialli/luminosi sui tocchi ricevuti dall'host,
+   rotazione, tastiera e tasti rapidi).
 4. Lato Android: iniziare il server host Kotlin (`app_process`) che usa `PhantomHost`,
    `QuicHostEndpoint` e `MediaCodec`, oppure proseguire con Reed-Solomon / Fase 5.
 5. A fine sessione aggiornare `PROGRESS.md` e questo file.
@@ -185,33 +190,13 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- `core/crates/phantom-ffi/Cargo.toml`: aggiunta dipendenza `phantom-quic`.
-- `core/crates/phantom-ffi/src/lib.rs`: aggiunti `SessionSettings.frag_size`,
-  `video_payload_for_datagram`, `default_quic_server_name`, `QuicTransportError`,
-  `QuicHostEndpoint`, `QuicClientEndpoint`, `QuicConnection` e 3 nuovi test (12 totali).
-- `core/crates/phantom-ffi/swift-smoke/main.swift`: verificati `fragSize`,
-  `videoPayloadForDatagram`, `defaultQuicServerName` e aggiunta prova end-to-end
-  `runQuicLoopbackSmoke()` su loopback UDP/QUIC reale.
-- `.github/workflows/core.yml`: aggiunti `CC`/`AR`/`RANLIB` dell'NDK anche nel job
-  `ffi-android` per la compilazione C di `ring`.
-- `ios/PhantomF0/TouchMapper.swift` (nuovo): `VideoRect` (`aspectFit`, normalizzazione
-  `[0, 65535]`), `TouchTracker` (slot stabili `0..<10`), `EndpointParser`, `CertificateCodec`.
-- `ios/PhantomF0/RemoteInputMap.swift` (nuovo): costanti HID USB `0x07`, `HidKeyEvent`,
-  `RemoteQuickAction` (Back/Home/Recents/Volume/Power) e `HidCharacterMapper`.
-- `ios/PhantomF0/VideoDecoderSupport.swift` (nuovo): `AnnexBSampleBuilder` H.264/HEVC
-  per `AVSampleBufferDisplayLayer`.
-- `ios/PhantomF0/RemoteSession.swift` (nuovo): motore di sessione remota QUIC
-  (`QuicClientEndpoint` + `PhantomClient`), supporto sia connessione reale verso Android
-  sia `localQuicLoopback` con `QuicHostEndpoint` + `PhantomHost` + `VTCompressionSession`.
-- `ios/PhantomF0/RemoteControlSurface.swift` (nuovo): `RemoteDisplayTouchView`
-  full-screen multi-touch + `UIKeyInput` + `pressesBegan`/`Ended`, `GamepadBridge`
-  (`GCController`) e `RemoteSessionView` con HUD collassabile.
-- `ios/PhantomF0/RemoteConnectView.swift` (nuovo): configurazione `IP:porta`,
-  certificato DER fissato, scelta codec e avvio loopback QUIC locale.
-- `ios/PhantomF0/ContentView.swift`: aggiunta sezione «Controllo remoto» con link a
-  `RemoteConnectView` (lasciando intatti i percorsi Fase 0).
-- `ios/project.yml`: aggiunti orientamenti `UIInterfaceOrientationLandscapeLeft` e
-  `UIInterfaceOrientationLandscapeRight`.
-- `ios/Tests/RemoteInputTests.swift` (nuovo) e `ios/Tests/run-tests.sh`: sesto blocco
-  di test puri «controllo remoto (tocco, tastiera e indirizzi)».
+- `core/crates/phantom-ffi/src/lib.rs`: `QuicHostEndpoint`/`QuicClientEndpoint` su `Arc` +
+  `QuicEndpointKeepAlive` in `QuicConnection` (dopo `link`), test `quic_connection_survives_dropping_endpoints`.
+- `core/crates/phantom-ffi/swift-smoke/main.swift`: aggiunto `runQuicEndpointLifetimeSmoke()`.
+- `ios/PhantomF0/RemoteSession.swift`: mantenuto `clientEndpoint` fino a `stop()`, bind
+  `127.0.0.1:0` per loopback, messaggi distinti per chiusura sessione/trasporto, `isIdleTimerDisabled`
+  su main thread, eco visivo dei tocchi ricevuti dall'host nei frame HEVC del loopback e completamento
+  pulito dell'encoder.
+- `ios/PhantomF0/RemoteControlSurface.swift`: spinner solo con `session.running`, icona avviso
+  quando fermo, `connectionBanner` centrato verticalmente senza sovrapporsi all'HUD.
 - `HANDOFF.md`, `PROGRESS.md`: aggiornati a fine sessione.

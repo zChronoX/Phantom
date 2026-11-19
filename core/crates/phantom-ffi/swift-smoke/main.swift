@@ -263,4 +263,50 @@ func runQuicLoopbackSmoke() throws {
 
 try runQuicLoopbackSmoke()
 
+func connectAndDropEndpoints() throws -> (host: QuicConnection, client: QuicConnection) {
+    let hostEndpoint = try QuicHostEndpoint.bind(addr: "127.0.0.1:0")
+    let serverAddr = try hostEndpoint.localAddr()
+    let cert = hostEndpoint.certificateDer()
+    let clientEndpoint = try QuicClientEndpoint.bind(addr: "127.0.0.1:0")
+
+    let sem = DispatchSemaphore(value: 0)
+    var accepted: QuicConnection?
+    DispatchQueue.global().async {
+        defer { sem.signal() }
+        accepted = try? hostEndpoint.accept(timeoutMs: 5_000)
+    }
+
+    let clientConn = try clientEndpoint.connect(
+        addr: serverAddr,
+        serverName: defaultQuicServerName(),
+        pinnedCertificateDer: cert,
+        timeoutMs: 5_000
+    )
+    check(sem.wait(timeout: .now() + 5) == .success, "accept in timeout")
+    guard let hostConn = accepted else { fail("accept fallita") }
+    return (hostConn, clientConn)
+}
+
+func runQuicEndpointLifetimeSmoke() throws {
+    let pair = try connectAndDropEndpoints()
+    Thread.sleep(forTimeInterval: 0.05)
+    check(!pair.host.isClosed(), "connessione host chiusa dopo il drop dell'endpoint")
+    check(!pair.client.isClosed(), "connessione client chiusa dopo il drop dell'endpoint")
+
+    let ping = Data("ping".utf8)
+    try pair.client.sendDatagram(datagram: ping)
+    let gotPing = try pair.host.recvDatagram(maxBytes: 1024, timeoutMs: 1_000)
+    check(gotPing == ping, "datagramma client->host diverso")
+
+    let pong = Data("pong".utf8)
+    try pair.host.sendDatagram(datagram: pong)
+    let gotPong = try pair.client.recvDatagram(maxBytes: 1024, timeoutMs: 1_000)
+    check(gotPong == pong, "datagramma host->client diverso")
+
+    pair.client.close(code: 0, reason: Data())
+    pair.host.close(code: 0, reason: Data())
+}
+
+try runQuicEndpointLifetimeSmoke()
+
 print("OK: \(frames.count) frame, \(touchStates) stati del tocco, \(keyEvents) tasti, offset orologi \(offset) µs, bitrate \(hostCounters.targetBitrateBps / 1_000_000) Mbps (QUIC ok)")

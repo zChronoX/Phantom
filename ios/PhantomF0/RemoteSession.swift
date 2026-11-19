@@ -44,6 +44,7 @@ final class RemoteSession: ObservableObject {
     private var stopRequested = false
 
     private var client: PhantomClient?
+    private var clientEndpoint: QuicClientEndpoint?
     private var connection: QuicConnection?
     private var hostLoopback: LocalQuicHostRunner?
 
@@ -87,8 +88,8 @@ final class RemoteSession: ObservableObject {
             self.metrics = RemoteSessionMetrics()
             self.videoSize = (0, 0)
             self.statusText = "Connessione QUIC in corso…"
+            UIApplication.shared.isIdleTimerDisabled = true
         }
-        UIApplication.shared.isIdleTimerDisabled = true
         CrashLog.mark("RemoteSession: avvio")
 
         ioQueue.async { [weak self] in
@@ -97,24 +98,27 @@ final class RemoteSession: ObservableObject {
     }
 
     func stop() {
-        let (activeClient, activeConn, activeHost): (PhantomClient?, QuicConnection?, LocalQuicHostRunner?) = withLock {
+        let (activeClient, activeConn, activeEp, activeHost): (PhantomClient?, QuicConnection?, QuicClientEndpoint?, LocalQuicHostRunner?) = withLock {
             generation &+= 1
             stopRequested = true
             tickTimer?.cancel()
             tickTimer = nil
             let c = client
             let q = connection
+            let ep = clientEndpoint
             let h = hostLoopback
             client = nil
             connection = nil
+            clientEndpoint = nil
             hostLoopback = nil
-            return (c, q, h)
+            return (c, q, ep, h)
         }
 
         if let c = activeClient, let q = activeConn, let closeDatagram = c.close(reason: 0) {
             try? q.sendDatagram(datagram: closeDatagram)
         }
         activeConn?.close(code: 0, reason: Data())
+        _ = activeEp
         activeHost?.stop()
 
         DispatchQueue.main.async {
@@ -158,6 +162,7 @@ final class RemoteSession: ObservableObject {
         guard isGenerationActive(gen) else { return }
         do {
             let targetAddr: String
+            let bindAddr: String
             let certDer: Data
             let preferredCodec: VideoCodec
             var loopback: LocalQuicHostRunner?
@@ -173,6 +178,7 @@ final class RemoteSession: ObservableObject {
                     return
                 }
                 targetAddr = normalized
+                bindAddr = "0.0.0.0:0"
                 certDer = certificateDer
                 preferredCodec = codec
 
@@ -180,6 +186,7 @@ final class RemoteSession: ObservableObject {
                 let runner = try LocalQuicHostRunner(fps: fps, width: width, height: height)
                 runner.start()
                 targetAddr = runner.address
+                bindAddr = "127.0.0.1:0"
                 certDer = runner.certificateDer
                 preferredCodec = .h265
                 loopback = runner
@@ -190,7 +197,7 @@ final class RemoteSession: ObservableObject {
                 return
             }
 
-            let clientEp = try QuicClientEndpoint.bind(addr: "0.0.0.0:0")
+            let clientEp = try QuicClientEndpoint.bind(addr: bindAddr)
             let conn = try clientEp.connect(
                 addr: targetAddr,
                 serverName: defaultQuicServerName(),
@@ -209,6 +216,7 @@ final class RemoteSession: ObservableObject {
             let installed = withLock { () -> Bool in
                 guard generation == gen && !stopRequested else { return false }
                 self.client = phantomClient
+                self.clientEndpoint = clientEp
                 self.connection = conn
                 self.hostLoopback = loopback
                 return true
@@ -271,9 +279,13 @@ final class RemoteSession: ObservableObject {
     private func onTick(client: PhantomClient, conn: QuicConnection, gen: UInt64) {
         guard isGenerationActive(gen) else { return }
 
-        if client.isClosed() || conn.isClosed() {
+        if client.isClosed() {
             let reasonText = SessionAgreement.closeText(client.closeReason())
             publishError("Sessione chiusa: \(reasonText)")
+            return
+        }
+        if conn.isClosed() {
+            publishError("Connessione QUIC chiusa dal trasporto")
             return
         }
 
@@ -414,6 +426,7 @@ private final class LocalQuicHostRunner {
     private var stopped = false
     private var host: PhantomHost?
     private var link: QuicConnection?
+    private var lastReceivedFingers: [TouchPoint] = []
 
     init(fps: Int, width: Int, height: Int) throws {
         self.fps = fps
@@ -482,8 +495,12 @@ private final class LocalQuicHostRunner {
                     for reply in phantomHost.onDatagram(nowUs: now, data: d) {
                         try? conn.sendDatagram(datagram: reply)
                     }
-                    // Svuota eventi di tastiera e tocco in loopback così i contatori restano coerenti
-                    while phantomHost.takeTouch() != nil {}
+                    // Conserva l'ultimo stato del tocco per disegnarlo nel video di loopback e svuota i tasti
+                    while let touchState = phantomHost.takeTouch() {
+                        self.stopLock.lock()
+                        self.lastReceivedFingers = touchState.fingers
+                        self.stopLock.unlock()
+                    }
                     while phantomHost.takeKey() != nil {}
                 } catch QuicTransportError.Timeout {
                     continue
@@ -571,7 +588,8 @@ private final class LocalQuicHostRunner {
                     duration: duration,
                     frameProperties: props,
                     infoFlagsOut: nil
-                ) { status, _, sample in
+                ) { [weak self] status, _, sample in
+                    guard let self = self, !self.isStopped else { return }
                     guard status == noErr, let sb = sample,
                           let annex = Self.annexB(from: sb) else { return }
                     let key = Self.isKeyFrame(sb)
@@ -587,25 +605,62 @@ private final class LocalQuicHostRunner {
                 usleep(UInt32((frameIntervalNs - elapsedNs) / 1_000))
             }
         }
+        VTCompressionSessionCompleteFrames(encoder, untilPresentationTimeStamp: .invalid)
     }
 
     private func fillSyntheticFrame(_ pb: CVPixelBuffer, index: Int) {
+        stopLock.lock()
+        let fingers = lastReceivedFingers
+        stopLock.unlock()
+
         CVPixelBufferLockBaseAddress(pb, [])
         defer { CVPixelBufferUnlockBaseAddress(pb, []) }
+        let yWidth = CVPixelBufferGetWidthOfPlane(pb, 0)
+        let yHeight = CVPixelBufferGetHeightOfPlane(pb, 0)
+
         if let yBase = CVPixelBufferGetBaseAddressOfPlane(pb, 0) {
-            let h = CVPixelBufferGetHeightOfPlane(pb, 0)
-            let w = CVPixelBufferGetWidthOfPlane(pb, 0)
             let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
-            let barTop = (index * 16) % max(1, h - 80)
-            for row in 0..<h {
-                let luma: Int32 = (row >= barTop && row < barTop + 80) ? 220 : Int32(32 + ((row + index * 2) % 96))
-                memset(yBase + row * stride, luma, w)
+            let barTop = (index * 16) % max(1, yHeight - 80)
+            for row in 0..<yHeight {
+                let luma: Int32 = (row >= barTop && row < barTop + 80) ? 210 : Int32(32 + ((row + index * 2) % 96))
+                memset(yBase + row * stride, luma, yWidth)
+            }
+            for finger in fingers {
+                let cx = Int((Double(finger.x) / 65535.0) * Double(max(0, yWidth - 1)))
+                let cy = Int((Double(finger.y) / 65535.0) * Double(max(0, yHeight - 1)))
+                let x0 = max(0, cx - 24)
+                let x1 = min(yWidth, cx + 24)
+                let y0 = max(0, cy - 24)
+                let y1 = min(yHeight, cy + 24)
+                if x1 > x0 {
+                    for row in y0..<y1 {
+                        memset(yBase + row * stride + x0, 245, x1 - x0)
+                    }
+                }
             }
         }
         if let uvBase = CVPixelBufferGetBaseAddressOfPlane(pb, 1) {
-            let h = CVPixelBufferGetHeightOfPlane(pb, 1)
+            let uvH = CVPixelBufferGetHeightOfPlane(pb, 1)
+            let uvW = CVPixelBufferGetWidthOfPlane(pb, 1)
             let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
-            memset(uvBase, Int32(96 + (index % 64)), h * stride)
+            memset(uvBase, Int32(96 + (index % 64)), uvH * stride)
+
+            let uvBytes = uvBase.assumingMemoryBound(to: UInt8.self)
+            for finger in fingers {
+                let cx = Int((Double(finger.x) / 65535.0) * Double(max(0, yWidth - 1)))
+                let cy = Int((Double(finger.y) / 65535.0) * Double(max(0, yHeight - 1)))
+                let ux0 = max(0, (cx - 24) / 2)
+                let ux1 = min(uvW, (cx + 24 + 1) / 2)
+                let uy0 = max(0, (cy - 24) / 2)
+                let uy1 = min(uvH, (cy + 24 + 1) / 2)
+                for row in uy0..<uy1 {
+                    for col in ux0..<ux1 {
+                        let offset = row * stride + col * 2
+                        uvBytes[offset] = 40
+                        uvBytes[offset + 1] = 220
+                    }
+                }
+            }
         }
     }
 

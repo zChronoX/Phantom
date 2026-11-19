@@ -1,6 +1,6 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-18. Branch `main`, commit locale `62ba082` (avanti di 1 su `origin/main` `e8070ca`) più modifiche locali non committate per QUIC nei binding UniFFI e controllo remoto iOS (vedi `HANDOFF.md`).
+Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `1a97d97` (allineato a `origin/main`) più modifiche locali non committate per il keep-alive `QuicConnection`/endpoint e i fix del loopback iOS (vedi `HANDOFF.md`).
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Dove siamo
@@ -131,7 +131,30 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
   `RemoteControlSurface.swift` (superficie full-screen multi-touch, tastiera software/fisica,
   `GCController`, HUD collassabile), `RemoteConnectView.swift`, link in `ContentView.swift`
   e supporto Portrait/Landscape in `ios/project.yml`. `ios/Tests/run-tests.sh`
-  (6 blocchi) verde in Docker `swift:5.10`; i file UIKit/SwiftUI attendono `swiftc -parse`/Codemagic.
+  (6 blocchi) verde in Docker `swift:5.10`; committato e pushato in `1a97d97` con
+  tutti i workflow CI verdi.
+
+## Sessione 2026-11-19
+
+- Prova su iPhone reale del build `1a97d97`: il loopback QUIC si fermava subito con
+  «Sessione chiusa: ancora aperta» e spinner sovrapposto all'HUD.
+- Causa individuata: `let clientEp` in `RemoteSession.runConnect` usciva di scope a fine
+  funzione e `Drop for ClientEndpoint` chiudeva l'endpoint e tutte le connessioni attive;
+  `onTick` usava `SessionAgreement.closeText(client.closeReason())` anche per una chiusura
+  del solo trasporto QUIC.
+- Fix applicati:
+  - `phantom-ffi`: `QuicHostEndpoint` e `QuicClientEndpoint` usano `Arc`, e `QuicConnection`
+    conserva `_keep_alive: QuicEndpointKeepAlive` dichiarato dopo `link` (quindi `link`
+    droppa prima dell'endpoint/runtime). Nuovo test `quic_connection_survives_dropping_endpoints`
+    e prova Swift `runQuicEndpointLifetimeSmoke()`.
+  - `RemoteSession.swift`: mantenuto `clientEndpoint` fino a `stop()`, bind `127.0.0.1:0` in
+    loopback, messaggi distinti per chiusura sessione vs trasporto QUIC, `isIdleTimerDisabled`
+    sul main thread, eco visivo dei tocchi ricevuti dall'host nei frame HEVC del loopback e
+    `VTCompressionSessionCompleteFrames` a chiusura.
+  - `RemoteControlSurface.swift`: spinner mostrato solo con `session.running`, icona avviso
+    quando fermo, banner centrato verticalmente senza sovrapposizione all'HUD.
+- Nota: Docker Desktop spento in questa sessione, quindi le verifiche Docker vanno eseguite
+  dopo il riavvio di Docker o tramite GitHub Actions al push.
 
 ## Decisioni
 
@@ -232,16 +255,13 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Prossimo passo
 
-Modifiche locali pronte (da committare dall'utente quando vuole e pushare per
-far girare Codemagic su `ios/`):
-- `core/crates/phantom-ffi/{Cargo.toml,src/lib.rs,swift-smoke/main.swift}`
-- `.github/workflows/core.yml`
-- `ios/PhantomF0/{TouchMapper.swift,RemoteInputMap.swift,VideoDecoderSupport.swift,RemoteSession.swift,RemoteControlSurface.swift,RemoteConnectView.swift,ContentView.swift}`
-- `ios/project.yml`
-- `ios/Tests/{RemoteInputTests.swift,run-tests.sh}`
+Modifiche locali pronte (da committare e pushare dall'utente su `origin/main` per
+eseguire le verifiche CI e generare il nuovo `PhantomF0.ipa`):
+- `core/crates/phantom-ffi/{src/lib.rs,swift-smoke/main.swift}`
+- `ios/PhantomF0/{RemoteSession.swift,RemoteControlSurface.swift}`
 - `HANDOFF.md`, `PROGRESS.md`
 
-Quando Codemagic avrà generato `PhantomF0.ipa`, provare su iPhone la sezione
-«Controllo remoto -> Schermo Android (QUIC) -> Avvia in loopback QUIC locale».
-Poi si può iniziare il server host Kotlin su Android oppure aggiungere
-Reed-Solomon / controllo di congestione / Fase 5 nel core.
+Dopo il push, scaricare `PhantomF0.ipa` dalla release `f0-latest` di GitHub Actions
+e riprovare su iPhone «Controllo remoto → Schermo Android (QUIC) → Avvia in loopback QUIC locale».
+Poi si può iniziare il server host Kotlin su Android oppure aggiungere Reed-Solomon /
+controllo di congestione / Fase 5 nel core.

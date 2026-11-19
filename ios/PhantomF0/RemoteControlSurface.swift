@@ -291,7 +291,11 @@ struct RemoteSessionView: View {
             .ignoresSafeArea()
 
             if !session.metrics.connected {
-                connectionBanner
+                VStack {
+                    Spacer()
+                    connectionBanner
+                    Spacer()
+                }
             }
 
             if hudHidden {
@@ -338,8 +342,14 @@ struct RemoteSessionView: View {
 
     private var connectionBanner: some View {
         VStack(spacing: 10) {
-            ProgressView()
-                .tint(.white)
+            if session.running {
+                ProgressView()
+                    .tint(.white)
+            } else {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.orange)
+            }
             Text(session.statusText)
                 .font(.footnote)
                 .foregroundStyle(.white)
@@ -351,7 +361,6 @@ struct RemoteSessionView: View {
         }
         .padding(16)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .padding(.top, 90)
         .padding(.horizontal, 24)
     }
 

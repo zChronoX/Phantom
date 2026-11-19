@@ -619,10 +619,17 @@ fn parse_socket_addr(addr: &str) -> Result<SocketAddr, QuicTransportError> {
     addr.parse::<SocketAddr>().map_err(|e| QuicTransportError::InvalidAddress { message: e.to_string() })
 }
 
+/// Mantiene vivo l'endpoint (e il suo socket UDP) finché esiste almeno una [`QuicConnection`] aperta.
+#[allow(dead_code)]
+enum QuicEndpointKeepAlive {
+    Host(Arc<HostEndpoint>),
+    Client(Arc<ClientEndpoint>),
+}
+
 /// Endpoint QUIC lato host (server): genera un certificato autofirmato effimero e accetta una connessione.
 #[derive(uniffi::Object)]
 pub struct QuicHostEndpoint {
-    inner: HostEndpoint,
+    inner: Arc<HostEndpoint>,
 }
 
 #[uniffi::export]
@@ -631,7 +638,7 @@ impl QuicHostEndpoint {
     #[uniffi::constructor]
     pub fn bind(addr: String) -> Result<Arc<Self>, QuicTransportError> {
         let addr = parse_socket_addr(&addr)?;
-        let inner = HostEndpoint::bind(addr)?;
+        let inner = Arc::new(HostEndpoint::bind(addr)?);
         Ok(Arc::new(Self { inner }))
     }
 
@@ -648,14 +655,15 @@ impl QuicHostEndpoint {
     /// Aspetta una connessione in ingresso e completa il handshake entro `timeout_ms` millisecondi.
     pub fn accept(&self, timeout_ms: u64) -> Result<Arc<QuicConnection>, QuicTransportError> {
         let link = self.inner.accept(Duration::from_millis(timeout_ms))?;
-        Ok(Arc::new(QuicConnection { link }))
+        let keep_alive = QuicEndpointKeepAlive::Host(Arc::clone(&self.inner));
+        Ok(Arc::new(QuicConnection { link, _keep_alive: keep_alive }))
     }
 }
 
 /// Endpoint QUIC lato client: apre il socket locale e si collega all'host fissando il certificato.
 #[derive(uniffi::Object)]
 pub struct QuicClientEndpoint {
-    inner: ClientEndpoint,
+    inner: Arc<ClientEndpoint>,
 }
 
 #[uniffi::export]
@@ -664,7 +672,7 @@ impl QuicClientEndpoint {
     #[uniffi::constructor]
     pub fn bind(addr: String) -> Result<Arc<Self>, QuicTransportError> {
         let addr = parse_socket_addr(&addr)?;
-        let inner = ClientEndpoint::bind(addr)?;
+        let inner = Arc::new(ClientEndpoint::bind(addr)?);
         Ok(Arc::new(Self { inner }))
     }
 
@@ -679,7 +687,8 @@ impl QuicClientEndpoint {
         let addr = parse_socket_addr(&addr)?;
         let link =
             self.inner.connect(addr, &server_name, &pinned_certificate_der, Duration::from_millis(timeout_ms))?;
-        Ok(Arc::new(QuicConnection { link }))
+        let keep_alive = QuicEndpointKeepAlive::Client(Arc::clone(&self.inner));
+        Ok(Arc::new(QuicConnection { link, _keep_alive: keep_alive }))
     }
 }
 
@@ -688,7 +697,10 @@ impl QuicClientEndpoint {
 /// Invio e ricezione possono avvenire in contemporanea da thread diversi senza bloccarsi a vicenda.
 #[derive(uniffi::Object)]
 pub struct QuicConnection {
+    // `link` deve stare prima di `_keep_alive`: Rust droppa i campi in ordine di dichiarazione, quindi la connessione
+    // si chiude prima dell'endpoint/runtime che la ospita.
     link: QuicLink,
+    _keep_alive: QuicEndpointKeepAlive,
 }
 
 #[uniffi::export]
@@ -1051,5 +1063,40 @@ mod tests {
         assert_eq!(taken_key.map(|k| (k.code, k.down)), Some((30, true)));
         assert!(!frames.is_empty(), "almeno un frame ricevuto su QUIC");
         assert_eq!(frames[0].data.len(), 8_000);
+    }
+
+    #[test]
+    fn quic_connection_survives_dropping_endpoints() {
+        let host_ep = QuicHostEndpoint::bind("127.0.0.1:0".to_owned()).expect("bind host");
+        let addr = host_ep.local_addr().expect("addr");
+        let cert = host_ep.certificate_der();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let accept_thread = std::thread::spawn(move || {
+            let link = host_ep.accept(5_000).expect("accept");
+            drop(host_ep);
+            tx.send(link).expect("send host link");
+        });
+
+        let client_ep = QuicClientEndpoint::bind("127.0.0.1:0".to_owned()).expect("bind client");
+        let client_link = client_ep.connect(addr, default_quic_server_name(), cert, 5_000).expect("connect");
+        drop(client_ep);
+
+        let host_link = rx.recv_timeout(Duration::from_secs(5)).expect("host link");
+        accept_thread.join().expect("thread accept");
+
+        // Diamo tempo all'eventuale frame di chiusura (se l'endpoint fosse caduto) di arrivare.
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!host_link.is_closed(), "il link host deve restare aperto dopo drop(host_ep)");
+        assert!(!client_link.is_closed(), "il link client deve restare aperto dopo drop(client_ep)");
+
+        client_link.send_datagram(b"ping".to_vec()).expect("send client->host");
+        assert_eq!(host_link.recv_datagram(1024, 1_000).expect("recv host"), b"ping");
+
+        host_link.send_datagram(b"pong".to_vec()).expect("send host->client");
+        assert_eq!(client_link.recv_datagram(1024, 1_000).expect("recv client"), b"pong");
+
+        client_link.close(0, Vec::new());
+        host_link.close(0, Vec::new());
     }
 }
