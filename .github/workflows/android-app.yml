@@ -1,4 +1,4 @@
-# App host Android Kotlin (APK leggera per arm64, con binding UniFFI dal core Rust).
+# App host Android Kotlin (APK leggera per arm64-v8a e x86_64, con binding UniFFI dal core Rust).
 name: Android · Phantom Host APK
 
 on:
@@ -27,10 +27,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Toolchain Rust e bersaglio Android
+      - name: Toolchain Rust e bersagli Android (arm64 + x86_64)
         run: |
           rustup show
-          rustup target add aarch64-linux-android
+          rustup target add aarch64-linux-android x86_64-linux-android
         working-directory: core
 
       - uses: Swatinem/rust-cache@v2
@@ -38,7 +38,7 @@ jobs:
           workspaces: core
           key: android-host-apk
 
-      - name: Genera binding Kotlin e libphantom_ffi.so (arm64)
+      - name: Genera binding Kotlin e libphantom_ffi.so (arm64-v8a + x86_64)
         working-directory: core
         run: |
           cargo build -p phantom-ffi --release
@@ -48,14 +48,22 @@ jobs:
             --out-dir ../android/app/app/src/main/java
 
           NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android26-clang"
           export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android26-clang"
           export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
           export RANLIB_aarch64_linux_android="$NDK_BIN/llvm-ranlib"
           cargo rustc -p phantom-ffi --release --target aarch64-linux-android --crate-type cdylib
 
-          mkdir -p ../android/app/app/src/main/jniLibs/arm64-v8a
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$NDK_BIN/x86_64-linux-android26-clang"
+          export CC_x86_64_linux_android="$NDK_BIN/x86_64-linux-android26-clang"
+          export AR_x86_64_linux_android="$NDK_BIN/llvm-ar"
+          export RANLIB_x86_64_linux_android="$NDK_BIN/llvm-ranlib"
+          cargo rustc -p phantom-ffi --release --target x86_64-linux-android --crate-type cdylib
+
+          mkdir -p ../android/app/app/src/main/jniLibs/arm64-v8a ../android/app/app/src/main/jniLibs/x86_64
           cp target/aarch64-linux-android/release/libphantom_ffi.so ../android/app/app/src/main/jniLibs/arm64-v8a/
+          cp target/x86_64-linux-android/release/libphantom_ffi.so ../android/app/app/src/main/jniLibs/x86_64/
 
       - uses: actions/setup-java@v4
         with:

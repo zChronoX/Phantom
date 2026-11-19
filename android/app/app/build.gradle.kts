@@ -9,13 +9,13 @@ android {
 
     defaultConfig {
         applicationId = "app.phantom.host"
-        minSdk = 29
+        minSdk = 26
         targetSdk = 34
         versionCode = System.getenv("BUILD_NUMBER")?.toIntOrNull() ?: 1
         versionName = "0.6.0"
 
         ndk {
-            abiFilters += "arm64-v8a"
+            abiFilters += listOf("arm64-v8a", "x86_64")
         }
     }
 

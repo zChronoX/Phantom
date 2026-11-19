@@ -71,5 +71,31 @@ object HostFormatHelpers {
         return sb.toString()
     }
 
+    /**
+     * Sceglie l'IPv4 LAN migliore tra le interfacce attive: preferisce Wi-Fi (`wlan*`) ed Ethernet/bridge
+     * (`eth*`/`en*`/`br*`, es. LDPlayer in bridge) ed evita NAT interni degli emulatori (`10.0.2.*`) e link-local.
+     */
+    fun selectPreferredLanIpv4(candidates: List<Pair<String, String>>): String {
+        if (candidates.isEmpty()) return ""
+        return candidates.minByOrNull { (iface, ip) -> lanCandidateScore(iface, ip) }?.second.orEmpty()
+    }
+
+    private fun lanCandidateScore(iface: String, ip: String): Int {
+        val lower = iface.lowercase()
+        val isLinkLocal = ip.startsWith("169.254.")
+        val isEmulatorNat = ip.startsWith("10.0.2.")
+        val isWifi = lower.startsWith("wlan")
+        val isEthernet = lower.startsWith("eth") || lower.startsWith("en") || lower.startsWith("br")
+        val isCellular = lower.startsWith("rmnet") || lower.startsWith("ccmni") || lower.startsWith("pdp")
+        return when {
+            isWifi && !isLinkLocal && !isEmulatorNat -> 0
+            isEthernet && !isLinkLocal && !isEmulatorNat -> 1
+            !isCellular && !isLinkLocal && !isEmulatorNat -> 2
+            !isLinkLocal && !isEmulatorNat -> 3
+            isEmulatorNat -> 4
+            else -> 5
+        }
+    }
+
     private const val HEX_CHARS = "0123456789abcdef"
 }

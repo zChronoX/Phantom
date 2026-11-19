@@ -18,7 +18,8 @@ Dopo il guasto fisico del display del POCO F4 GT, lo sviluppo prosegue su **Redm
 - **Doppia modalità di cattura on-demand**:
   - **Root (`su` → `app_process`)**: quando l'utente preme *Avvia Host*, `HostForegroundService` lancia `app_process` dallo stesso APK (`CLASSPATH = sourceDir`, `java.library.path` e `jna.boot.library.path` su `nativeLibraryDir` con `extractNativeLibs="true"`). Esegue `RootHostMain` finché resta attivo il servizio e si ferma pulito sullo *Stop* (anche dalla notifica persistente). Offre cattura schermo senza popup e iniezione reale multi-touch/tastiera.
   - **MediaProjection (senza root)**: fallback sicuro tramite consenso di sistema per testare video + QUIC anche senza privilegi `su` (solo video, nessun input iniettato).
-- **Profilo predefinito e sicurezza `MediaCodec`**: default **1080p · 120 fps** (con scelte rapide 1080p/60 e 720p/60), parametri `MediaCodec` neutri senza flag real-time aggressivi e fallback automatico 120 → 60 fps e HEVC → H.264 se l'encoder hardware li rifiuta.
+- **Profilo predefinito e sicurezza `MediaCodec`**: default **1080p · 120 fps** (con scelte rapide 1080p/60 e 720p/60), parametri `MediaCodec` neutri senza flag real-time aggressivi e fallback automatico 120 → 60 fps, HEVC → H.264 e H.264/30 senza VBR esplicito per massima compatibilità anche su emulatori (es. LDPlayer).
+- **ABI e compatibilità**: l'APK integra `arm64-v8a` (Redmi Note 11 Pro 5G e telefoni moderni) e `x86_64` (emulatori PC come LDPlayer 9) con `minSdk = 26` (Android 8.0+), permettendo test end-to-end completi in modalità Root su LDPlayer con Network Bridging prima dello sblocco del bootloader sul Redmi.
 - **Protezione termica attiva (`ThermalGuard`)**: controllo continuo di temperatura batteria e `PowerManager.currentThermalStatus`, con riduzione graduale del bitrate sopra i 41 °C / 44 °C e arresto automatico di sicurezza a ≥ 47 °C o stato termico `CRITICAL`.
 
 ## Conseguenze

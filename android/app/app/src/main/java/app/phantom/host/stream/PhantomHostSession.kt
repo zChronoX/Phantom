@@ -47,9 +47,9 @@ class PhantomHostSession(
     private val onStats: (HostLiveStats) -> Unit,
     private val onLog: (String) -> Unit,
     private val onThermalStop: () -> Unit,
+    private val onClientDisconnected: () -> Unit = {},
 ) {
     private val running = AtomicBoolean(false)
-    private val activeEndpoint = AtomicReference<QuicHostEndpoint?>(null)
     private val activeConnection = AtomicReference<QuicConnection?>(null)
     private val rng = SecureRandom()
 
@@ -58,7 +58,6 @@ class PhantomHostSession(
         var endpoint: QuicHostEndpoint? = null
         try {
             endpoint = QuicHostEndpoint.bind("0.0.0.0:${config.port}")
-            activeEndpoint.set(endpoint)
             val localPort = endpoint.localAddr().substringAfterLast(':').toIntOrNull() ?: config.port
             val certHex = HostFormatHelpers.toHex(endpoint.certificateDer())
             onReady(localPort, certHex)
@@ -90,15 +89,23 @@ class PhantomHostSession(
             }
         } finally {
             running.set(false)
-            activeConnection.getAndSet(null)?.close(0u, ByteArray(0))
-            activeEndpoint.getAndSet(null)?.close()
+            try {
+                activeConnection.getAndSet(null)?.close(0u, ByteArray(0))
+            } catch (_: Throwable) {
+            }
+            try {
+                endpoint?.close()
+            } catch (_: Throwable) {
+            }
         }
     }
 
     fun stop() {
         running.set(false)
-        activeConnection.getAndSet(null)?.close(0u, ByteArray(0))
-        activeEndpoint.getAndSet(null)?.close()
+        try {
+            activeConnection.get()?.close(0u, ByteArray(0))
+        } catch (_: Throwable) {
+        }
     }
 
     private fun serveClient(conn: QuicConnection) {
@@ -291,8 +298,23 @@ class PhantomHostSession(
                 encoder?.release()
             } catch (_: Throwable) {
             }
-            conn.close(0u, ByteArray(0))
+            try {
+                conn.close(0u, ByteArray(0))
+            } catch (_: Throwable) {
+            }
             activeConnection.compareAndSet(conn, null)
+            try {
+                host?.close()
+            } catch (_: Throwable) {
+            }
+            try {
+                conn.close()
+            } catch (_: Throwable) {
+            }
+            try {
+                onClientDisconnected()
+            } catch (_: Throwable) {
+            }
             onStats(HostLiveStats(connected = false, fps = 0.0, mbps = 0.0, touches = 0, keys = 0, activeProfile = ""))
             onLog("Client disconnesso")
         }

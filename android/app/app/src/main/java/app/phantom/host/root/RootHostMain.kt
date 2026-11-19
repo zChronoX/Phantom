@@ -62,6 +62,9 @@ object RootHostMain {
             onThermalStop = {
                 emit("THERMAL_STOP")
             },
+            onClientDisconnected = {
+                injector.reset()
+            },
         )
 
         val stdinThread = Thread({

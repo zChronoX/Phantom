@@ -20,6 +20,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.view.WindowManager
+import app.phantom.host.core.HostFormatHelpers
 import app.phantom.host.core.ThermalGuard
 import app.phantom.host.core.ThermalPolicy
 import app.phantom.host.stream.CaptureMode
@@ -163,7 +164,8 @@ class HostForegroundService : Service() {
                 val apkPath = applicationInfo.sourceDir
                 val libDir = applicationInfo.nativeLibraryDir
                 val cmd = "export CLASSPATH=${shellQuote(apkPath)} LD_LIBRARY_PATH=${shellQuote(libDir)}; " +
-                    "exec app_process " +
+                    "APP_PROC=/system/bin/app_process64; [ -x \"\$APP_PROC\" ] || APP_PROC=app_process; " +
+                    "exec \"\$APP_PROC\" " +
                     "-Djava.library.path=${shellQuote(libDir)} " +
                     "-Djna.library.path=${shellQuote(libDir)} " +
                     "-Djna.boot.library.path=${shellQuote(libDir)} " +
@@ -538,7 +540,7 @@ class HostForegroundService : Service() {
     private fun localWifiIpv4(): String {
         return try {
             val ifaces = NetworkInterface.getNetworkInterfaces() ?: return ""
-            var fallback = ""
+            val candidates = ArrayList<Pair<String, String>>()
             while (ifaces.hasMoreElements()) {
                 val iface = ifaces.nextElement()
                 if (!iface.isUp || iface.isLoopback) continue
@@ -547,12 +549,13 @@ class HostForegroundService : Service() {
                     val addr = addrs.nextElement()
                     if (addr is Inet4Address && !addr.isLoopbackAddress) {
                         val host = addr.hostAddress.orEmpty()
-                        if (iface.name.startsWith("wlan")) return host
-                        if (fallback.isEmpty()) fallback = host
+                        if (host.isNotBlank()) {
+                            candidates.add(iface.name to host)
+                        }
                     }
                 }
             }
-            fallback
+            HostFormatHelpers.selectPreferredLanIpv4(candidates)
         } catch (_: Throwable) {
             ""
         }

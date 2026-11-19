@@ -1,7 +1,7 @@
 # Handoff
 
 Scritto: 2026-11-19 da Particle-1 (Kilo); aggiornato dopo la creazione della nuova app host Android (`android/app/`).
-Branch: main - Commit locale: `a382c9c` (allineato a `origin/main`) + modifiche locali non committate
+Branch: main - Commit locale: `39cac9e` (allineato a `origin/main`) + modifiche locali non committate (supporto `x86_64`/LDPlayer)
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -74,19 +74,21 @@ Otto task della sessione precedente più T9 e T10 chiusi e verificati in Docker
 - Le rifiniture e ottimizzazioni iOS sono state committate e verificate in `a382c9c` (funzionanti su iPhone).
 - Nuovo bersaglio Android: **Redmi Note 11 Pro 5G** (Snapdragon 695, `arm64-v8a`), sostituisce il POCO F4 GT dopo il guasto al display.
 - Creata la nuova app host Android leggera come APK normale con root on-demand (`android/app/`, `ADR-010`), senza modulo Magisk/SukiSU e senza toccare `android/module/`/`android/probe/`:
-  - Gradle snello (zero Compose/AppCompat/Material, solo Android SDK + JNA + `uniffi.phantom_ffi`, `extractNativeLibs="true"`).
-  - Moduli puri con 4 suite di test JUnit JVM (`ThermalGuard`, `CodecConfigCache`/`HostFormatHelpers`, `HidToAndroidKeyMap`/`KeyModifierState`, `TouchEventSynthesizer`).
-  - Motore `VideoEncoder` (default **1080p · 120 fps**, parametri neutri + fallback automatico 120 → 60 fps e HEVC → H.264) + `PhantomHostSession` su `QuicHostEndpoint` + protezione termica attiva (`ThermalGuard`).
-  - Modalità **Root on-demand** (`su` → `app_process` temporaneo su `RootHostMain` con `RootDisplayCapture` + `RootInputInjector`) e modalità **MediaProjection** senza root.
+  - Gradle snello (`minSdk = 26`, ABI `arm64-v8a` + `x86_64` per supportare sia Redmi Note 11 Pro 5G sia LDPlayer 9 su PC; zero Compose/AppCompat/Material, solo Android SDK + JNA + `uniffi.phantom_ffi`, `extractNativeLibs="true"`).
+  - Moduli puri con 4 suite di test JUnit JVM (`ThermalGuard`, `CodecConfigCache`/`HostFormatHelpers` inclusa selezione IPv4 LAN per Wi-Fi ed Ethernet bridge, `HidToAndroidKeyMap`/`KeyModifierState`, `TouchEventSynthesizer`).
+  - Motore `VideoEncoder` (default **1080p · 120 fps**, parametri neutri + fallback automatico 120 → 60 fps, HEVC → H.264 e H.264/30 compatibile emulatore) + `PhantomHostSession` su `QuicHostEndpoint` (con reset input su disconnessione client) + protezione termica attiva (`ThermalGuard`).
+  - Modalità **Root on-demand** (`su` → `app_process64`/`app_process` temporaneo su `RootHostMain` con `RootDisplayCapture` + `RootInputInjector`) e modalità **MediaProjection** senza root.
   - `HostForegroundService` (notifica persistente stile FKM con tasto *Ferma*, monitor batteria + `PowerManager.currentThermalStatus`) e `MainActivity`.
-  - Nuovo workflow CI `.github/workflows/android-app.yml` che genera binding Kotlin + `libphantom_ffi.so`, esegue `testDebugUnitTest` e pubblica `PhantomHost-debug.apk` nella release `f0-latest`.
+  - Nuovo workflow CI `.github/workflows/android-app.yml` che genera binding Kotlin + `libphantom_ffi.so` (`arm64-v8a` e `x86_64`), esegue `testDebugUnitTest` e pubblica `PhantomHost-debug.apk` nella release `f0-latest`.
 - **Verifiche locali non eseguite**: su questo PC Windows non ci sono Java/Android SDK/Gradle in locale; i test unitari JVM e la build dell'`.apk` gireranno su GitHub Actions al push.
 
 ## Next steps (in order)
 
 1. Eseguire `powershell -NoProfile -ExecutionPolicy Bypass -File tools/repo-preflight.ps1`.
 2. Committare e pushare su `origin/main` per far partire `.github/workflows/android-app.yml` su GitHub Actions.
-3. Scaricare `PhantomHost-debug.apk` dalla release `f0-latest` (o dagli artifacts della run), installarlo sul Redmi Note 11 Pro 5G, avviare l'host e collegare l'iPhone inserendo `IP:porta` e certificato DER mostrati nell'app Android.
+3. Scaricare `PhantomHost-debug.apk` dalla release `f0-latest` (o dagli artifacts della run):
+   - provarlo in **modalità Root** su **LDPlayer** (x86_64, Root + Network Bridging abilitati) per testare end-to-end video + multi-touch + tastiera dall'iPhone;
+   - provarlo in **modalità Standard (MediaProjection)** sul **Redmi Note 11 Pro 5G** (in attesa dello sblocco bootloader/root) per testare video QUIC 1080p · 120 fps sull'hardware reale.
 4. A fine sessione aggiornare `PROGRESS.md` e questo file.
 
 ## Decisions and constraints from the user
@@ -172,14 +174,10 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- `docs/adr/ADR-010-host-android-apk.md` (nuovo): decisione APK leggera con root on-demand per Redmi Note 11 Pro 5G.
-- `.gitignore`: ignorati artefatti Gradle, `jniLibs/` e `uniffi/` generati in CI dentro `android/app/`.
-- `android/app/` (nuovo progetto APK Android Kotlin):
-  - `settings.gradle.kts`, `build.gradle.kts`, `gradle.properties`, `app/build.gradle.kts`, `app/src/main/AndroidManifest.xml`
-  - `core/{ThermalGuard,AnnexBFramePrep,HidToAndroidKeyMap,TouchEventSynthesizer}.kt`
-  - `stream/{HostConfig,VideoEncoder,PhantomHostSession}.kt`
-  - `root/{RootInputInjector,RootDisplayCapture,RootHostMain}.kt`
-  - `HostStateStore.kt`, `HostForegroundService.kt`, `MainActivity.kt`
-  - `app/src/test/java/app/phantom/host/core/{ThermalGuardTest,AnnexBFramePrepTest,HidToAndroidKeyMapTest,TouchEventSynthesizerTest}.kt`
-- `.github/workflows/android-app.yml` (nuovo): binding Kotlin + `.so` arm64 + unit test JVM + APK debug in artifact e release `f0-latest`.
-- `HANDOFF.md`, `PROGRESS.md`: aggiornati a fine sessione.
+- `android/app/app/build.gradle.kts`: aggiunto ABI `x86_64` accanto a `arm64-v8a` e abbassato `minSdk` a `26` per compatibilità con LDPlayer 9 (Android 9).
+- `.github/workflows/android-app.yml`: compilazione `libphantom_ffi.so` per `aarch64-linux-android` e `x86_64-linux-android`.
+- `android/app/app/src/main/java/app/phantom/host/core/AnnexBFramePrep.kt` + `AnnexBFramePrepTest.kt`: `selectPreferredLanIpv4` per scegliere correttamente l'IP LAN su Wi-Fi ed Ethernet bridge (evitando `10.0.2.*` e link-local).
+- `android/app/app/src/main/java/app/phantom/host/HostForegroundService.kt`: usa `selectPreferredLanIpv4` e lancia `app_process64` (con fallback a `app_process`).
+- `android/app/app/src/main/java/app/phantom/host/stream/VideoEncoder.kt`: aggiunto fallback finale `H.264 @ 30 fps` senza VBR esplicito per massima compatibilità emulatore.
+- `android/app/app/src/main/java/app/phantom/host/stream/PhantomHostSession.kt` e `RootHostMain.kt`: `onClientDisconnected` con `injector.reset()` e chiusura pulita degli handle FFI dal thread proprietario.
+- `docs/adr/ADR-010-host-android-apk.md`, `HANDOFF.md`, `PROGRESS.md`: aggiornati.

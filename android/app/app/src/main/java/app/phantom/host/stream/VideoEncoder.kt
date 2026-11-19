@@ -102,6 +102,8 @@ class VideoEncoder private constructor(
     }
 
     companion object {
+        private data class Attempt(val codec: VideoCodec, val fps: Int, val setVbr: Boolean)
+
         fun create(
             width: Int,
             height: Int,
@@ -110,23 +112,25 @@ class VideoEncoder private constructor(
             initialBitrateBps: Int,
             onLog: (String) -> Unit,
         ): VideoEncoder {
-            val attempts = ArrayList<Pair<VideoCodec, Int>>(3)
+            val attempts = ArrayList<Attempt>(4)
             val firstCodec = if (preferHevc) VideoCodec.H265 else VideoCodec.H264
-            attempts.add(firstCodec to requestedFps)
+            attempts.add(Attempt(firstCodec, requestedFps, setVbr = true))
             if (requestedFps > 60) {
-                attempts.add(firstCodec to 60)
+                attempts.add(Attempt(firstCodec, 60, setVbr = true))
             }
             if (preferHevc) {
-                attempts.add(VideoCodec.H264 to minOf(requestedFps, 60))
+                attempts.add(Attempt(VideoCodec.H264, minOf(requestedFps, 60), setVbr = true))
             }
+            // Fallback finale ultra-compatibile (utile per emulatori come LDPlayer o encoder limitati)
+            attempts.add(Attempt(VideoCodec.H264, 30, setVbr = false))
 
             var lastError: Throwable? = null
-            for ((codecType, fps) in attempts) {
+            for (attempt in attempts) {
                 try {
-                    return openConfigured(width, height, fps, codecType, initialBitrateBps)
+                    return openConfigured(width, height, attempt.fps, attempt.codec, initialBitrateBps, attempt.setVbr)
                 } catch (t: Throwable) {
                     lastError = t
-                    onLog("Fallback encoder dopo rifiuto ${codecType.name}@${fps}fps: ${t.message}")
+                    onLog("Fallback encoder dopo rifiuto ${attempt.codec.name}@${attempt.fps}fps: ${t.message}")
                 }
             }
             throw IllegalStateException("Impossibile avviare MediaCodec: ${lastError?.message}", lastError)
@@ -138,6 +142,7 @@ class VideoEncoder private constructor(
             fps: Int,
             codecType: VideoCodec,
             bitrateBps: Int,
+            setVbr: Boolean,
         ): VideoEncoder {
             val mime = if (codecType == VideoCodec.H265) {
                 MediaFormat.MIMETYPE_VIDEO_HEVC
@@ -150,7 +155,9 @@ class VideoEncoder private constructor(
                 setInteger(MediaFormat.KEY_FRAME_RATE, fps)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
                 setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
-                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+                if (setVbr) {
+                    setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+                }
             }
 
             val mc = MediaCodec.createEncoderByType(mime)

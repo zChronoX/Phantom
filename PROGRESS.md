@@ -1,6 +1,6 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `a382c9c` (allineato a `origin/main`) più modifiche locali non committate per la nuova app host Android (`android/app/`, `ADR-010`, CI `android-app.yml`).
+Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `39cac9e` (allineato a `origin/main`) più modifiche locali non committate per il supporto `x86_64`/LDPlayer nell'app host Android (`android/app/`, `ADR-010`, CI `android-app.yml`).
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Dove siamo
@@ -172,13 +172,17 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 - Cambio hardware Android e nuova architettura host (`ADR-010`):
   - Dispositivo target aggiornato a **Redmi Note 11 Pro 5G** (Snapdragon 695, `arm64-v8a`),
     abbandonando il modulo Magisk al boot per il server di produzione a favore di una normale APK
-    Kotlin con root on-demand (`su` → `app_process`) + fallback `MediaProjection`.
+    Kotlin con root on-demand (`su` → `app_process64`/`app_process`) + fallback `MediaProjection`.
+  - Aggiunto supporto `x86_64` e `minSdk = 26` per test immediati in modalità Root su **LDPlayer**
+    (Network Bridging su LAN Ethernet/powerline) in attesa dello sblocco bootloader sul Redmi.
   - Creata `android/app/` (senza Jetpack Compose/AppCompat, solo framework Android + JNA):
-    moduli puri (`ThermalGuard`, `AnnexBFramePrep`, `HidToAndroidKeyMap`, `TouchEventSynthesizer`),
-    streaming (`VideoEncoder` con profilo default **1080p · 120 fps** e fallback 120→60 fps / HEVC→H.264,
-    `PhantomHostSession` su `QuicHostEndpoint`), worker root (`RootDisplayCapture`,
-    `RootInputInjector`, `RootHostMain`), servizio visibile in notifica (`HostForegroundService`),
-    UI (`MainActivity`), 4 suite JUnit JVM e workflow `.github/workflows/android-app.yml`.
+    moduli puri (`ThermalGuard`, `AnnexBFramePrep` con selezione IPv4 LAN per Wi-Fi/Ethernet bridge,
+    `HidToAndroidKeyMap`, `TouchEventSynthesizer`), streaming (`VideoEncoder` con profilo default
+    **1080p · 120 fps** e fallback 120→60 fps / HEVC→H.264 / H.264@30 compatibile emulatore,
+    `PhantomHostSession` su `QuicHostEndpoint` con reset input alla disconnessione), worker root
+    (`RootDisplayCapture`, `RootInputInjector`, `RootHostMain`), servizio visibile in notifica
+    (`HostForegroundService`), UI (`MainActivity`), 4 suite JUnit JVM e workflow
+    `.github/workflows/android-app.yml` (build `arm64-v8a` + `x86_64`).
   - Test JVM e compilazione APK in attesa di verifica sulla CI GitHub Actions al push.
 
 ## Decisioni
@@ -280,12 +284,13 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Prossimo passo
 
-Modifiche locali pronte (da committare e pushare dall'utente su `origin/main` per
-far girare `.github/workflows/android-app.yml` e generare `PhantomHost-debug.apk`):
-- `docs/adr/ADR-010-host-android-apk.md`, `.gitignore`
-- `android/app/` (nuova app host Kotlin leggera + 4 suite di unit test)
-- `.github/workflows/android-app.yml`
-- `HANDOFF.md`, `PROGRESS.md`
+Modifiche locali pronte su `39cac9e` (da committare e pushare dall'utente su `origin/main` per
+far rigirare `.github/workflows/android-app.yml` con `arm64-v8a` + `x86_64` e rigenerare `PhantomHost-debug.apk`):
+- `android/app/app/build.gradle.kts`, `.github/workflows/android-app.yml`
+- `android/app/app/src/main/java/app/phantom/host/{HostForegroundService,core/AnnexBFramePrep,stream/VideoEncoder,stream/PhantomHostSession,root/RootHostMain}.kt`
+- `android/app/app/src/test/java/app/phantom/host/core/AnnexBFramePrepTest.kt`
+- `docs/adr/ADR-010-host-android-apk.md`, `HANDOFF.md`, `PROGRESS.md`
 
-Dopo il push, scaricare `PhantomHost-debug.apk` dalla release `f0-latest` di GitHub Actions,
-installarlo sul Redmi Note 11 Pro 5G e provare lo stream QUIC 1080p · 120 fps verso l'iPhone.
+Dopo il push, scaricare `PhantomHost-debug.apk` dalla release `f0-latest` di GitHub Actions e
+testarlo sia in modalità Root su LDPlayer (`x86_64`, video + multi-touch + tastiera) sia in
+modalità Standard `MediaProjection` sul Redmi Note 11 Pro 5G (`arm64-v8a`, stream QUIC 1080p · 120 fps).
