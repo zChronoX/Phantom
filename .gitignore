@@ -9,3 +9,8 @@ ios/PhantomF0/Info.plist
 android/module/bin/scrcpy-server
 android/module/bin/scrcpy-server.version
 core/target/
+android/app/.gradle/
+android/app/app/build/
+android/app/app/src/main/jniLibs/
+android/app/app/src/main/java/uniffi/
+android/app/local.properties

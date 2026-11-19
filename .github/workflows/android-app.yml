@@ -1,0 +1,96 @@
+# App host Android Kotlin (APK leggera per arm64, con binding UniFFI dal core Rust).
+name: Android · Phantom Host APK
+
+on:
+  push:
+    branches: [main]
+    paths: ["android/app/**", "core/**", ".github/workflows/android-app.yml"]
+  pull_request:
+    paths: ["android/app/**", "core/**", ".github/workflows/android-app.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: android-app-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain Rust e bersaglio Android
+        run: |
+          rustup show
+          rustup target add aarch64-linux-android
+        working-directory: core
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+          key: android-host-apk
+
+      - name: Genera binding Kotlin e libphantom_ffi.so (arm64)
+        working-directory: core
+        run: |
+          cargo build -p phantom-ffi --release
+          cargo run -q -p uniffi-bindgen --release -- generate \
+            --library target/release/libphantom_ffi.so \
+            --language kotlin --no-format \
+            --out-dir ../android/app/app/src/main/java
+
+          NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android26-clang"
+          export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android26-clang"
+          export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
+          export RANLIB_aarch64_linux_android="$NDK_BIN/llvm-ranlib"
+          cargo rustc -p phantom-ffi --release --target aarch64-linux-android --crate-type cdylib
+
+          mkdir -p ../android/app/app/src/main/jniLibs/arm64-v8a
+          cp target/aarch64-linux-android/release/libphantom_ffi.so ../android/app/app/src/main/jniLibs/arm64-v8a/
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Accetta licenze Android SDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+
+      - name: Test unitari JVM e build APK debug
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          gradle -p android/app testDebugUnitTest assembleDebug --no-daemon
+          mkdir -p dist
+          cp android/app/app/build/outputs/apk/debug/app-debug.apk dist/PhantomHost-debug.apk
+          ls -lh dist/PhantomHost-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PhantomHost-apk
+          path: dist/PhantomHost-debug.apk
+
+      - name: Pubblica nella release «f0-latest»
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view f0-latest >/dev/null 2>&1 || gh release create f0-latest --prerelease \
+            --title "Phantom F0 · ultime build" \
+            --notes "File sempre aggiornati dalle compilazioni automatiche." \
+            || true
+          gh release upload f0-latest dist/PhantomHost-debug.apk --clobber

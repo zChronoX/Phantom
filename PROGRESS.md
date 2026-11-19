@@ -1,6 +1,6 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `cbca9c9` (allineato a `origin/main`) più modifiche locali non committate per fix, ottimizzazioni a bassa latenza e rifiniture UX del client iOS (vedi `HANDOFF.md`).
+Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `a382c9c` (allineato a `origin/main`) più modifiche locali non committate per la nuova app host Android (`android/app/`, `ADR-010`, CI `android-app.yml`).
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Dove siamo
@@ -168,7 +168,18 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
     completa `GamepadBridge`.
   - `RemoteConnectView.swift`: incolla certificato dagli appunti + indicatore di validità.
   - `RemoteInputTests.swift`: aggiunti test per `TouchTracker.move`/`end`, `TouchDispatchState`
-    e `AnnexBScanner` (da verificare in CI o dopo riavvio di Docker Desktop).
+    e `AnnexBScanner`. Committato e verificato in `a382c9c` su iPhone reale.
+- Cambio hardware Android e nuova architettura host (`ADR-010`):
+  - Dispositivo target aggiornato a **Redmi Note 11 Pro 5G** (Snapdragon 695, `arm64-v8a`),
+    abbandonando il modulo Magisk al boot per il server di produzione a favore di una normale APK
+    Kotlin con root on-demand (`su` → `app_process`) + fallback `MediaProjection`.
+  - Creata `android/app/` (senza Jetpack Compose/AppCompat, solo framework Android + JNA):
+    moduli puri (`ThermalGuard`, `AnnexBFramePrep`, `HidToAndroidKeyMap`, `TouchEventSynthesizer`),
+    streaming (`VideoEncoder` con profilo default **1080p · 120 fps** e fallback 120→60 fps / HEVC→H.264,
+    `PhantomHostSession` su `QuicHostEndpoint`), worker root (`RootDisplayCapture`,
+    `RootInputInjector`, `RootHostMain`), servizio visibile in notifica (`HostForegroundService`),
+    UI (`MainActivity`), 4 suite JUnit JVM e workflow `.github/workflows/android-app.yml`.
+  - Test JVM e compilazione APK in attesa di verifica sulla CI GitHub Actions al push.
 
 ## Decisioni
 
@@ -270,10 +281,11 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 ## Prossimo passo
 
 Modifiche locali pronte (da committare e pushare dall'utente su `origin/main` per
-eseguire test/build su GitHub Actions e generare il nuovo `PhantomF0.ipa`):
-- `ios/PhantomF0/{TouchMapper.swift,VideoDecoderSupport.swift,RemoteSession.swift,RemoteControlSurface.swift,RemoteConnectView.swift}`
-- `ios/Tests/RemoteInputTests.swift`
+far girare `.github/workflows/android-app.yml` e generare `PhantomHost-debug.apk`):
+- `docs/adr/ADR-010-host-android-apk.md`, `.gitignore`
+- `android/app/` (nuova app host Kotlin leggera + 4 suite di unit test)
+- `.github/workflows/android-app.yml`
 - `HANDOFF.md`, `PROGRESS.md`
 
-Dopo la prova iOS, si può iniziare il server host Kotlin su Android oppure aggiungere
-Reed-Solomon / controllo di congestione / Fase 5 nel core.
+Dopo il push, scaricare `PhantomHost-debug.apk` dalla release `f0-latest` di GitHub Actions,
+installarlo sul Redmi Note 11 Pro 5G e provare lo stream QUIC 1080p · 120 fps verso l'iPhone.

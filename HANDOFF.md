@@ -1,7 +1,7 @@
 # Handoff
 
-Scritto: 2026-11-19 da Particle-1 (Kilo); aggiornato dopo i fix e le ottimizzazioni del client iOS di controllo remoto.
-Branch: main - Commit locale: `cbca9c9` (allineato a `origin/main`) + modifiche locali non committate
+Scritto: 2026-11-19 da Particle-1 (Kilo); aggiornato dopo la creazione della nuova app host Android (`android/app/`).
+Branch: main - Commit locale: `a382c9c` (allineato a `origin/main`) + modifiche locali non committate
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -71,56 +71,34 @@ Otto task della sessione precedente più T9 e T10 chiusi e verificati in Docker
 
 ## In progress (exact state)
 
-- Il fix precedente di keep-alive `QuicConnection`/endpoint è stato committato e pushato in
-  `cbca9c9` e verificato su iPhone reale (110 fps, RTT 0,6 ms, multi-touch a 5 dita centrato).
-- Applicato un giro di bugfix, ottimizzazioni a bassa latenza e rifiniture UX lato iOS (non
-  ancora committato):
-  - `ios/PhantomF0/TouchMapper.swift`: aggiunti `VideoDimensions`, ritorno `Bool` su
-    `TouchTracker.move`/`end` (ignora dita non tracciate), `TouchDispatchState` (garantisce
-    l'invio di `[]` + ripetizione di sicurezza al rilascio rapido dell'ultimo dito) e
-    `AnnexBScanner` zero-copy.
-  - `ios/PhantomF0/VideoDecoderSupport.swift`: conversione Annex-B → `CMBlockBuffer` in
-    copia singola e rilevamento cambio formato (`formatChanged` per flush su rotazione).
-  - `ios/PhantomF0/RemoteSession.swift`: integrazione `TouchDispatchState` e `VideoDimensions`,
-    timer `tick` a 250 Hz (4 ms), loopback sintetico con sfondo precalcolato, pacing assoluto
-    a 120 fps e aggiornamento adattivo del bitrate dell'encoder.
-  - `ios/PhantomF0/RemoteControlSurface.swift`: rendering su coda background con API iOS 17
-    `AVSampleBufferVideoRenderer` (`sampleBufferRenderer` + flush su cambio formato), niente
-    cerchi fantasma per tocchi fuori video, `RemoteDisplayViewController` con
-    `preferredScreenEdgesDeferringSystemGestures = .all`, reset dita su `scenePhase == .inactive`
-    e pulizia completa degli handler in `GamepadBridge.stop()`.
-  - `ios/PhantomF0/RemoteConnectView.swift`: pulsante «Incolla dagli appunti» e stato di
-    validazione del certificato DER.
-  - `ios/Tests/RemoteInputTests.swift`: aggiunti test per `TouchTracker.move`/`end`,
-    `TouchDispatchState` e `AnnexBScanner`.
-- **Verifiche locali non eseguite in questa sessione**: Docker Desktop spento
-  (`open //./pipe/dockerDesktopLinuxEngine: Impossibile trovare il file specificato`), quindi
-  `ios/Tests/run-tests.sh` e `swiftc -parse` gireranno in CI su GitHub Actions al push
-  (oppure in locale dopo l'avvio di Docker Desktop).
+- Le rifiniture e ottimizzazioni iOS sono state committate e verificate in `a382c9c` (funzionanti su iPhone).
+- Nuovo bersaglio Android: **Redmi Note 11 Pro 5G** (Snapdragon 695, `arm64-v8a`), sostituisce il POCO F4 GT dopo il guasto al display.
+- Creata la nuova app host Android leggera come APK normale con root on-demand (`android/app/`, `ADR-010`), senza modulo Magisk/SukiSU e senza toccare `android/module/`/`android/probe/`:
+  - Gradle snello (zero Compose/AppCompat/Material, solo Android SDK + JNA + `uniffi.phantom_ffi`, `extractNativeLibs="true"`).
+  - Moduli puri con 4 suite di test JUnit JVM (`ThermalGuard`, `CodecConfigCache`/`HostFormatHelpers`, `HidToAndroidKeyMap`/`KeyModifierState`, `TouchEventSynthesizer`).
+  - Motore `VideoEncoder` (default **1080p · 120 fps**, parametri neutri + fallback automatico 120 → 60 fps e HEVC → H.264) + `PhantomHostSession` su `QuicHostEndpoint` + protezione termica attiva (`ThermalGuard`).
+  - Modalità **Root on-demand** (`su` → `app_process` temporaneo su `RootHostMain` con `RootDisplayCapture` + `RootInputInjector`) e modalità **MediaProjection** senza root.
+  - `HostForegroundService` (notifica persistente stile FKM con tasto *Ferma*, monitor batteria + `PowerManager.currentThermalStatus`) e `MainActivity`.
+  - Nuovo workflow CI `.github/workflows/android-app.yml` che genera binding Kotlin + `libphantom_ffi.so`, esegue `testDebugUnitTest` e pubblica `PhantomHost-debug.apk` nella release `f0-latest`.
+- **Verifiche locali non eseguite**: su questo PC Windows non ci sono Java/Android SDK/Gradle in locale; i test unitari JVM e la build dell'`.apk` gireranno su GitHub Actions al push.
 
 ## Next steps (in order)
 
 1. Eseguire `powershell -NoProfile -ExecutionPolicy Bypass -File tools/repo-preflight.ps1`.
-2. Committare e pushare su `origin/main` (o avviare Docker Desktop per verificare prima in
-   locale `ios/Tests/run-tests.sh` e `swiftc -parse`), poi scaricare il nuovo `PhantomF0.ipa`
-   dalla release `f0-latest` di GitHub Actions.
-3. Riprovare su iPhone (tastiera, rotazione, multi-touch veloce, gesto dal bordo inferiore).
-4. Lato Android: iniziare il server host Kotlin (`app_process`) che usa `PhantomHost`,
-   `QuicHostEndpoint` e `MediaCodec`, oppure proseguire con Reed-Solomon / Fase 5.
-5. A fine sessione aggiornare `PROGRESS.md` e questo file.
+2. Committare e pushare su `origin/main` per far partire `.github/workflows/android-app.yml` su GitHub Actions.
+3. Scaricare `PhantomHost-debug.apk` dalla release `f0-latest` (o dagli artifacts della run), installarlo sul Redmi Note 11 Pro 5G, avviare l'host e collegare l'iPhone inserendo `IP:porta` e certificato DER mostrati nell'app Android.
+4. A fine sessione aggiornare `PROGRESS.md` e questo file.
 
 ## Decisions and constraints from the user
 
-- **Nessun POCO disponibile**: niente misure sul telefono né test del server
-  Android.
+- **Redmi Note 11 Pro 5G** come nuovo telefono Android al posto del POCO F4 GT.
+- **APK normale con root on-demand** (niente più modulo Magisk al boot, notifica persistente stile FKM, nessuna modifica di sistema, protezione termica attiva); stream predefinito a **1080p · 120 fps** con app leggera e snella.
 - Solo Windows in locale: niente `cargo`/`rustc`, Xcode, `swiftc`, Java, Android
   SDK, `gh`. Docker funziona: `rust:1` per il core, `swift:5.10` per Swift.
 - Non pushare e non cancellare branch o lavoro locale senza richiesta.
   `archive/f0-avsamplebuffer` è l'unica copia dei due commit locali.
-- **Un solo commit** alla fine: il testo è in `COMMIT_MSG.md`.
 - `origin/main` è la fonte di verità; preflight obbligatorio prima di ogni
   modifica.
-- Pochi passi piccoli per sessione; il contesto si riempie facilmente.
 
 ## Do not retry
 
@@ -194,17 +172,14 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- `ios/PhantomF0/TouchMapper.swift`: `VideoDimensions`, ritorno `Bool` su `TouchTracker.move`/`end`,
-  `TouchDispatchState` e `AnnexBScanner` zero-copy.
-- `ios/PhantomF0/VideoDecoderSupport.swift`: `BuiltVideoSample`, copia singola in `CMBlockBuffer`,
-  rilevamento `formatChanged`.
-- `ios/PhantomF0/RemoteSession.swift`: `TouchDispatchState` (niente dita incastrate al rilascio),
-  timer a 250 Hz, loopback HEVC con sfondo precalcolato, pacing assoluto a 120 fps e adattamento bitrate.
-- `ios/PhantomF0/RemoteControlSurface.swift`: renderer iOS 17 `sampleBufferRenderer` su coda
-  background, niente cerchi fantasma in banda nera, `RemoteDisplayViewController` con deferimento
-  gesti di sistema sui bordi, reset tocchi su `inactive`, pulizia `GamepadBridge`.
-- `ios/PhantomF0/RemoteConnectView.swift`: pulsante «Incolla dagli appunti» e badge di stato del
-  certificato DER.
-- `ios/Tests/RemoteInputTests.swift`: nuovi controlli per `TouchTracker`, `TouchDispatchState` e
-  `AnnexBScanner`.
+- `docs/adr/ADR-010-host-android-apk.md` (nuovo): decisione APK leggera con root on-demand per Redmi Note 11 Pro 5G.
+- `.gitignore`: ignorati artefatti Gradle, `jniLibs/` e `uniffi/` generati in CI dentro `android/app/`.
+- `android/app/` (nuovo progetto APK Android Kotlin):
+  - `settings.gradle.kts`, `build.gradle.kts`, `gradle.properties`, `app/build.gradle.kts`, `app/src/main/AndroidManifest.xml`
+  - `core/{ThermalGuard,AnnexBFramePrep,HidToAndroidKeyMap,TouchEventSynthesizer}.kt`
+  - `stream/{HostConfig,VideoEncoder,PhantomHostSession}.kt`
+  - `root/{RootInputInjector,RootDisplayCapture,RootHostMain}.kt`
+  - `HostStateStore.kt`, `HostForegroundService.kt`, `MainActivity.kt`
+  - `app/src/test/java/app/phantom/host/core/{ThermalGuardTest,AnnexBFramePrepTest,HidToAndroidKeyMapTest,TouchEventSynthesizerTest}.kt`
+- `.github/workflows/android-app.yml` (nuovo): binding Kotlin + `.so` arm64 + unit test JVM + APK debug in artifact e release `f0-latest`.
 - `HANDOFF.md`, `PROGRESS.md`: aggiornati a fine sessione.
