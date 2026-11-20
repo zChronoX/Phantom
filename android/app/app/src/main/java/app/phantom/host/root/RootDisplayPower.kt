@@ -3,6 +3,7 @@ package app.phantom.host.root
 import android.annotation.SuppressLint
 import android.os.IBinder
 import dalvik.system.PathClassLoader
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Controlla lo stato di alimentazione del display fisico principale (`POWER_MODE_OFF` / `POWER_MODE_NORMAL`)
@@ -12,6 +13,7 @@ import dalvik.system.PathClassLoader
 object RootDisplayPower {
     private const val POWER_MODE_OFF = 0
     private const val POWER_MODE_NORMAL = 2
+    private val displayTurnedOff = AtomicBoolean(false)
 
     fun setPhysicalDisplayPower(on: Boolean): Boolean {
         return try {
@@ -23,9 +25,17 @@ object RootDisplayPower {
                 Int::class.javaPrimitiveType,
             )
             setPower.invoke(null, token, if (on) POWER_MODE_NORMAL else POWER_MODE_OFF)
+            displayTurnedOff.set(!on)
             true
         } catch (_: Throwable) {
             false
+        }
+    }
+
+    /** Riaccende il display fisico solo se questa sessione lo aveva effettivamente spento. */
+    fun restoreIfTurnedOff() {
+        if (displayTurnedOff.compareAndSet(true, false)) {
+            setPhysicalDisplayPower(true)
         }
     }
 

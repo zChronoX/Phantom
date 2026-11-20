@@ -129,7 +129,7 @@ object RootHostMain {
             },
             onClientDisconnected = {
                 injector.reset()
-                RootDisplayPower.setPhysicalDisplayPower(true)
+                RootDisplayPower.restoreIfTurnedOff()
             },
         )
 
@@ -171,7 +171,7 @@ object RootHostMain {
         try {
             session.runBlocking()
         } finally {
-            RootDisplayPower.setPhysicalDisplayPower(true)
+            RootDisplayPower.restoreIfTurnedOff()
         }
         emit("STOPPED")
     }

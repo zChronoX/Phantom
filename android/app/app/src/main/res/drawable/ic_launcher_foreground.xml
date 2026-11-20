@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Phantom A2 Ghost Pure (evenOdd: silhouette bianca + due occhi pillola ritagliati) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M54,28 C41.8,28 33,36.8 33,49 L33,73.5 C33,77.8 38.2,79.8 41.2,76.8 C43.4,74.6 46.6,74.6 48.8,76.8 C51.7,79.7 56.3,79.7 59.2,76.8 C61.4,74.6 64.6,74.6 66.8,76.8 C69.8,79.8 75,77.8 75,73.5 L75,49 C75,36.8 66.2,28 54,28 Z M46.5,44.5 C48.2,44.5 49.5,45.8 49.5,47.5 L49.5,52.5 C49.5,54.2 48.2,55.5 46.5,55.5 C44.8,55.5 43.5,54.2 43.5,52.5 L43.5,47.5 C43.5,45.8 44.8,44.5 46.5,44.5 Z M61.5,44.5 C63.2,44.5 64.5,45.8 64.5,47.5 L64.5,52.5 C64.5,54.2 63.2,55.5 61.5,55.5 C59.8,55.5 58.5,54.2 58.5,52.5 L58.5,47.5 C58.5,45.8 59.8,44.5 61.5,44.5 Z" />
+</vector>

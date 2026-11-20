@@ -624,20 +624,27 @@ final class RemoteSession: ObservableObject {
     }
 
     private func handleDisconnect(reason: String, orderly: Bool, gen: UInt64, immediate: Bool = false) {
-        let decision: (retryMode: RemoteSessionMode, nextGen: UInt64, attempt: Int, delay: Double)? = withLock {
+        let result: (
+            conn: QuicConnection?,
+            directEp: QuicClientEndpoint?,
+            p2pEp: P2pClientEndpoint?,
+            loopback: LocalQuicHostRunner?,
+            retry: (retryMode: RemoteSessionMode, nextGen: UInt64, attempt: Int, delay: Double)?
+        )? = withLock {
             guard generation == gen && !stopRequested else { return nil }
             tickTimer?.cancel()
             tickTimer = nil
             let q = connection
+            let ep = clientEndpoint
+            let p2p = p2pClientEndpoint
+            let lb = hostLoopback
             client = nil
             connection = nil
             clientEndpoint = nil
             p2pClientEndpoint = nil
             activeTargetIsLan = false
-            hostLoopback?.stop()
             hostLoopback = nil
             touchDispatch.reset()
-            q?.close(code: 0, reason: Data())
 
             guard !orderly,
                   hasConnectedOnce,
@@ -645,17 +652,23 @@ final class RemoteSession: ObservableObject {
                   case let .remote(_, _, _, _, autoReconnect) = mode,
                   autoReconnect,
                   reconnectAttempt < ReconnectBackoff.maxAttempts else {
-                return nil
+                return (q, ep, p2p, lb, nil)
             }
             reconnectAttempt += 1
             waitingForReconnect = true
             generation &+= 1
             let delay = immediate ? 0.05 : ReconnectBackoff.delaySeconds(attempt: reconnectAttempt)
-            return (mode, generation, reconnectAttempt, delay)
+            return (q, ep, p2p, lb, (mode, generation, reconnectAttempt, delay))
         }
 
+        guard let outcome = result else { return }
+        outcome.conn?.close(code: 0, reason: Data())
+        outcome.loopback?.stop()
+        _ = outcome.directEp
+        _ = outcome.p2pEp
+
         audioPlayer.stop()
-        guard let retry = decision else {
+        guard let retry = outcome.retry else {
             publishError(reason)
             return
         }

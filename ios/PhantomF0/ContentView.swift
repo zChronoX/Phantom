@@ -1,7 +1,8 @@
 import SwiftUI
 import UIKit
 
-struct ContentView: View {
+/// Strumenti di diagnostica e banchi di prova hardware/rete (ereditati dalla fase 0, accessibili da Impostazioni → Diagnostica).
+struct DiagnosticsView: View {
     @StateObject private var tester = PingTester()
     @AppStorage("host") private var host = "192.168.1.118"
     @AppStorage("seconds") private var seconds = 120.0
@@ -10,138 +11,109 @@ struct ContentView: View {
     @AppStorage("videoMode") private var videoMode = VideoMode.scrcpy.rawValue
     @State private var copied = false
     @State private var remoteMessage = ""
-    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        NavigationStack {
-            Form {
-                CrashLogSection()
+        Form {
+            CrashLogSection()
 
-                Section("Controllo remoto") {
-                    NavigationLink {
-                        RemoteConnectView()
-                    } label: {
-                        Label("Schermo Android (QUIC)", systemImage: "iphone.and.arrow.forward")
-                            .fontWeight(.semibold)
-                    }
-                    Text("Sessione completa QUIC con apertura obbligatoria, decodifica hardware H.264/HEVC, multi-touch fino a 10 dita, tastiera e loopback locale sull'iPhone.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+            Section("Prove sull'iPhone (senza host)") {
+                NavigationLink {
+                    DecoderBenchScreen()
+                } label: {
+                    Label("Decoder hardware (H.264 e HEVC)", systemImage: "speedometer")
                 }
-
-                Section("Telefono Android") {
-                    TextField("Indirizzo IP del POCO", text: $host)
-                        .keyboardType(.numbersAndPunctuation)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    Picker("Durata", selection: $seconds) {
-                        Text("30 s").tag(30.0)
-                        Text("2 min").tag(120.0)
-                    }
-                    Picker("Pacchetto", selection: $size) {
-                        Text("64 byte").tag(64)
-                        Text("1.200 byte (come il video)").tag(1200)
-                    }
-                    Toggle("Priorità voce Wi-Fi (WMM)", isOn: $voice)
+                NavigationLink {
+                    TouchBenchScreen()
+                } label: {
+                    Label("Tocco e frequenza dello schermo", systemImage: "hand.tap")
                 }
-                .disabled(tester.running)
-
-                Section {
-                    Button(tester.running ? "Ferma il test" : "Avvia il test") {
-                        if tester.running {
-                            tester.stop()
-                        } else {
-                            copied = false
-                            tester.start(.init(host: host, seconds: seconds, intervalMs: 10, size: size, voice: voice))
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                    .fontWeight(.semibold)
-                    Text(tester.status)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                NavigationLink {
+                    CoreLoopbackScreen()
+                } label: {
+                    Label("Core Rust: loopback in memoria", systemImage: "arrow.triangle.2.circlepath")
                 }
+            }
 
-                Section("RTT (ms)") {
-                    StatsGrid(stats: tester.stats)
-                    RttChart(values: tester.recent)
-                        .frame(height: 120)
+            Section("Sonda UDP (Fase 0)") {
+                TextField("Indirizzo IP host", text: $host)
+                    .keyboardType(.numbersAndPunctuation)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Picker("Durata", selection: $seconds) {
+                    Text("30 s").tag(30.0)
+                    Text("2 min").tag(120.0)
                 }
+                Picker("Pacchetto", selection: $size) {
+                    Text("64 byte").tag(64)
+                    Text("1.200 byte").tag(1200)
+                }
+                Toggle("Priorità voce Wi-Fi (WMM)", isOn: $voice)
+            }
+            .disabled(tester.running)
 
-                if !tester.report.isEmpty {
-                    Section("Risultati") {
-                        Text(tester.report)
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
-                        Button(copied ? "Copiato" : "Copia risultati") {
-                            UIPasteboard.general.string = tester.report
-                            copied = true
-                        }
+            Section {
+                Button(tester.running ? "Ferma test UDP" : "Avvia test UDP") {
+                    if tester.running {
+                        tester.stop()
+                    } else {
+                        copied = false
+                        tester.start(.init(host: host, seconds: seconds, intervalMs: 10, size: size, voice: voice))
                     }
                 }
+                .frame(maxWidth: .infinity)
+                .fontWeight(.semibold)
+                Text(tester.status)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
 
-                Section("Prove sull'iPhone (senza il POCO)") {
-                    NavigationLink {
-                        DecoderBenchScreen()
-                    } label: {
-                        Label("Decoder hardware (H.264 e HEVC)", systemImage: "speedometer")
-                    }
-                    NavigationLink {
-                        TouchBenchScreen()
-                    } label: {
-                        Label("Tocco e frequenza dello schermo", systemImage: "hand.tap")
-                    }
-                    NavigationLink {
-                        CoreLoopbackScreen()
-                    } label: {
-                        Label("Core Rust: tutto sul telefono", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    Text("Misure dell'iPhone da solo, utili per decidere come mandare video e tocco: quanto costa decodificare, con quale precisione l'iPhone legge le dita e come se la cava il core Rust di Phantom con codifica, perdite e decodifica a 120 fps.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+            Section("RTT (ms)") {
+                StatsGrid(stats: tester.stats)
+                RttChart(values: tester.recent)
+                    .frame(height: 120)
+            }
 
-                TelemetrySection(host: host)
-
-                Section("Video dal vivo") {
-                    Picker("Sorgente", selection: $videoMode) {
-                        Text("scrcpy (bassa latenza)").tag(VideoMode.scrcpy.rawValue)
-                        Text("Base (screenrecord)").tag(VideoMode.basic.rawValue)
-                    }
-                    NavigationLink {
-                        VideoScreen(host: host, mode: VideoMode(rawValue: videoMode) ?? .scrcpy)
-                    } label: {
-                        Label("Guarda lo schermo del POCO", systemImage: "play.rectangle")
-                    }
-                    Text("Prima accendi il video nella WebUI del modulo sul POCO: un profilo della scala scrcpy per la bassa latenza, «Accendi video» per la sorgente base. Mostra lo schermo di Android dal vivo, con frame rate e banda.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Button("Ferma la sessione video sul POCO") {
-                        remoteMessage = "Richiesta inviata…"
-                        RemoteControl.stopSessions(host: host) { remoteMessage = $0 }
-                    }
-                    if !remoteMessage.isEmpty {
-                        Text(remoteMessage)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+            if !tester.report.isEmpty {
+                Section("Risultati") {
+                    Text(tester.report)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                    Button(copied ? "Copiato" : "Copia risultati") {
+                        UIPasteboard.general.string = tester.report
+                        copied = true
                     }
                 }
+            }
 
-                Section {
-                    Text("Ogni 10 ms l'iPhone manda un pacchetto UDP alla sonda sul POCO, che lo rimanda indietro. Prova con e senza priorità voce, vicino e lontano dall'access point. Per test più puliti disattiva AirDrop (Ricezione disattivata).")
+            TelemetrySection(host: host)
+
+            Section("Video dal vivo (scrcpy Fase 0)") {
+                Picker("Sorgente", selection: $videoMode) {
+                    Text("scrcpy (bassa latenza)").tag(VideoMode.scrcpy.rawValue)
+                    Text("Base (screenrecord)").tag(VideoMode.basic.rawValue)
+                }
+                NavigationLink {
+                    VideoScreen(host: host, mode: VideoMode(rawValue: videoMode) ?? .scrcpy)
+                } label: {
+                    Label("Apri stream scrcpy", systemImage: "play.rectangle")
+                }
+                Button("Ferma sessione remota") {
+                    remoteMessage = "Richiesta inviata…"
+                    RemoteControl.stopSessions(host: host) { remoteMessage = $0 }
+                }
+                if !remoteMessage.isEmpty {
+                    Text(remoteMessage)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
             }
-            .navigationTitle("Phantom F0")
         }
-        .onChange(of: scenePhase) { _, phase in
-            CrashLog.markMem("FASE \(phase)")
-            // Il registro della scatola nera va su disco subito quando l'app lascia il primo piano.
-            if phase != .active { TelemetryRecorder.shared.flush() }
-        }
+        .navigationTitle("Diagnostica")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
+
+typealias ContentView = DiagnosticsView
 
 private struct StatsGrid: View {
     let stats: PingStats

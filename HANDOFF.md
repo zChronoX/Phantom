@@ -1,7 +1,7 @@
 # Handoff
 
-Scritto: 2026-11-20; aggiornato dopo preemption Wi-Fi→5G, autenticazione token 128-bit, audio AAC-LC, appunti condivisi e controllo display/Doze.
-Branch: main - Commit locale: basato sull'ultimo push dell'utente su `origin/main` + modifiche locali da committare.
+Scritto: 2026-11-20; aggiornato dopo completamento restyling UI/UX monocromatico Liquid Glass (iOS + Android), icone ufficiali A2 e Quick Settings Tile Android.
+Branch: main - Commit locale: basato sull'ultimo push dell'utente su `origin/main` + modifiche locali UI/UX da committare.
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -140,6 +140,7 @@ Otto task della sessione precedente più T9 e T10 chiusi e verificati in Docker
 - Passare `-Djava.library.path=<libDir>` ad `app_process64`: sovrascrive `/system/lib64` e rompe le librerie JNI di sistema come `Conscrypt`/`NativeCrypto` (usato da `SecureRandom`). Caricare invece `libjnidispatch.so`/`libphantom_ffi.so` via `System.load(path)` + `-Djna.*` e preservare `/system/lib64:/vendor/lib64` in `LD_LIBRARY_PATH`.
 - Usare un campo chiamato `message` nelle varianti di un enum `#[derive(uniffi::Error)]` in Rust: nel binding Kotlin generato da UniFFI collide con `Throwable.message` (`Conflicting declarations: val message: String`). Usare nomi come `detail`.
 - Impostare `panic = "abort"` in `[profile.release]` di `core/Cargo.toml`: rompe sia il `catch_unwind` interno del `DnsResolver` di `iroh` su Android (fallback quando `ndk_context` non è inizializzato, causando `SIGABRT` immediato nel worker root `app_process64`) sia il boundary `catch_unwind` di UniFFI.
+- Chiamare `AudioRecord.Builder().setAudioSource(REMOTE_SUBMIX).build()` dentro il worker root standalone `app_process64` senza `ActivityThread`/`Context` (soprattutto su Android < 11 come LDPlayer 9): `ActivityThread.currentOpPackageName()` è `null` e `android_media_AudioRecord_setup` in `libandroid_runtime` provoca un crash nativo immediato (`Worker root terminato (exit 0)` senza eccezione Java). Verificare sempre `Build.VERSION.SDK_INT >= Build.VERSION_CODES.R` e `currentOpPackageName()` non nullo prima di inizializzare `AudioRecord` in modalità Root.
 - Mandare video, ping, tocco, tastiera o statistiche prima dell'apertura: il
   core ora le scarta (cancello T10). L'host deve aspettare `negotiated()` e il
   client l'ack; i test di ping e tastiera aprono prima la sessione. Non aggirare
@@ -178,16 +179,20 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- `core/crates/phantom-proto/src/lib.rs`, `core/crates/phantom-core/src/lib.rs`, `core/crates/phantom-ffi/src/lib.rs`:
-  - Token di accoppiamento opzionale 128-bit in `Hello` (`auth_token`, `close_reason::UNAUTHORIZED = 2`, `verify_client_hello`, `build_close_datagram`) con confronto a tempo costante.
-  - Nuovi messaggi di protocollo: `Audio` (AAC-LC in singolo datagramma), `Clipboard` (UTF-8 bidirezionale fino a 1024 byte) e `Control` (`WakeScreen`, `ScreenOff`, `ScreenOn`) + relative capability e test unitari.
-- `android/app/`:
-  - `HostIdentityStore.kt`, `PairingCodec.kt`, `PairingCodecTest.kt`, `MainActivity.kt`: token persistente 16 byte nel QR (`&tok=...`), pulsante esenzione Doze (`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) e permesso `RECORD_AUDIO`.
-  - `PhantomHostSession.kt`: pre-autenticazione del `Hello` su thread leggero prima di accettare + preemption immediata della connessione precedente (switch Wi-Fi → 5G in ~1–2 s invece di 15 s, zero DoS da client non autenticati).
-  - `AudioStreamer.kt`: cattura audio di sistema (`REMOTE_SUBMIX` in Root / `AudioPlaybackCapture` in MediaProjection) + encoder AAC-LC 48 kHz stereo con fallback pulito se non supportato.
-  - `RootDisplayPower.kt`, `RootInputInjector.kt`, `RootHostMain.kt`, `HostForegroundService.kt`: wake-up automatico (`KEYCODE_WAKEUP`), spegnimento/riaccensione display fisico (`SurfaceControl.setDisplayPowerMode` con ripristino garantito su disconnessione/stop) e sync appunti bidirezionale via `ClipboardManager`.
-- `ios/`:
-  - `PairingModels.swift`, `PairedDeviceStore.swift`, `SessionAgreement.swift`, `PairingModelsTests.swift`, `SessionAgreementTests.swift`: supporto `&tok=` nel QR, badge «protetto» e testo chiusura motivo 2.
-  - `AudioPlayer.swift`: player hardware AAC-LC (`AVSampleBufferAudioRenderer` + descrittore `esds` ISO 14496-1).
-  - `RemoteSession.swift`, `RemoteControlSurface.swift`, `RemoteConnectView.swift`: riconnessione immediata Wi-Fi → 5G (50 ms), invio `authToken`, audio con tasto muto, appunti bidirezionali con toast, tasti `Schermo Off/On` e `Risveglia`.
-- `README.md`, `HANDOFF.md`, `PROGRESS.md`: aggiornati.
+- **Documentazione & Brand (`ADR-011`)**:
+  - `docs/design-system.md`, `docs/adr/ADR-011-ui-ux-liquid-glass.md`, `README.md`, `HANDOFF.md`, `PROGRESS.md`: specifiche design system monocromatico Liquid Glass Light/Dark, logo ufficiale **A2 (Ghost Pure)** con alternative B/C archiviate e rename definitivo a **Phantom** (`1.0.0`).
+- **Icone & Risorse (iOS + Android)**:
+  - `ios/PhantomF0/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png` (+ `Contents.json`) e `ios/project.yml` (`CFBundleDisplayName: Phantom`, `MARKETING_VERSION: "1.0.0"`, `ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon`).
+  - `android/app/app/src/main/res/`: Adaptive + Monochrome Icon (`mipmap-anydpi-v26/ic_launcher*.xml`, `ic_launcher_background.xml`, `ic_launcher_foreground.xml`), `ic_phantom_tile.xml`, temi Light/Dark `values/styles.xml` e `values-night/styles.xml` (`Theme.Phantom`).
+- **Restyling UI/UX iOS**:
+  - `ios/PhantomF0/PhantomDesign.swift`: marchio vettoriale `PhantomGhostMark`, palette monocromatica `PhantomPalette`, superfici `PhantomGlassSurface` / `PhantomGlassCapsule` (compatibili Xcode 16 / iOS 17+) e button style.
+  - `ios/PhantomF0/PhantomF0App.swift`, `RemoteConnectView.swift` (`PhantomHomeView` + `PhantomSettingsSheet`), `ContentView.swift` (`DiagnosticsView`), `RemoteControlSurface.swift` (HUD Liquid Glass collassato di default, pillola trascinabile, indicatori tocco monocromatici), `QRScannerView.swift` e `NetworkPathObserver.swift` (fix riavvio `NWPathMonitor`).
+- **Restyling UI/UX Android + Quick Settings Tile**:
+  - `android/app/app/src/main/java/app/phantom/host/HostTheme.kt`: palette adattiva Light/Dark + drawable leggeri (zero Compose/Material).
+  - `android/app/app/src/main/java/app/phantom/host/MainActivity.kt`: Hero Card con stato live + metriche compatte, CTA monocromatica, QR in modale dedicata, controlli a pillole segmentate, riga Doze e scheda *Diagnostica* collassabile (chiusa di default).
+  - `android/app/app/src/main/java/app/phantom/host/PhantomTileService.kt`, `HostForegroundService.kt`, `AndroidManifest.xml`, `build.gradle.kts` (`versionName = "1.0.0"`): Quick Settings Tile 1-tap, icona notifica vettoriale A2, nome app `Phantom` e serializzazione `rootStdinLock` sui comandi verso `app_process64`.
+- **Fix stabilità & crash worker root LDPlayer**:
+  - `android/app/app/src/main/java/app/phantom/host/stream/AudioStreamer.kt`: guardia in `createForRoot` (`SDK_INT >= R` + `ActivityThread.currentOpPackageName()` non nullo) per evitare il crash nativo `libandroid_runtime` (`Worker root terminato (exit 0)`) alla connessione client su LDPlayer/Android 9; `AudioPlaybackCapture` resta attivo in modalità MediaProjection.
+  - `android/app/app/src/main/java/app/phantom/host/stream/PhantomHostSession.kt`: pausa 40 ms prima della chiusura QUIC su rifiuto token non valido per recapitare `Close(UNAUTHORIZED)`.
+  - `android/app/app/src/main/java/app/phantom/host/root/RootDisplayPower.kt` e `RootHostMain.kt`: `restoreIfTurnedOff()` tocca `SurfaceControl.setDisplayPowerMode` solo se il display era stato davvero spento.
+  - `ios/PhantomF0/RemoteSession.swift`: `handleDisconnect` ignora subito le generazioni obsolete senza chiudere la nuova sessione riconnessa e rilascia `P2pClientEndpoint` fuori da `stateLock`.

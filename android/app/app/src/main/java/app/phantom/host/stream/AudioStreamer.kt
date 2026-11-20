@@ -139,14 +139,36 @@ class AudioStreamer private constructor(
         private const val BITRATE_BPS = 128_000
         private const val SAMPLES_PER_FRAME = 1024
 
-        @SuppressLint("MissingPermission")
+        @SuppressLint("MissingPermission", "PrivateApi")
         fun createForRoot(onLog: (String) -> Unit): AudioStreamer? {
+            // In `app_process64` (senza `ActivityThread`/`Context`), chiamare `AudioRecord.Builder.build()`
+            // con `REMOTE_SUBMIX` su Android < 11 (incluso LDPlayer 9 / Android 9) provoca un crash nativo
+            // in `libandroid_runtime` (`opPackageName == null`) non intercettabili da try/catch Java.
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                onLog("Audio di sistema root richiede Android 11+ (streaming solo video)")
+                return null
+            }
+            if (!hasValidOpPackageName()) {
+                onLog("Audio di sistema root non disponibile nel worker standalone (streaming solo video)")
+                return null
+            }
             return createWithBuilder(onLog) { minBuf ->
                 AudioRecord.Builder()
                     .setAudioSource(MediaRecorder.AudioSource.REMOTE_SUBMIX)
                     .setAudioFormat(pcmFormat())
                     .setBufferSizeInBytes(minBuf)
                     .build()
+            }
+        }
+
+        @SuppressLint("PrivateApi")
+        private fun hasValidOpPackageName(): Boolean {
+            return try {
+                val at = Class.forName("android.app.ActivityThread")
+                val pkg = at.getMethod("currentOpPackageName").invoke(null) as? String
+                !pkg.isNullOrBlank()
+            } catch (_: Throwable) {
+                false
             }
         }
 

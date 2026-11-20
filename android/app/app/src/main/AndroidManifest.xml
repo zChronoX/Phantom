@@ -14,8 +14,10 @@
 
     <application
         android:allowBackup="false"
-        android:label="Phantom Host"
-        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="Phantom"
+        android:theme="@style/Theme.Phantom">
 
         <activity
             android:name=".MainActivity"
@@ -34,6 +36,17 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Controllo remoto locale a bassa latenza via QUIC" />
+        </service>
+
+        <service
+            android:name=".PhantomTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_phantom_tile"
+            android:label="Phantom"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
         </service>
     </application>
 </manifest>

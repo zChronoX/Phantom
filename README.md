@@ -20,7 +20,8 @@ android/
 core/         core Rust condiviso: protocollo, video, audio, QUIC LAN, P2P iroh, binding UniFFI
 ios/          app client iPhone Swift/SwiftUI (VideoToolbox + AVSampleBufferAudioRenderer)
 tools/        client di test per PC e utilità di build/preflight
-docs/adr/     decisioni architetturali (ADR-001 … ADR-010)
+docs/adr/     decisioni architetturali (ADR-001 … ADR-011)
+docs/design-system.md  identità visiva, logo e design system Liquid Glass (iOS + Android)
 dist/         pacchetti generati (non versionati)
 ```
 

@@ -32,13 +32,13 @@ struct QRScannerSheet: View {
 
                     VStack {
                         Spacer()
-                        Text("Inquadra il codice QR mostrato in Phantom Host su Android")
+                        Text("Inquadra il codice QR mostrato in Phantom su Android")
                             .font(.footnote.weight(.medium))
                             .foregroundStyle(.white)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 16)
                             .padding(.vertical, 10)
-                            .background(.black.opacity(0.65), in: Capsule())
+                            .phantomGlassCapsule(overVideo: true)
                             .padding(.bottom, 32)
                     }
                 } else {
@@ -102,12 +102,12 @@ private final class QRScannerController: UIViewController, AVCaptureMetadataOutp
                     if granted {
                         self?.configureSession()
                     } else {
-                        self?.onError?("Permesso fotocamera negato. Abilitalo in Impostazioni → Phantom F0.")
+                        self?.onError?("Permesso fotocamera negato. Abilitalo in Impostazioni → Phantom.")
                     }
                 }
             }
         default:
-            onError?("Permesso fotocamera non disponibile. Abilitalo in Impostazioni → Phantom F0.")
+            onError?("Permesso fotocamera non disponibile. Abilitalo in Impostazioni → Phantom.")
         }
     }
 

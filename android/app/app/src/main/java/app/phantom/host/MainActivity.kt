@@ -2,6 +2,7 @@ package app.phantom.host
 
 import android.Manifest
 import android.app.Activity
+import android.app.Dialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -10,6 +11,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
@@ -23,12 +25,13 @@ import android.text.TextUtils
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.view.Window
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.RadioButton
-import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
@@ -43,40 +46,62 @@ import com.google.zxing.qrcode.QRCodeWriter
 import java.util.Locale
 
 /**
- * UI nativa e leggera (zero Jetpack Compose / AppCompat) con QR di accoppiamento 1-tap,
- * identità TLS persistente, rilevamento LAN + VPN/Tailscale e controllo remoto 5G/4G.
+ * UI nativa e leggera (zero Jetpack Compose / AppCompat) con tema monocromatico
+ * Light/Dark (ADR-011), scheda stato principale, QR in modale dedicata e diagnostica collassabile.
  */
 class MainActivity : Activity() {
-    private lateinit var statusBadge: TextView
+    private lateinit var theme: HostTheme
+    private var dp: Float = 1f
+
+    // Header
     private lateinit var thermalBadge: TextView
+
+    // Hero card
+    private lateinit var statusDot: View
+    private lateinit var statusHeadline: TextView
+    private lateinit var statusSubline: TextView
+    private lateinit var metricsBox: LinearLayout
+    private lateinit var metricFpsValue: TextView
+    private lateinit var metricMbpsValue: TextView
+    private lateinit var metricInputValue: TextView
+    private lateinit var toggleButton: Button
+    private lateinit var pairButton: Button
+
+    // Config card
+    private lateinit var modeRootBtn: TextView
+    private lateinit var modeStandardBtn: TextView
+    private lateinit var prof1080_120Btn: TextView
+    private lateinit var prof1080_60Btn: TextView
+    private lateinit var prof720_60Btn: TextView
+    private lateinit var hevcSwitch: Switch
+    private lateinit var dozeStatusView: TextView
+    private lateinit var dozeActionButton: TextView
+
+    // Diagnostics card (chiusa di default)
+    private lateinit var diagChevron: TextView
+    private lateinit var diagBody: LinearLayout
     private lateinit var addrText: TextView
     private lateinit var remoteHintText: TextView
-    private lateinit var remoteInput: EditText
-    private lateinit var qrImage: ImageView
     private lateinit var fingerprintText: TextView
     private lateinit var certPreview: TextView
-    private lateinit var statsText: TextView
+    private lateinit var copyAddrButton: TextView
+    private lateinit var copyCertButton: TextView
+    private lateinit var regenIdentityButton: TextView
     private lateinit var logsText: TextView
-    private lateinit var toggleButton: Button
-    private lateinit var copyAddrButton: Button
-    private lateinit var copyCertButton: Button
-    private lateinit var regenIdentityButton: Button
-    private lateinit var batteryExemptButton: Button
 
-    private lateinit var modeGroup: RadioGroup
-    private lateinit var rootRadio: RadioButton
-    private lateinit var projRadio: RadioButton
-    private lateinit var profileGroup: RadioGroup
-    private lateinit var p1080_120Radio: RadioButton
-    private lateinit var p1080_60Radio: RadioButton
-    private lateinit var p720_60Radio: RadioButton
-    private lateinit var hevcSwitch: Switch
+    // Dialog QR attivo (se aperto)
+    private var pairingDialog: Dialog? = null
+    private var dialogQrImage: ImageView? = null
+    private var dialogMetaText: TextView? = null
+    private var dialogP2pText: TextView? = null
 
     private var selectedMode = CaptureMode.ROOT
     private var selectedProfile = StreamProfile.P1080_120
     private var preferHevc = true
     private var customRemoteHost = ""
+    private var diagnosticsExpanded = false
     private var lastQrUri = ""
+    private var cachedQrBitmap: Bitmap? = null
 
     private val stateListener: (HostUiState) -> Unit = { s ->
         runOnUiThread { render(s) }
@@ -84,13 +109,22 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        dp = resources.displayMetrics.density
+        theme = HostTheme.from(this)
         loadPreferences()
         buildUi()
         HostStateStore.addListener(stateListener)
         loadIdentityAndNetworkAsync()
     }
 
+    override fun onResume() {
+        super.onResume()
+        refreshDozeRow()
+    }
+
     override fun onDestroy() {
+        pairingDialog?.dismiss()
+        pairingDialog = null
         HostStateStore.removeListener(stateListener)
         super.onDestroy()
     }
@@ -140,272 +174,515 @@ class MainActivity : Activity() {
     }
 
     private fun buildUi() {
-        val dp = resources.displayMetrics.density
-        fun px(v: Int): Int = (v * dp).toInt()
-
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#111317"))
-            setPadding(px(16), px(20), px(16), px(24))
+            setBackgroundColor(theme.canvas)
+            setPadding(px(20), px(22), px(20), px(32))
         }
 
-        val titleRow = LinearLayout(this).apply {
+        // 1. Header minimale: marchio Ghost + "Phantom" + pillola termica
+        val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val title = TextView(this).apply {
-            text = "Phantom Host"
-            textSize = 22f
-            setTypeface(Typeface.DEFAULT_BOLD)
-            setTextColor(Color.WHITE)
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        val iconPlate = FrameLayout(this).apply {
+            background = theme.iconPlateDrawable(dp)
+            layoutParams = LinearLayout.LayoutParams(px(38), px(38)).apply {
+                marginEnd = px(12)
+            }
         }
+        val ghostMark = ImageView(this).apply {
+            setImageResource(R.drawable.ic_phantom_tile)
+            setColorFilter(Color.WHITE)
+            layoutParams = FrameLayout.LayoutParams(px(22), px(22), Gravity.CENTER)
+        }
+        iconPlate.addView(ghostMark)
+        header.addView(iconPlate)
+
+        val titleText = TextView(this).apply {
+            text = "Phantom"
+            textSize = 24f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(theme.textPrimary)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        header.addView(titleText)
+
         thermalBadge = TextView(this).apply {
+            text = "Normale"
             textSize = 12f
-            setTextColor(Color.parseColor("#A5F3FC"))
-            setPadding(px(10), px(4), px(10), px(4))
-            background = pill(Color.parseColor("#1E293B"))
+            fontFeatureSettings = "tnum"
+            setTextColor(theme.textSecondary)
+            setPadding(px(12), px(6), px(12), px(6))
+            background = theme.capsuleDrawable(theme.card, theme.hairline, dp)
         }
-        titleRow.addView(title)
-        titleRow.addView(thermalBadge)
-        root.addView(titleRow)
+        header.addView(thermalBadge)
+        root.addView(header, marginBottom(px(20)))
 
-        statusBadge = TextView(this).apply {
+        // 2. Hero Card: stato live, metriche compatte, CTA principale, QR in modale
+        val heroCard = card(px(20))
+
+        val statusRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        statusDot = View(this).apply {
+            background = theme.dotDrawable(theme.textSecondary)
+            layoutParams = LinearLayout.LayoutParams(px(10), px(10)).apply {
+                marginEnd = px(10)
+            }
+        }
+        statusHeadline = TextView(this).apply {
+            text = "Pronto"
+            textSize = 21f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(theme.textPrimary)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        statusRow.addView(statusDot)
+        statusRow.addView(statusHeadline)
+        heroCard.addView(statusRow)
+
+        statusSubline = TextView(this).apply {
+            text = "Avvia l'host per controllare questo dispositivo da iPhone"
+            textSize = 13f
+            setTextColor(theme.textSecondary)
+            setPadding(0, px(6), 0, px(16))
+        }
+        heroCard.addView(statusSubline)
+
+        // Striscia metriche (visibile quando l'host è attivo)
+        metricsBox = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = theme.elevatedDrawable(dp, 16f)
+            setPadding(px(12), px(12), px(12), px(12))
+            visibility = View.GONE
+        }
+        metricFpsValue = addMetricColumn(metricsBox, "FPS", "0")
+        metricMbpsValue = addMetricColumn(metricsBox, "BANDA", "0.0")
+        metricInputValue = addMetricColumn(metricsBox, "INPUT", "0")
+        heroCard.addView(metricsBox, marginBottom(px(16)))
+
+        toggleButton = Button(this).apply {
+            text = "Avvia Host"
+            isAllCaps = false
+            textSize = 15f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            stateListAnimator = null
+            elevation = 0f
+            setTextColor(theme.ctaText)
+            background = theme.capsuleDrawable(theme.ctaFill, null, dp)
+            minHeight = px(52)
+            minimumHeight = px(52)
+            setOnClickListener { onTogglePressed() }
+        }
+        heroCard.addView(toggleButton, marginBottom(px(10)))
+
+        pairButton = Button(this).apply {
+            text = "Collega iPhone · QR"
+            isAllCaps = false
             textSize = 14f
-            setTextColor(Color.parseColor("#E2E8F0"))
-            setPadding(0, px(6), 0, px(14))
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            stateListAnimator = null
+            elevation = 0f
+            setTextColor(theme.textPrimary)
+            background = theme.capsuleDrawable(theme.elevated, theme.hairline, dp)
+            minHeight = px(46)
+            minimumHeight = px(46)
+            setOnClickListener { showPairingDialog() }
         }
-        root.addView(statusBadge)
+        heroCard.addView(pairButton)
+        root.addView(heroCard, marginBottom(px(16)))
 
-        // Scheda accoppiamento QR & indirizzi LAN + 5G/Remoto
-        val connCard = card(px(12))
-        connCard.addView(sectionHeader("Accoppiamento rapido iPhone (QR · LAN + 5G/4G)"))
+        // 3. Scheda Configurazione essenziale
+        val cfgCard = card(px(20))
+        cfgCard.addView(sectionLabel("MODALITÀ"))
+
+        val modeTrack = segmentedTrack()
+        modeRootBtn = segmentOption("Root") {
+            if (!HostStateStore.snapshot().running) {
+                selectedMode = CaptureMode.ROOT
+                savePreferences()
+                refreshConfigSegments(controlsEnabled = true)
+            }
+        }
+        modeStandardBtn = segmentOption("Standard") {
+            if (!HostStateStore.snapshot().running) {
+                selectedMode = CaptureMode.MEDIA_PROJECTION
+                savePreferences()
+                refreshConfigSegments(controlsEnabled = true)
+            }
+        }
+        modeTrack.addView(modeRootBtn)
+        modeTrack.addView(modeStandardBtn)
+        cfgCard.addView(modeTrack, marginBottom(px(16)))
+
+        cfgCard.addView(sectionLabel("PROFILO VIDEO"))
+        val profileTrack = segmentedTrack()
+        prof1080_120Btn = segmentOption("1080p · 120") { selectProfile(StreamProfile.P1080_120) }
+        prof1080_60Btn = segmentOption("1080p · 60") { selectProfile(StreamProfile.P1080_60) }
+        prof720_60Btn = segmentOption("720p · 60") { selectProfile(StreamProfile.P720_60) }
+        profileTrack.addView(prof1080_120Btn)
+        profileTrack.addView(prof1080_60Btn)
+        profileTrack.addView(prof720_60Btn)
+        cfgCard.addView(profileTrack, marginBottom(px(16)))
+
+        // Riga HEVC
+        val hevcRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, px(4), 0, px(12))
+        }
+        val hevcTextCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = px(12)
+            }
+        }
+        hevcTextCol.addView(
+            TextView(this).apply {
+                text = "Codec HEVC"
+                textSize = 15f
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                setTextColor(theme.textPrimary)
+            },
+        )
+        hevcTextCol.addView(
+            TextView(this).apply {
+                text = "Fallback automatico ad H.264"
+                textSize = 12f
+                setTextColor(theme.textSecondary)
+            },
+        )
+        hevcSwitch = Switch(this).apply {
+            isChecked = preferHevc
+            setOnCheckedChangeListener { _, checked ->
+                preferHevc = checked
+                savePreferences()
+            }
+        }
+        hevcRow.addView(hevcTextCol)
+        hevcRow.addView(hevcSwitch)
+        cfgCard.addView(hevcRow)
+
+        cfgCard.addView(divider())
+
+        // Riga Doze / risparmio batteria
+        val dozeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, px(12), 0, 0)
+        }
+        val dozeTextCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = px(12)
+            }
+        }
+        dozeTextCol.addView(
+            TextView(this).apply {
+                text = "Raggiungibile a schermo spento"
+                textSize = 14f
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                setTextColor(theme.textPrimary)
+            },
+        )
+        dozeStatusView = TextView(this).apply {
+            text = "Escludi da Doze per 5G continuo"
+            textSize = 12f
+            setTextColor(theme.textSecondary)
+        }
+        dozeTextCol.addView(dozeStatusView)
+
+        dozeActionButton = TextView(this).apply {
+            text = "Escludi"
+            textSize = 13f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(theme.textPrimary)
+            setPadding(px(14), px(8), px(14), px(8))
+            background = theme.capsuleDrawable(theme.elevated, theme.hairline, dp)
+            setOnClickListener { requestBatteryOptimizationExemption() }
+        }
+        dozeRow.addView(dozeTextCol)
+        dozeRow.addView(dozeActionButton)
+        cfgCard.addView(dozeRow)
+
+        root.addView(cfgCard, marginBottom(px(16)))
+
+        // 4. Scheda Diagnostica collassabile (chiusa di default)
+        val diagCard = card(px(20))
+        val diagHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setOnClickListener { toggleDiagnostics() }
+        }
+        diagHeader.addView(
+            TextView(this).apply {
+                text = "Diagnostica"
+                textSize = 15f
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                setTextColor(theme.textPrimary)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            },
+        )
+        diagChevron = TextView(this).apply {
+            text = "▾"
+            textSize = 16f
+            setTextColor(theme.textSecondary)
+        }
+        diagHeader.addView(diagChevron)
+        diagCard.addView(diagHeader)
+
+        diagBody = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(0, px(14), 0, 0)
+        }
 
         addrText = TextView(this).apply {
             text = "–"
-            textSize = 15f
-            setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
-            setTextColor(Color.WHITE)
-            setPadding(0, px(6), 0, px(2))
+            textSize = 13f
+            typeface = Typeface.MONOSPACE
+            setTextColor(theme.textPrimary)
         }
-        connCard.addView(addrText)
+        diagBody.addView(addrText)
 
         remoteHintText = TextView(this).apply {
             textSize = 12f
-            setTextColor(Color.parseColor("#86EFAC"))
-            setPadding(0, 0, 0, px(8))
+            setTextColor(theme.textSecondary)
+            setPadding(0, px(4), 0, px(8))
         }
-        connCard.addView(remoteHintText)
-
-        qrImage = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            setBackgroundColor(Color.WHITE)
-            setPadding(px(8), px(8), px(8), px(8))
-            layoutParams = LinearLayout.LayoutParams(px(210), px(210)).apply {
-                gravity = Gravity.CENTER_HORIZONTAL
-                topMargin = px(4)
-                bottomMargin = px(8)
-            }
-        }
-        connCard.addView(qrImage)
+        diagBody.addView(remoteHintText)
 
         fingerprintText = TextView(this).apply {
             textSize = 12f
             typeface = Typeface.MONOSPACE
-            gravity = Gravity.CENTER_HORIZONTAL
-            setTextColor(Color.parseColor("#93C5FD"))
-            setPadding(0, 0, 0, px(8))
+            setTextColor(theme.textSecondary)
+            setPadding(0, 0, 0, px(4))
         }
-        connCard.addView(fingerprintText)
+        diagBody.addView(fingerprintText)
 
-        connCard.addView(sectionHeader("Indirizzo remoto 5G/4G (opzionale: Tailscale o DDNS)").apply {
-            setPadding(0, px(4), 0, px(4))
-        })
-        remoteInput = EditText(this).apply {
-            hint = "es. 100.x.y.z:47800 o casa.duckdns.org:47800"
+        certPreview = TextView(this).apply {
+            text = "Caricamento identità…"
+            textSize = 11f
+            typeface = Typeface.MONOSPACE
+            setTextColor(theme.textSecondary)
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.MIDDLE
+            setPadding(0, 0, 0, px(12))
+        }
+        diagBody.addView(certPreview)
+
+        val actionRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        copyAddrButton = smallPillAction("Copia IP") {
+            val s = HostStateStore.snapshot()
+            val value = if (s.ipAddress.isNotBlank()) "${s.ipAddress}:${s.port}" else ":${s.port}"
+            copyToClipboard("Phantom IP", value)
+        }
+        copyCertButton = smallPillAction("Copia Cert") {
+            val cert = HostStateStore.snapshot().certificateHex
+            if (cert.isNotBlank()) copyToClipboard("Phantom Cert", cert)
+        }
+        regenIdentityButton = smallPillAction("Nuova chiave") { regenerateIdentity() }
+        actionRow.addView(copyAddrButton, weightedActionParams(marginEndPx = px(6)))
+        actionRow.addView(copyCertButton, weightedActionParams(marginStartPx = px(3), marginEndPx = px(3)))
+        actionRow.addView(regenIdentityButton, weightedActionParams(marginStartPx = px(6)))
+        diagBody.addView(actionRow, marginBottom(px(14)))
+
+        diagBody.addView(sectionLabel("LOG EVENTI"))
+        logsText = TextView(this).apply {
+            textSize = 11f
+            typeface = Typeface.MONOSPACE
+            setTextColor(theme.textSecondary)
+            background = theme.elevatedDrawable(dp, 14f)
+            setPadding(px(12), px(10), px(12), px(10))
+        }
+        diagBody.addView(logsText)
+
+        diagCard.addView(diagBody)
+        root.addView(diagCard)
+
+        refreshConfigSegments(controlsEnabled = true)
+        refreshDozeRow()
+
+        val scroll = ScrollView(this).apply {
+            setBackgroundColor(theme.canvas)
+            isVerticalScrollBarEnabled = false
+            addView(root)
+        }
+        setContentView(scroll)
+    }
+
+    private fun selectProfile(profile: StreamProfile) {
+        if (HostStateStore.snapshot().running) return
+        selectedProfile = profile
+        savePreferences()
+        refreshConfigSegments(controlsEnabled = true)
+    }
+
+    private fun toggleDiagnostics() {
+        diagnosticsExpanded = !diagnosticsExpanded
+        diagBody.visibility = if (diagnosticsExpanded) View.VISIBLE else View.GONE
+        diagChevron.text = if (diagnosticsExpanded) "▴" else "▾"
+    }
+
+    private fun showPairingDialog() {
+        pairingDialog?.dismiss()
+
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = theme.cardDrawable(dp, 28f)
+            setPadding(px(22), px(22), px(22), px(20))
+        }
+
+        container.addView(
+            TextView(this).apply {
+                text = "Collega iPhone"
+                textSize = 20f
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                setTextColor(theme.textPrimary)
+                gravity = Gravity.CENTER_HORIZONTAL
+            },
+        )
+        container.addView(
+            TextView(this).apply {
+                text = "Apri Phantom su iPhone, tocca + e inquadra il QR"
+                textSize = 13f
+                setTextColor(theme.textSecondary)
+                gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(0, px(6), 0, px(16))
+            },
+        )
+
+        val qrFrame = FrameLayout(this).apply {
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                cornerRadius = 20f * dp
+            }
+            setPadding(px(14), px(14), px(14), px(14))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                bottomMargin = px(14)
+            }
+        }
+        val qrView = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = FrameLayout.LayoutParams(px(216), px(216), Gravity.CENTER)
+        }
+        qrFrame.addView(qrView)
+        container.addView(qrFrame)
+
+        val metaText = TextView(this).apply {
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            setTextColor(theme.textPrimary)
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        container.addView(metaText)
+
+        val p2pText = TextView(this).apply {
+            textSize = 12f
+            setTextColor(theme.textSecondary)
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, px(4), 0, px(14))
+        }
+        container.addView(p2pText)
+
+        container.addView(sectionLabel("INDIRIZZO REMOTO OPZIONALE (TAILSCALE / DDNS)"))
+        val remoteField = EditText(this).apply {
+            hint = "es. 100.x.y.z:47800"
             setText(customRemoteHost)
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.parseColor("#64748B"))
+            setTextColor(theme.textPrimary)
+            setHintTextColor(theme.textSecondary)
             textSize = 13f
             typeface = Typeface.MONOSPACE
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            background = pill(Color.parseColor("#0F172A"))
-            setPadding(px(10), px(8), px(10), px(8))
+            background = theme.elevatedDrawable(dp, 14f)
+            setPadding(px(12), px(10), px(12), px(10))
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
                 override fun afterTextChanged(s: Editable?) {
                     customRemoteHost = s?.toString()?.trim().orEmpty()
                     savePreferences()
-                    updateQrIfNeeded(HostStateStore.snapshot())
+                    updateDialogQr(HostStateStore.snapshot())
                 }
             })
         }
-        connCard.addView(remoteInput, marginBottom(px(10)))
+        container.addView(remoteField, marginBottom(px(16)))
 
-        certPreview = TextView(this).apply {
-            text = "Caricamento identità persistente…"
-            textSize = 10f
-            typeface = Typeface.MONOSPACE
-            setTextColor(Color.parseColor("#94A3B8"))
-            maxLines = 2
-            ellipsize = TextUtils.TruncateAt.MIDDLE
-            setPadding(0, 0, 0, px(8))
+        val closeBtn = Button(this).apply {
+            text = "Chiudi"
+            isAllCaps = false
+            textSize = 14f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            stateListAnimator = null
+            elevation = 0f
+            setTextColor(theme.ctaText)
+            background = theme.capsuleDrawable(theme.ctaFill, null, dp)
+            minHeight = px(46)
+            minimumHeight = px(46)
+            setOnClickListener { dialog.dismiss() }
         }
-        connCard.addView(certPreview)
+        container.addView(closeBtn)
 
-        val copyRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        copyAddrButton = Button(this).apply {
-            text = "Copia IP"
-            setOnClickListener {
-                val s = HostStateStore.snapshot()
-                val value = if (s.ipAddress.isNotBlank()) "${s.ipAddress}:${s.port}" else ":${s.port}"
-                copyToClipboard("Phantom IP", value)
-            }
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = px(4)
-            }
+        val wrapper = FrameLayout(this).apply {
+            setPadding(px(16), px(16), px(16), px(16))
+            addView(
+                container,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
         }
-        copyCertButton = Button(this).apply {
-            text = "Copia Cert"
-            setOnClickListener {
-                val cert = HostStateStore.snapshot().certificateHex
-                if (cert.isNotBlank()) copyToClipboard("Phantom Cert", cert)
-            }
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = px(4)
-                marginEnd = px(4)
-            }
+        dialog.setContentView(wrapper)
+        dialog.window?.setLayout(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        )
+        dialog.setOnDismissListener {
+            dialogQrImage = null
+            dialogMetaText = null
+            dialogP2pText = null
+            pairingDialog = null
         }
-        regenIdentityButton = Button(this).apply {
-            text = "Nuova chiave"
-            setOnClickListener { regenerateIdentity() }
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = px(4)
-            }
-        }
-        copyRow.addView(copyAddrButton)
-        copyRow.addView(copyCertButton)
-        copyRow.addView(regenIdentityButton)
-        connCard.addView(copyRow)
-        root.addView(connCard, marginBottom(px(12)))
 
-        // Scheda controlli avvio
-        val cfgCard = card(px(12))
-        cfgCard.addView(sectionHeader("Modalità di cattura"))
-        rootRadio = RadioButton(this).apply {
-            text = CaptureMode.ROOT.label
-            setTextColor(Color.WHITE)
-            id = View.generateViewId()
-        }
-        projRadio = RadioButton(this).apply {
-            text = CaptureMode.MEDIA_PROJECTION.label
-            setTextColor(Color.WHITE)
-            id = View.generateViewId()
-        }
-        modeGroup = RadioGroup(this).apply {
-            addView(rootRadio)
-            addView(projRadio)
-            check(if (selectedMode == CaptureMode.ROOT) rootRadio.id else projRadio.id)
-            setOnCheckedChangeListener { _, checkedId ->
-                selectedMode = if (checkedId == rootRadio.id) CaptureMode.ROOT else CaptureMode.MEDIA_PROJECTION
-                savePreferences()
-            }
-        }
-        cfgCard.addView(modeGroup)
+        pairingDialog = dialog
+        dialogQrImage = qrView
+        dialogMetaText = metaText
+        dialogP2pText = p2pText
+        updateDialogQr(HostStateStore.snapshot())
+        dialog.show()
+    }
 
-        cfgCard.addView(sectionHeader("Profilo video").apply { setPadding(0, px(10), 0, px(4)) })
-        p1080_120Radio = RadioButton(this).apply {
-            text = StreamProfile.P1080_120.label
-            setTextColor(Color.WHITE)
-            id = View.generateViewId()
+    private fun updateDialogQr(s: HostUiState) {
+        val qrView = dialogQrImage ?: return
+        dialogMetaText?.text = if (s.fingerprintHex.isNotBlank()) {
+            "ID ${s.fingerprintHex}"
+        } else {
+            "Generazione identità…"
         }
-        p1080_60Radio = RadioButton(this).apply {
-            text = StreamProfile.P1080_60.label
-            setTextColor(Color.WHITE)
-            id = View.generateViewId()
+        dialogP2pText?.text = when {
+            s.p2pReady && s.ipAddress.isNotBlank() -> "LAN ${s.ipAddress}:${s.port} · P2P 5G attivo"
+            s.p2pEndpointId.isNotBlank() -> "LAN + P2P 5G inclusi nel QR"
+            else -> "Preparazione canale P2P…"
         }
-        p720_60Radio = RadioButton(this).apply {
-            text = StreamProfile.P720_60.label
-            setTextColor(Color.WHITE)
-            id = View.generateViewId()
-        }
-        profileGroup = RadioGroup(this).apply {
-            addView(p1080_120Radio)
-            addView(p1080_60Radio)
-            addView(p720_60Radio)
-            val checkedId = when (selectedProfile) {
-                StreamProfile.P1080_120 -> p1080_120Radio.id
-                StreamProfile.P1080_60 -> p1080_60Radio.id
-                StreamProfile.P720_60 -> p720_60Radio.id
-            }
-            check(checkedId)
-            setOnCheckedChangeListener { _, id ->
-                selectedProfile = when (id) {
-                    p1080_60Radio.id -> StreamProfile.P1080_60
-                    p720_60Radio.id -> StreamProfile.P720_60
-                    else -> StreamProfile.P1080_120
-                }
-                savePreferences()
-            }
-        }
-        cfgCard.addView(profileGroup)
 
-        hevcSwitch = Switch(this).apply {
-            text = "Preferisci HEVC (fallback automatico ad H.264)"
-            setTextColor(Color.WHITE)
-            isChecked = preferHevc
-            setPadding(0, px(10), 0, px(6))
-            setOnCheckedChangeListener { _, checked ->
-                preferHevc = checked
-                savePreferences()
-            }
+        val bitmap = ensureQrBitmap(s)
+        if (bitmap != null) {
+            qrView.visibility = View.VISIBLE
+            qrView.setImageBitmap(bitmap)
+        } else {
+            qrView.visibility = View.INVISIBLE
         }
-        cfgCard.addView(hevcSwitch)
-
-        batteryExemptButton = Button(this).apply {
-            textSize = 12f
-            setOnClickListener { requestBatteryOptimizationExemption() }
-        }
-        cfgCard.addView(batteryExemptButton)
-        root.addView(cfgCard, marginBottom(px(12)))
-
-        toggleButton = Button(this).apply {
-            textSize = 16f
-            setTypeface(Typeface.DEFAULT_BOLD)
-            setTextColor(Color.WHITE)
-            setPadding(px(16), px(14), px(16), px(14))
-            setOnClickListener { onTogglePressed() }
-        }
-        root.addView(toggleButton, marginBottom(px(12)))
-
-        val statsCard = card(px(12))
-        statsCard.addView(sectionHeader("Telemetria live"))
-        statsText = TextView(this).apply {
-            textSize = 13f
-            typeface = Typeface.MONOSPACE
-            setTextColor(Color.parseColor("#CBD5E1"))
-            setPadding(0, px(4), 0, 0)
-        }
-        statsCard.addView(statsText)
-        root.addView(statsCard, marginBottom(px(12)))
-
-        val logsCard = card(px(12))
-        logsCard.addView(sectionHeader("Log"))
-        logsText = TextView(this).apply {
-            textSize = 11f
-            typeface = Typeface.MONOSPACE
-            setTextColor(Color.parseColor("#94A3B8"))
-            setPadding(0, px(4), 0, 0)
-        }
-        logsCard.addView(logsText)
-        root.addView(logsCard)
-
-        val scroll = ScrollView(this).apply {
-            setBackgroundColor(Color.parseColor("#111317"))
-            addView(root)
-        }
-        setContentView(scroll)
     }
 
     private fun regenerateIdentity() {
@@ -460,21 +737,23 @@ class MainActivity : Activity() {
         }
     }
 
-    override fun onResume() {
-        super.onResume()
-        refreshBatteryButton()
-    }
-
-    private fun refreshBatteryButton() {
-        if (!::batteryExemptButton.isInitialized) return
+    private fun refreshDozeRow() {
+        if (!::dozeStatusView.isInitialized) return
         val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
         val exempt = pm?.isIgnoringBatteryOptimizations(packageName) == true
-        batteryExemptButton.text = if (exempt) {
-            "Doze / risparmio batteria: escluso ✓"
+        if (exempt) {
+            dozeStatusView.text = "Escluso dal risparmio batteria"
+            dozeStatusView.setTextColor(theme.liveGreen)
+            dozeActionButton.text = "Attivo"
+            dozeActionButton.setTextColor(theme.liveGreen)
+            dozeActionButton.isEnabled = false
         } else {
-            "Escludi da Doze (raggiungibile a schermo spento)"
+            dozeStatusView.text = "Escludi da Doze per 5G continuo"
+            dozeStatusView.setTextColor(theme.textSecondary)
+            dozeActionButton.text = "Escludi"
+            dozeActionButton.setTextColor(theme.textPrimary)
+            dozeActionButton.isEnabled = true
         }
-        batteryExemptButton.isEnabled = !exempt
     }
 
     @android.annotation.SuppressLint("BatteryLife")
@@ -501,20 +780,79 @@ class MainActivity : Activity() {
     }
 
     private fun render(s: HostUiState) {
-        statusBadge.text = "Stato: ${s.statusText}"
         val tempStr = s.batteryTempC?.let { String.format(Locale.US, "%.1f °C · ", it) } ?: ""
         thermalBadge.text = "$tempStr${s.thermalLabel}"
+        val thermalColor = when {
+            s.thermalLabel.contains("Critica", ignoreCase = true) -> theme.dangerRed
+            !s.thermalLabel.equals("Normale", ignoreCase = true) -> theme.warnAmber
+            else -> theme.textSecondary
+        }
+        thermalBadge.setTextColor(thermalColor)
 
-        addrText.text = if (s.ipAddress.isNotBlank()) "LAN: ${s.ipAddress}:${s.port}" else "In attesa Wi-Fi (porta ${s.port})"
+        val dotColor = when {
+            s.connected -> theme.liveGreen
+            s.starting -> theme.warnAmber
+            s.running -> theme.textPrimary
+            else -> theme.textSecondary
+        }
+        statusDot.background = theme.dotDrawable(dotColor)
+
+        statusHeadline.text = when {
+            s.connected -> "Connesso"
+            s.starting -> "Avvio in corso…"
+            s.running -> "In ascolto"
+            else -> "Pronto"
+        }
+
+        statusSubline.text = when {
+            s.connected -> {
+                val prof = s.activeProfileText.ifBlank { selectedProfile.label }
+                "Sessione attiva · $prof"
+            }
+            s.running -> {
+                val lan = if (s.ipAddress.isNotBlank()) "LAN ${s.ipAddress}:${s.port}" else "Porta ${s.port}"
+                val p2p = if (s.p2pReady) " · P2P 5G attivo" else " · P2P in preparazione"
+                "$lan$p2p"
+            }
+            else -> {
+                val modeName = if (selectedMode == CaptureMode.ROOT) "Root" else "Standard"
+                "Modalità $modeName · ${selectedProfile.label}"
+            }
+        }
+
+        metricsBox.visibility = if (s.running) View.VISIBLE else View.GONE
+        metricFpsValue.text = String.format(Locale.US, "%.0f", s.fps)
+        metricMbpsValue.text = String.format(Locale.US, "%.1f Mbps", s.mbps)
+        metricInputValue.text = (s.touches + s.keys).toString()
+
+        if (s.running) {
+            toggleButton.text = "Ferma Host"
+            toggleButton.setTextColor(Color.WHITE)
+            toggleButton.background = theme.capsuleDrawable(theme.dangerRed, null, dp)
+        } else {
+            toggleButton.text = "Avvia Host"
+            toggleButton.setTextColor(theme.ctaText)
+            toggleButton.background = theme.capsuleDrawable(theme.ctaFill, null, dp)
+        }
+
+        val controlsEnabled = !s.running
+        refreshConfigSegments(controlsEnabled)
+        hevcSwitch.isEnabled = controlsEnabled
+
+        // Diagnostica
+        addrText.text = if (s.ipAddress.isNotBlank()) {
+            "LAN: ${s.ipAddress}:${s.port}"
+        } else {
+            "In attesa Wi-Fi (porta ${s.port})"
+        }
         remoteHintText.text = when {
             s.p2pReady && s.p2pEndpointId.isNotBlank() ->
-                "P2P integrato (5G/4G ovunque): ATTIVO · ID ${s.p2pEndpointId.take(12)}…"
+                "P2P (iroh) attivo · ID ${s.p2pEndpointId.take(12)}…"
             s.p2pEndpointId.isNotBlank() ->
-                "P2P integrato (5G/4G) pronto nel QR · nessuna VPN necessaria"
+                "P2P (iroh) pronto nel QR · nessuna VPN necessaria"
             else ->
                 "Inizializzazione identità P2P…"
         }
-
         fingerprintText.text = if (s.fingerprintHex.isNotBlank()) {
             "ID stabile: ${s.fingerprintHex}"
         } else {
@@ -522,34 +860,28 @@ class MainActivity : Activity() {
         }
         certPreview.text = if (s.certificateHex.isNotBlank()) s.certificateHex else "Certificato in caricamento…"
         copyCertButton.isEnabled = s.certificateHex.isNotBlank()
-        regenIdentityButton.isEnabled = !s.running
-
-        updateQrIfNeeded(s)
-
-        val controlsEnabled = !s.running
-        rootRadio.isEnabled = controlsEnabled
-        projRadio.isEnabled = controlsEnabled
-        p1080_120Radio.isEnabled = controlsEnabled
-        p1080_60Radio.isEnabled = controlsEnabled
-        p720_60Radio.isEnabled = controlsEnabled
-        hevcSwitch.isEnabled = controlsEnabled
-
-        toggleButton.text = if (s.running) "FERMA HOST" else "AVVIA HOST"
-        toggleButton.background = pill(
-            if (s.running) Color.parseColor("#DC2626") else Color.parseColor("#16A34A"),
-        )
-
-        val prof = if (s.activeProfileText.isNotBlank()) s.activeProfileText else selectedProfile.label
-        statsText.text = String.format(
-            Locale.US,
-            "Profilo: %s\nFPS: %.1f · Banda: %.2f Mbps\nTocchi: %d · Tasti: %d",
-            prof,
-            s.fps,
-            s.mbps,
-            s.touches,
-            s.keys,
-        )
+        copyCertButton.alpha = if (s.certificateHex.isNotBlank()) 1f else 0.4f
+        regenIdentityButton.isEnabled = controlsEnabled
+        regenIdentityButton.alpha = if (controlsEnabled) 1f else 0.4f
         logsText.text = if (s.logs.isEmpty()) "(nessun evento)" else s.logs.takeLast(30).joinToString("\n")
+
+        // Pre-genera QR in cache e aggiorna eventuale modale aperta
+        ensureQrBitmap(s)
+        updateDialogQr(s)
+    }
+
+    private fun refreshConfigSegments(controlsEnabled: Boolean) {
+        styleSegment(modeRootBtn, selectedMode == CaptureMode.ROOT, controlsEnabled)
+        styleSegment(modeStandardBtn, selectedMode == CaptureMode.MEDIA_PROJECTION, controlsEnabled)
+        styleSegment(prof1080_120Btn, selectedProfile == StreamProfile.P1080_120, controlsEnabled)
+        styleSegment(prof1080_60Btn, selectedProfile == StreamProfile.P1080_60, controlsEnabled)
+        styleSegment(prof720_60Btn, selectedProfile == StreamProfile.P720_60, controlsEnabled)
+    }
+
+    private fun styleSegment(view: TextView, selected: Boolean, enabled: Boolean) {
+        view.background = theme.segmentDrawable(selected, dp)
+        view.setTextColor(if (selected) theme.ctaText else theme.textSecondary)
+        view.alpha = if (enabled) 1f else 0.5f
     }
 
     private fun effectiveRemoteAddress(s: HostUiState): String? {
@@ -562,11 +894,8 @@ class MainActivity : Activity() {
         return null
     }
 
-    private fun updateQrIfNeeded(s: HostUiState) {
-        if (s.certificateDer.isEmpty()) {
-            qrImage.visibility = View.GONE
-            return
-        }
+    private fun ensureQrBitmap(s: HostUiState): Bitmap? {
+        if (s.certificateDer.isEmpty()) return null
         val lan = s.ipAddress.takeIf { it.isNotBlank() }?.let { "$it:${s.port}" }
         val wan = effectiveRemoteAddress(s)
         val deviceName = Build.MODEL.ifBlank { "Android" }
@@ -578,13 +907,14 @@ class MainActivity : Activity() {
             p2pId = s.p2pEndpointId.takeIf { it.isNotBlank() },
             authToken = s.authToken.takeIf { it.size == 16 },
         )
-        qrImage.visibility = View.VISIBLE
-        if (uri == lastQrUri) return
+        if (uri == lastQrUri && cachedQrBitmap != null) return cachedQrBitmap
         lastQrUri = uri
-        try {
-            qrImage.setImageBitmap(renderQrBitmap(uri, 512))
+        cachedQrBitmap = try {
+            renderQrBitmap(uri, 512)
         } catch (_: Throwable) {
+            null
         }
+        return cachedQrBitmap
     }
 
     private fun renderQrBitmap(content: String, sizePx: Int): Bitmap {
@@ -613,50 +943,120 @@ class MainActivity : Activity() {
 
     private fun loadPreferences() {
         val p = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        val modeName = p.getString("mode", CaptureMode.ROOT.name)
+        val modeName = p.getString(KEY_MODE, CaptureMode.ROOT.name)
         selectedMode = CaptureMode.entries.firstOrNull { it.name == modeName } ?: CaptureMode.ROOT
-        val profName = p.getString("profile", StreamProfile.P1080_120.name)
+        val profName = p.getString(KEY_PROFILE, StreamProfile.P1080_120.name)
         selectedProfile = StreamProfile.entries.firstOrNull { it.name == profName } ?: StreamProfile.P1080_120
-        preferHevc = p.getBoolean("hevc", true)
-        customRemoteHost = p.getString("remote_host", "").orEmpty().trim()
+        preferHevc = p.getBoolean(KEY_HEVC, true)
+        customRemoteHost = p.getString(KEY_REMOTE_HOST, "").orEmpty().trim()
     }
 
     private fun savePreferences() {
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-            .putString("mode", selectedMode.name)
-            .putString("profile", selectedProfile.name)
-            .putBoolean("hevc", preferHevc)
-            .putString("remote_host", customRemoteHost)
+            .putString(KEY_MODE, selectedMode.name)
+            .putString(KEY_PROFILE, selectedProfile.name)
+            .putBoolean(KEY_HEVC, preferHevc)
+            .putString(KEY_REMOTE_HOST, customRemoteHost)
             .apply()
     }
+
+    // --- Helper UI leggeri ---
+
+    private fun px(v: Int): Int = (v * dp).toInt()
 
     private fun card(padPx: Int): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(padPx, padPx, padPx, padPx)
-        background = pill(Color.parseColor("#1B1F27"))
+        background = theme.cardDrawable(dp, 24f)
     }
 
-    private fun sectionHeader(title: String): TextView = TextView(this).apply {
+    private fun sectionLabel(title: String): TextView = TextView(this).apply {
         text = title
-        textSize = 12f
-        setTypeface(Typeface.DEFAULT_BOLD)
-        setTextColor(Color.parseColor("#93C5FD"))
+        textSize = 11f
+        letterSpacing = 0.08f
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        setTextColor(theme.textSecondary)
+        setPadding(0, 0, 0, px(8))
     }
 
-    private fun pill(color: Int): GradientDrawable = GradientDrawable().apply {
-        setColor(color)
-        cornerRadius = 14f * resources.displayMetrics.density
+    private fun segmentedTrack(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        background = theme.capsuleDrawable(theme.elevated, theme.hairline, dp)
+        setPadding(px(4), px(4), px(4), px(4))
+    }
+
+    private fun segmentOption(label: String, onClick: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        textSize = 13f
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        gravity = Gravity.CENTER
+        setPadding(px(8), px(9), px(8), px(9))
+        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        setOnClickListener { onClick() }
+    }
+
+    private fun smallPillAction(label: String, onClick: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        textSize = 12f
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        gravity = Gravity.CENTER
+        setTextColor(theme.textPrimary)
+        background = theme.capsuleDrawable(theme.elevated, theme.hairline, dp)
+        setPadding(px(8), px(9), px(8), px(9))
+        setOnClickListener { onClick() }
+    }
+
+    private fun weightedActionParams(marginStartPx: Int = 0, marginEndPx: Int = 0): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginStart = marginStartPx
+            marginEnd = marginEndPx
+        }
+
+    private fun addMetricColumn(parent: LinearLayout, label: String, initialValue: String): TextView {
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val valueView = TextView(this).apply {
+            text = initialValue
+            textSize = 16f
+            fontFeatureSettings = "tnum"
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(theme.textPrimary)
+        }
+        val labelView = TextView(this).apply {
+            text = label
+            textSize = 10f
+            letterSpacing = 0.08f
+            setTextColor(theme.textSecondary)
+            setPadding(0, px(2), 0, 0)
+        }
+        col.addView(valueView)
+        col.addView(labelView)
+        parent.addView(col)
+        return valueView
+    }
+
+    private fun divider(): View = View(this).apply {
+        setBackgroundColor(theme.hairline)
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, px(1).coerceAtLeast(1))
     }
 
     private fun marginBottom(px: Int): LinearLayout.LayoutParams = LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.MATCH_PARENT,
-        LinearLayout.LayoutParams.WRAP_CONTENT,
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.WRAP_CONTENT,
     ).apply {
         bottomMargin = px
     }
 
     companion object {
-        private const val PREFS_NAME = "phantom_host_prefs"
+        internal const val PREFS_NAME = "phantom_host_prefs"
+        internal const val KEY_MODE = "mode"
+        internal const val KEY_PROFILE = "profile"
+        internal const val KEY_HEVC = "hevc"
+        internal const val KEY_REMOTE_HOST = "remote_host"
+
         private const val REQ_MEDIA_PROJECTION = 1001
         private const val REQ_NOTIF = 1002
     }

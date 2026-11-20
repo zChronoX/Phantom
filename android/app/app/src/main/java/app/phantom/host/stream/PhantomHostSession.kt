@@ -125,7 +125,10 @@ class PhantomHostSession(
                         if (expectedToken.isNotEmpty()) {
                             try {
                                 val closeDgram = buildCloseDatagram(expectedConnId, 2u.toUByte())
-                                if (closeDgram.isNotEmpty()) conn.sendDatagram(closeDgram)
+                                if (closeDgram.isNotEmpty()) {
+                                    conn.sendDatagram(closeDgram)
+                                    Thread.sleep(40)
+                                }
                             } catch (_: Throwable) {
                             }
                             onLog("Connessione ($label) rifiutata: token di accoppiamento non valido")

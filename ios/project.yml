@@ -9,7 +9,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.5.1"
+    MARKETING_VERSION: "1.0.0"
     CURRENT_PROJECT_VERSION: "1"
     ENABLE_USER_SCRIPT_SANDBOXING: YES
 targets:
@@ -26,7 +26,7 @@ targets:
     info:
       path: PhantomF0/Info.plist
       properties:
-        CFBundleDisplayName: Phantom F0
+        CFBundleDisplayName: Phantom
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
@@ -46,7 +46,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.phantom.f0
         TARGETED_DEVICE_FAMILY: "1"
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Core Rust: libreria statica per iPhone e modulo C dei binding (vedi core/crates/phantom-ffi e ADR-008).
         SWIFT_INCLUDE_PATHS: "$(SRCROOT)/build/rust/swift"
         OTHER_SWIFT_FLAGS: "-Xcc -fmodule-map-file=$(SRCROOT)/build/rust/swift/phantom_ffiFFI.modulemap"

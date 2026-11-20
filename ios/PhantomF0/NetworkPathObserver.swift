@@ -10,7 +10,7 @@ final class NetworkPathObserver: ObservableObject {
 
     var onNetworkChanged: ((_ isCellularOnly: Bool, _ isSatisfied: Bool) -> Void)?
 
-    private let monitor = NWPathMonitor()
+    private var monitor: NWPathMonitor?
     private let queue = DispatchQueue(label: "app.phantom.netpath")
     private let lock = NSLock()
     private var started = false
@@ -30,9 +30,11 @@ final class NetworkPathObserver: ObservableObject {
             return
         }
         started = true
+        let newMonitor = NWPathMonitor()
+        monitor = newMonitor
         lock.unlock()
 
-        monitor.pathUpdateHandler = { [weak self] path in
+        newMonitor.pathUpdateHandler = { [weak self] path in
             guard let self = self else { return }
             let satisfied = path.status == .satisfied
             let hasWifi = path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet)
@@ -69,7 +71,7 @@ final class NetworkPathObserver: ObservableObject {
                 cb?(cellOnly, satisfied)
             }
         }
-        monitor.start(queue: queue)
+        newMonitor.start(queue: queue)
     }
 
     func stop() {
@@ -80,7 +82,9 @@ final class NetworkPathObserver: ObservableObject {
         }
         started = false
         onNetworkChanged = nil
+        let active = monitor
+        monitor = nil
         lock.unlock()
-        monitor.cancel()
+        active?.cancel()
     }
 }

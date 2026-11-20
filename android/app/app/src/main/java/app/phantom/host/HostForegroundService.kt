@@ -10,6 +10,7 @@ import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -29,6 +30,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.service.quicksettings.TileService
 import android.view.WindowManager
 import app.phantom.host.core.HostFormatHelpers
 import app.phantom.host.core.PairingCodec
@@ -60,6 +62,7 @@ class HostForegroundService : Service() {
 
     private var workerThread: Thread? = null
     private var rootProcess: Process? = null
+    private val rootStdinLock = Any()
     private var rootStdin: BufferedWriter? = null
     private var projectionSession: PhantomHostSession? = null
     private var mediaProjection: MediaProjection? = null
@@ -160,6 +163,7 @@ class HostForegroundService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
         acquireWakeLock()
+        requestTileRefresh()
     }
 
     private fun startRootMode(config: HostRunConfig) {
@@ -224,12 +228,13 @@ class HostForegroundService : Service() {
                 val pb = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true)
                 proc = pb.start()
                 rootProcess = proc
-                rootStdin = BufferedWriter(OutputStreamWriter(proc.outputStream)).also { writer ->
-                    val temp = batteryTempTenths?.toString() ?: "none"
-                    val status = readAndroidThermalStatus()
-                    writer.write("THERMAL|$temp|$status\n")
-                    writer.flush()
+                val writer = BufferedWriter(OutputStreamWriter(proc.outputStream))
+                synchronized(rootStdinLock) {
+                    rootStdin = writer
                 }
+                val temp = batteryTempTenths?.toString() ?: "none"
+                val status = readAndroidThermalStatus()
+                sendRootCommand("THERMAL|$temp|$status")
 
                 val reader = BufferedReader(InputStreamReader(proc.inputStream))
                 while (true) {
@@ -244,7 +249,9 @@ class HostForegroundService : Service() {
                 HostStateStore.addLog("Errore avvio root: ${t.message}")
             } finally {
                 unregisterMdns()
-                rootStdin = null
+                synchronized(rootStdinLock) {
+                    rootStdin = null
+                }
                 rootProcess = null
                 proc?.destroy()
                 markStopped("Host fermo")
@@ -518,14 +525,9 @@ class HostForegroundService : Service() {
         }
         mediaProjection = null
 
-        val writer = rootStdin
-        rootStdin = null
-        if (writer != null) {
-            try {
-                writer.write("STOP\n")
-                writer.flush()
-            } catch (_: Throwable) {
-            }
+        sendRootCommand("STOP")
+        synchronized(rootStdinLock) {
+            rootStdin = null
         }
         val proc = rootProcess
         if (proc != null) {
@@ -603,17 +605,10 @@ class HostForegroundService : Service() {
                         if (text.isEmpty() || text == lastSyncedClipboard.get()) return@OnPrimaryClipChangedListener
                         lastSyncedClipboard.set(text)
                         projectionSession?.sendClipboardToClient(text)
-                        val writer = rootStdin
-                        if (writer != null) {
-                            val b64 = PairingCodec.encodeBase64UrlNoPad(text.toByteArray(Charsets.UTF_8))
-                            Thread({
-                                try {
-                                    writer.write("CLIP|$b64\n")
-                                    writer.flush()
-                                } catch (_: Throwable) {
-                                }
-                            }, "phantom-clip-out").start()
-                        }
+                        val b64 = PairingCodec.encodeBase64UrlNoPad(text.toByteArray(Charsets.UTF_8))
+                        Thread({
+                            sendRootCommand("CLIP|$b64")
+                        }, "phantom-clip-out").start()
                     } catch (_: Throwable) {
                     }
                 }
@@ -694,14 +689,7 @@ class HostForegroundService : Service() {
             cur.copy(ipAddress = ip.ifBlank { cur.ipAddress }, vpnIpAddress = vpnIp)
         }
         projectionSession?.notifyNetworkChanged()
-        val writer = rootStdin
-        if (writer != null) {
-            try {
-                writer.write("NET_CHANGE\n")
-                writer.flush()
-            } catch (_: Throwable) {
-            }
-        }
+        sendRootCommand("NET_CHANGE")
     }
 
     private fun markStopped(status: String) {
@@ -717,6 +705,17 @@ class HostForegroundService : Service() {
                 statusText = status,
             )
         }
+        requestTileRefresh()
+    }
+
+    private fun requestTileRefresh() {
+        try {
+            TileService.requestListeningState(
+                this,
+                ComponentName(this, PhantomTileService::class.java),
+            )
+        } catch (_: Throwable) {
+        }
     }
 
     private fun refreshThermalPolicy() {
@@ -729,18 +728,23 @@ class HostForegroundService : Service() {
             it.copy(batteryTempC = tempC, thermalLabel = policy.label)
         }
 
-        val writer = rootStdin
-        if (writer != null) {
-            try {
-                val temp = batteryTempTenths?.toString() ?: "none"
-                writer.write("THERMAL|$temp|$status\n")
-                writer.flush()
-            } catch (_: Throwable) {
-            }
-        }
+        val temp = batteryTempTenths?.toString() ?: "none"
+        sendRootCommand("THERMAL|$temp|$status")
         if (policy.shouldStop && HostStateStore.snapshot().running) {
             HostStateStore.addLog("Temperatura critica (${tempC ?: "?"} °C): arresto host")
             projectionSession?.stop()
+        }
+    }
+
+    private fun sendRootCommand(command: String) {
+        synchronized(rootStdinLock) {
+            val writer = rootStdin ?: return
+            try {
+                writer.write(command)
+                writer.write("\n")
+                writer.flush()
+            } catch (_: Throwable) {
+            }
         }
     }
 
@@ -783,7 +787,7 @@ class HostForegroundService : Service() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "Phantom Host",
+            "Phantom",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
             description = "Stato e controllo rapido dello streaming verso iPhone"
@@ -806,8 +810,8 @@ class HostForegroundService : Service() {
         )
         val stopAction = Notification.Action.Builder(null, "Ferma", stopIntent).build()
         return Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
-            .setContentTitle("Phantom Host")
+            .setSmallIcon(R.drawable.ic_phantom_tile)
+            .setContentTitle("Phantom")
             .setContentText(text)
             .setOngoing(true)
             .setContentIntent(openIntent)

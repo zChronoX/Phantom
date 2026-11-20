@@ -212,8 +212,8 @@ final class RemoteDisplayTouchView: UIView, UIKeyInput {
         } else {
             ring = CAShapeLayer()
             ring.path = UIBezierPath(ovalIn: CGRect(x: -20, y: -20, width: 40, height: 40)).cgPath
-            ring.fillColor = UIColor.systemTeal.withAlphaComponent(0.25).cgColor
-            ring.strokeColor = UIColor.systemTeal.withAlphaComponent(0.85).cgColor
+            ring.fillColor = UIColor.white.withAlphaComponent(0.22).cgColor
+            ring.strokeColor = UIColor.white.withAlphaComponent(0.82).cgColor
             ring.lineWidth = 2
             layer.addSublayer(ring)
             touchLayers[id] = ring
@@ -308,13 +308,15 @@ struct RemoteSessionView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
 
-    @State private var hudExpanded = true
+    @State private var hudExpanded = false
     @State private var hudHidden = false
     @State private var keyboardVisible = false
     @State private var toggleKeyboardToken = 0
     @State private var resetTouchesToken = 0
     @State private var started = false
     @State private var controllerBridge = GamepadBridge()
+    @State private var pillOffset: CGSize = .zero
+    @GestureState private var pillDrag: CGSize = .zero
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -349,12 +351,13 @@ struct RemoteSessionView: View {
                     Text(toast)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(.black.opacity(0.75), in: Capsule())
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 9)
+                        .phantomGlassCapsule(overVideo: true)
                         .padding(.bottom, 28)
                 }
                 .allowsHitTesting(false)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .navigationBarBackButtonHidden(true)
@@ -398,77 +401,103 @@ struct RemoteSessionView: View {
     }
 
     private var connectionBanner: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             if session.running {
                 ProgressView()
                     .tint(.white)
             } else {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.title3)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(PhantomPalette.warnAmber)
             }
             Text(session.statusText)
-                .font(.footnote)
+                .font(.footnote.weight(.medium))
                 .foregroundStyle(.white)
                 .multilineTextAlignment(.center)
             if !session.running {
                 Button("Riconnetti") { reconnect() }
-                    .buttonStyle(.borderedProminent)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 9)
+                    .background(.white, in: Capsule())
             }
         }
-        .padding(16)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .padding(.horizontal, 24)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 18)
+        .phantomGlassCard(cornerRadius: 22, overVideo: true)
+        .padding(.horizontal, 28)
     }
 
     private var collapsedHandle: some View {
         HStack {
             Spacer()
             Button {
-                withAnimation(.easeInOut(duration: 0.18)) { hudHidden = false }
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) { hudHidden = false }
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: 7) {
                     Circle()
-                        .fill(session.metrics.connected ? .green : .orange)
-                        .frame(width: 8, height: 8)
+                        .fill(session.metrics.connected ? PhantomPalette.liveGreen : PhantomPalette.warnAmber)
+                        .frame(width: 7, height: 7)
+                    if session.metrics.connected {
+                        Text(String(format: "%.0f fps", session.metrics.fps))
+                            .font(.caption2.monospacedDigit().weight(.semibold))
+                    }
                     Image(systemName: "slider.horizontal.3")
                         .font(.caption.weight(.semibold))
                 }
                 .foregroundStyle(.white)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(.black.opacity(0.55), in: Capsule())
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .phantomGlassCapsule(overVideo: true)
             }
             .padding(.top, 8)
             .padding(.trailing, 12)
+            .offset(
+                x: pillOffset.width + pillDrag.width,
+                y: pillOffset.height + pillDrag.height
+            )
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 6)
+                    .updating($pillDrag) { value, state, _ in
+                        state = value.translation
+                    }
+                    .onEnded { value in
+                        pillOffset.width = max(-260, min(0, pillOffset.width + value.translation.width))
+                        pillOffset.height = max(0, min(520, pillOffset.height + value.translation.height))
+                    }
+            )
         }
     }
 
     private var hudBar: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 10) {
+        VStack(spacing: 10) {
+            HStack(spacing: 11) {
                 Button {
                     end()
                     dismiss()
                 } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.title3)
+                    Image(systemName: "xmark")
+                        .font(.caption.weight(.bold))
+                        .frame(width: 28, height: 28)
+                        .background(.white.opacity(0.14), in: Circle())
                 }
 
                 Circle()
-                    .fill(session.metrics.connected ? .green : .orange)
-                    .frame(width: 9, height: 9)
+                    .fill(session.metrics.connected ? PhantomPalette.liveGreen : PhantomPalette.warnAmber)
+                    .frame(width: 8, height: 8)
 
                 Text(hudSummaryLine)
-                    .font(.caption.monospacedDigit())
+                    .font(.caption.monospacedDigit().weight(.medium))
                     .lineLimit(1)
 
-                Spacer()
+                Spacer(minLength: 4)
 
                 Button {
                     session.toggleAudioMute()
                 } label: {
                     Image(systemName: session.audioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .font(.subheadline)
                 }
 
                 Button {
@@ -476,24 +505,30 @@ struct RemoteSessionView: View {
                     toggleKeyboardToken &+= 1
                 } label: {
                     Image(systemName: keyboardVisible ? "keyboard.chevron.compact.down" : "keyboard")
+                        .font(.subheadline)
                 }
 
                 Button {
-                    withAnimation(.easeInOut(duration: 0.18)) { hudExpanded.toggle() }
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) { hudExpanded.toggle() }
                 } label: {
                     Image(systemName: hudExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.bold))
                 }
 
                 Button {
-                    withAnimation(.easeInOut(duration: 0.18)) { hudHidden = true }
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                        hudExpanded = false
+                        hudHidden = true
+                    }
                 } label: {
-                    Image(systemName: "eye.slash")
+                    Image(systemName: "minus")
+                        .font(.caption.weight(.bold))
                 }
             }
             .foregroundStyle(.white)
 
             if hudExpanded {
-                HStack(spacing: 12) {
+                HStack(spacing: 8) {
                     quickButton("Indietro", systemImage: "chevron.backward", action: .back)
                     quickButton("Home", systemImage: "circle", action: .home)
                     quickButton("Recenti", systemImage: "square.on.square", action: .recents)
@@ -501,8 +536,8 @@ struct RemoteSessionView: View {
                     quickButton("Vol+", systemImage: "speaker.wave.3", action: .volumeUp)
                 }
 
-                HStack(spacing: 12) {
-                    controlButton("Invia appunti", systemImage: "doc.on.clipboard") {
+                HStack(spacing: 8) {
+                    controlButton("Appunti", systemImage: "doc.on.clipboard") {
                         session.sendClipboardFromPasteboard()
                     }
                     controlButton(
@@ -517,30 +552,30 @@ struct RemoteSessionView: View {
                 }
 
                 if case .localQuicLoopback = mode {
-                    Text("Loopback QUIC · tocchi all'host \(session.metrics.hostTouchReceived) · tasti \(session.metrics.hostKeyReceived)")
+                    Text("Loopback · tocchi \(session.metrics.hostTouchReceived) · tasti \(session.metrics.hostKeyReceived)")
                         .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.8))
+                        .foregroundStyle(.white.opacity(0.7))
                 } else if !session.metrics.agreementSummary.isEmpty {
                     Text(session.metrics.agreementSummary)
                         .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.8))
+                        .foregroundStyle(.white.opacity(0.7))
                         .lineLimit(1)
                 }
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 16))
-        .padding(.horizontal, 10)
+        .phantomGlassCard(cornerRadius: hudExpanded ? 24 : 999, overVideo: true)
+        .padding(.horizontal, 12)
         .padding(.top, 6)
     }
 
     private var hudSummaryLine: String {
         let m = session.metrics
         guard m.connected else { return session.statusText }
-        let rtt = m.rttMs.map { String(format: "%.1f ms", $0) } ?? "–"
+        let rtt = m.rttMs.map { String(format: "%.0f ms", $0) } ?? "–"
         let prefix = m.endpointLabel.isEmpty ? "" : "\(m.endpointLabel) · "
-        return String(format: "%@%.0f fps · %.1f Mbps · RTT %@", prefix, m.fps, m.bitrateMbps, rtt)
+        return String(format: "%@%.0f fps · %@", prefix, m.fps, rtt)
     }
 
     private func quickButton(_ title: String, systemImage: String, action: RemoteQuickAction) -> some View {
@@ -551,16 +586,20 @@ struct RemoteSessionView: View {
 
     private func controlButton(_ title: String, systemImage: String, onTap: @escaping () -> Void) -> some View {
         Button(action: onTap) {
-            VStack(spacing: 3) {
+            VStack(spacing: 4) {
                 Image(systemName: systemImage)
                     .font(.footnote.weight(.semibold))
                 Text(title)
-                    .font(.caption2)
+                    .font(.caption2.weight(.medium))
             }
             .foregroundStyle(.white)
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 5)
-            .background(.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
+            .padding(.vertical, 7)
+            .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(.white.opacity(0.14), lineWidth: 0.5)
+            }
         }
     }
 }

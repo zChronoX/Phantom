@@ -1,17 +1,23 @@
 import SwiftUI
 
-/// Phantom F0 · app di misura per la fase 0.
-/// Fa lo stesso test di rete della pagina Safari, ma in UDP nativo come farà Phantom:
-/// così si separa l'effetto di Safari e del TCP da quello del Wi-Fi.
+/// Punto d'ingresso principale di Phantom: apre direttamente sulla schermata pulita dei dispositivi salvati.
 @main
 struct PhantomF0App: App {
+    @Environment(\.scenePhase) private var scenePhase
+
     init() {
         CrashLog.start()
     }
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            PhantomHomeView()
+                .onChange(of: scenePhase) { _, phase in
+                    CrashLog.markMem("FASE \(phase)")
+                    if phase != .active {
+                        TelemetryRecorder.shared.flush()
+                    }
+                }
         }
     }
 }
