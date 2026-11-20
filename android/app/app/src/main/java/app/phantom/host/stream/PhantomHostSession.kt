@@ -477,6 +477,10 @@ class PhantomHostSession(
             val negotiatedInfo = phantomHost.negotiated()
             if (running.get() && clientActive.get() && negotiatedInfo != null) {
                 if (audioStreamer != null && capsContains(negotiatedInfo.caps, Capability.AUDIO_AAC)) {
+                    // Ridondanza: ogni pacchetto audio parte due volte, la seconda insieme al successivo (+21 ms).
+                    // Costa ~130 kbit/s, niente rispetto al video, e copre le perdite isolate del Wi-Fi: l'iPhone
+                    // scarta il doppione o usa la copia se l'originale si è perso.
+                    var previousAudio: ByteArray? = null
                     audioStreamer.start { data, isConfig, captureTsUs ->
                         if (!running.get() || !clientActive.get() || conn.isClosed() || phantomHost.isClosed()) return@start
                         val dgram = phantomHost.sendAudio(
@@ -489,6 +493,10 @@ class PhantomHostSession(
                         )
                         if (dgram != null) {
                             sendCounted(dgram)
+                            if (!isConfig) {
+                                previousAudio?.let { sendCounted(it) }
+                                previousAudio = dgram
+                            }
                         }
                     }
                 } else {

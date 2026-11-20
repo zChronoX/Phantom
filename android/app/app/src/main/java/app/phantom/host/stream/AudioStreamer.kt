@@ -16,6 +16,7 @@ import android.media.projection.MediaProjection
 import android.os.Build
 import android.os.Process
 import android.os.SystemClock
+import app.phantom.host.core.AudioSampleClock
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -42,64 +43,90 @@ class AudioStreamer private constructor(
     }
 
     private fun runLoop(onPacket: (data: ByteArray, isConfig: Boolean, captureTsUs: Long) -> Unit) {
-        val pcmChunk = ByteArray(SAMPLES_PER_FRAME * channels * 2)
+        // Priorità audio: con l'encoder video a URGENT_DISPLAY, un thread a priorità normale arrivava in ritardo a
+        // leggere l'AudioRecord, che perdeva campioni (buchi e gracchii).
+        try {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+        } catch (_: Throwable) {
+        }
+        val frameBytes = SAMPLES_PER_FRAME * channels * 2
+        val pcmChunk = ByteArray(frameBytes)
         val info = MediaCodec.BufferInfo()
+        val clock = AudioSampleClock(sampleRate)
         var cachedAsc: ByteArray? = null
         var lastAscSentMs = 0L
+        // L'AudioSpecificConfig è un datagramma come gli altri e si può perdere: senza, l'iPhone non decodifica.
+        // Lo si ripete subito con i primi pacchetti e poi ogni secondo.
+        var ascRepeatsLeft = 3
+
+        fun drainOutput() {
+            while (running.get()) {
+                val outIdx = encoder.dequeueOutputBuffer(info, 0L)
+                if (outIdx < 0) return
+                try {
+                    val outBuf = encoder.getOutputBuffer(outIdx)
+                    if (outBuf != null && info.size > 0) {
+                        val bytes = ByteArray(info.size)
+                        outBuf.position(info.offset)
+                        outBuf.limit(info.offset + info.size)
+                        outBuf.get(bytes)
+
+                        val isConfig = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                        val nowMs = SystemClock.elapsedRealtime()
+                        if (isConfig) {
+                            cachedAsc = bytes
+                            lastAscSentMs = nowMs
+                            onPacket(bytes, true, info.presentationTimeUs)
+                        } else {
+                            val asc = cachedAsc
+                            if (asc != null && (ascRepeatsLeft > 0 || nowMs - lastAscSentMs >= ASC_REPEAT_MS)) {
+                                if (ascRepeatsLeft > 0) ascRepeatsLeft--
+                                lastAscSentMs = nowMs
+                                onPacket(asc, true, info.presentationTimeUs)
+                            }
+                            onPacket(bytes, false, info.presentationTimeUs)
+                        }
+                    }
+                } finally {
+                    encoder.releaseOutputBuffer(outIdx, false)
+                }
+            }
+        }
 
         try {
             recorder.startRecording()
             encoder.start()
-            while (running.get()) {
-                val read = recorder.read(pcmChunk, 0, pcmChunk.size)
-                if (read <= 0) {
-                    if (read < 0) break
-                    continue
+            outer@ while (running.get()) {
+                // Un pacchetto AAC = esattamente 1024 campioni: si legge il blocco intero.
+                var filled = 0
+                while (filled < frameBytes) {
+                    if (!running.get()) break@outer
+                    val n = recorder.read(pcmChunk, filled, frameBytes - filled)
+                    if (n < 0) break@outer
+                    filled += n
                 }
-                val captureTsUs = SystemClock.elapsedRealtimeNanos() / 1_000L
-                val inIdx = encoder.dequeueInputBuffer(10_000L)
-                if (inIdx >= 0) {
-                    val inBuf = encoder.getInputBuffer(inIdx)
-                    if (inBuf != null) {
-                        inBuf.clear()
-                        val toCopy = read.coerceAtMost(inBuf.remaining())
-                        inBuf.put(pcmChunk, 0, toCopy)
-                        encoder.queueInputBuffer(inIdx, 0, toCopy, captureTsUs, 0)
-                    } else {
-                        encoder.queueInputBuffer(inIdx, 0, 0, captureTsUs, 0)
-                    }
-                }
+                val ptsUs = clock.onChunk(SAMPLES_PER_FRAME, SystemClock.elapsedRealtimeNanos() / 1_000L)
 
-                while (running.get()) {
-                    val outIdx = encoder.dequeueOutputBuffer(info, 0L)
-                    if (outIdx < 0) break
-                    try {
-                        val outBuf = encoder.getOutputBuffer(outIdx)
-                        if (outBuf != null && info.size > 0) {
-                            val bytes = ByteArray(info.size)
-                            outBuf.position(info.offset)
-                            outBuf.limit(info.offset + info.size)
-                            outBuf.get(bytes)
-
-                            val isConfig = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
-                            val nowMs = SystemClock.elapsedRealtime()
-                            if (isConfig) {
-                                cachedAsc = bytes
-                                lastAscSentMs = nowMs
-                                onPacket(bytes, true, info.presentationTimeUs)
-                            } else {
-                                val asc = cachedAsc
-                                if (asc != null && nowMs - lastAscSentMs >= 2_000L) {
-                                    lastAscSentMs = nowMs
-                                    onPacket(asc, true, info.presentationTimeUs)
-                                }
-                                onPacket(bytes, false, info.presentationTimeUs)
-                            }
+                // Il blocco va consegnato all'encoder per intero: prima, se l'encoder non aveva un buffer libero
+                // entro 10 ms, i campioni venivano buttati (un buco di 21 ms nell'audio).
+                var queued = false
+                while (!queued && running.get()) {
+                    val inIdx = encoder.dequeueInputBuffer(5_000L)
+                    if (inIdx >= 0) {
+                        val inBuf = encoder.getInputBuffer(inIdx)
+                        if (inBuf != null) {
+                            inBuf.clear()
+                            val toCopy = frameBytes.coerceAtMost(inBuf.remaining())
+                            inBuf.put(pcmChunk, 0, toCopy)
+                            encoder.queueInputBuffer(inIdx, 0, toCopy, ptsUs, 0)
+                        } else {
+                            encoder.queueInputBuffer(inIdx, 0, 0, ptsUs, 0)
                         }
-                    } finally {
-                        encoder.releaseOutputBuffer(outIdx, false)
+                        queued = true
                     }
+                    drainOutput()
                 }
+                drainOutput()
             }
         } catch (_: Throwable) {
         } finally {
@@ -142,6 +169,10 @@ class AudioStreamer private constructor(
         const val CHANNELS = 2
         private const val BITRATE_BPS = 128_000
         private const val SAMPLES_PER_FRAME = 1024
+        private const val ASC_REPEAT_MS = 1_000L
+
+        /** Buffer interno dell'`AudioRecord`: 250 ms di margine se il thread arriva in ritardo (non aggiunge latenza). */
+        private const val RECORD_BUFFER_BYTES = SAMPLE_RATE / 4 * CHANNELS * 2
 
         @SuppressLint("MissingPermission", "NewApi")
         fun createForRoot(onLog: (String) -> Unit): AudioStreamer? {
@@ -215,7 +246,7 @@ class AudioStreamer private constructor(
                     SAMPLE_RATE,
                     AudioFormat.CHANNEL_IN_STEREO,
                     AudioFormat.ENCODING_PCM_16BIT,
-                ).coerceAtLeast(SAMPLES_PER_FRAME * CHANNELS * 4)
+                ).coerceAtLeast(SAMPLES_PER_FRAME * CHANNELS * 4).coerceAtLeast(RECORD_BUFFER_BYTES)
 
                 rec = recorderFactory(minBuf)
                 if (rec.state != AudioRecord.STATE_INITIALIZED) {

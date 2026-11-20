@@ -18,6 +18,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use phantom_core::jitter::{AudioJitter, JitterConfig};
 use phantom_core::phantom_proto::{
     caps, AudioCodec as ProtoAudioCodec, Codec, ControlCommand as ProtoControlCommand, Finger, Header, Message,
     HEADER_LEN, MAX_DATAGRAM, MAX_FINGERS, MAX_VIDEO_PAYLOAD, VIDEO_HEADER_LEN,
@@ -781,6 +782,95 @@ impl PhantomClient {
     }
 }
 
+/// Un pacchetto audio pronto per il riproduttore.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct JitterAudioFrame {
+    /// Posizione del primo campione sulla linea del tempo del riproduttore (campioni).
+    pub pts_samples: i64,
+    /// Dati codificati (un pacchetto AAC).
+    pub data: Vec<u8>,
+}
+
+/// Risposta di [`AudioJitterBuffer::poll`].
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct JitterAudioPoll {
+    /// Se presente: svuotare il riproduttore e portare il suo orologio a questa posizione (campioni) prima di
+    /// accodare `frames`.
+    pub resync_playhead_samples: Option<i64>,
+    /// Pacchetti da accodare, in ordine.
+    pub frames: Vec<JitterAudioFrame>,
+}
+
+/// Contatori del buffer anti-jitter audio.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct JitterAudioCounters {
+    /// Pacchetti ricevuti (doppioni compresi).
+    pub received: u64,
+    /// Doppioni scartati (copie di ridondanza).
+    pub duplicates: u64,
+    /// Pacchetti arrivati dopo che il loro posto era passato.
+    pub late: u64,
+    /// Posti saltati (silenzio di un pacchetto ciascuno).
+    pub skipped: u64,
+    /// Risincronizzazioni (avvio compreso).
+    pub resyncs: u64,
+    /// Ritardo di riproduzione attuale (ms).
+    pub delay_ms: u32,
+}
+
+/// Buffer anti-jitter per l'audio (lato iPhone): mette ogni pacchetto al suo posto sulla linea del tempo (dall'istante
+/// di cattura dell'host), scarta i doppioni, aspetta i pacchetti in ritardo finché c'è tempo e adatta il ritardo di
+/// riproduzione alla rete. Vedi `phantom_core::jitter`.
+#[derive(uniffi::Object)]
+pub struct AudioJitterBuffer {
+    inner: Mutex<AudioJitter>,
+}
+
+#[uniffi::export]
+impl AudioJitterBuffer {
+    /// Crea il buffer per AAC-LC a `sample_rate` Hz.
+    #[uniffi::constructor]
+    pub fn new(sample_rate: u32) -> Arc<Self> {
+        Arc::new(AudioJitterBuffer { inner: Mutex::new(AudioJitter::new(JitterConfig::aac(sample_rate))) })
+    }
+
+    /// Un pacchetto audio (non di configurazione); `now_us` è l'orologio locale.
+    pub fn push(&self, now_us: u64, capture_ts_us: u64, data: Vec<u8>) {
+        lock(&self.inner).push(now_us, capture_ts_us, data);
+    }
+
+    /// Pacchetti da accodare. `playhead_samples` è la posizione attuale del riproduttore (`None` se non è partito).
+    pub fn poll(&self, now_us: u64, playhead_samples: Option<i64>) -> JitterAudioPoll {
+        let p = lock(&self.inner).poll(now_us, playhead_samples);
+        JitterAudioPoll {
+            resync_playhead_samples: p.resync_playhead,
+            frames: p
+                .frames
+                .into_iter()
+                .map(|f| JitterAudioFrame { pts_samples: f.pts_samples, data: f.data })
+                .collect(),
+        }
+    }
+
+    /// Dimentica tutto (nuova sessione o formato audio cambiato).
+    pub fn reset(&self) {
+        lock(&self.inner).reset();
+    }
+
+    /// Contatori.
+    pub fn counters(&self) -> JitterAudioCounters {
+        let s = lock(&self.inner).stats();
+        JitterAudioCounters {
+            received: s.received,
+            duplicates: s.duplicates,
+            late: s.late,
+            skipped: s.skipped,
+            resyncs: s.resyncs,
+            delay_ms: (s.delay_us / 1_000) as u32,
+        }
+    }
+}
+
 /// Errore del trasporto QUIC esposto ai binding Swift e Kotlin.
 #[derive(Debug, uniffi::Error)]
 pub enum QuicTransportError {
@@ -1415,6 +1505,24 @@ mod tests {
         assert_eq!(clamped_low.frag_size, 1);
         let clamped_high: SessionConfig = SessionSettings { frag_size: u16::MAX, ..d }.into();
         assert_eq!(clamped_high.frag_size, MAX_VIDEO_PAYLOAD as u16);
+    }
+
+    #[test]
+    fn audio_jitter_buffer_orders_and_deduplicates() {
+        let j = AudioJitterBuffer::new(48_000);
+        let frame_us = |i: u64| 5_000_000 + i * 1_000_000 * 1024 / 48_000;
+        for i in [0u64, 2, 1, 1, 2] {
+            j.push(0, frame_us(i), vec![i as u8]);
+        }
+        let poll = j.poll(0, None);
+        assert!(poll.resync_playhead_samples.is_some(), "avvio");
+        let pts: Vec<i64> = poll.frames.iter().map(|f| f.pts_samples).collect();
+        assert_eq!(pts, vec![0, 1024, 2048]);
+        assert_eq!(poll.frames[1].data, vec![1]);
+        let c = j.counters();
+        assert_eq!((c.received, c.duplicates, c.resyncs, c.delay_ms), (5, 2, 1, 80));
+        j.reset();
+        assert!(j.poll(0, None).frames.is_empty());
     }
 
     #[test]

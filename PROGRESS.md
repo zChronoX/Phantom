@@ -1,6 +1,6 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-20. Branch `main`, base `0768f02` (= `origin/main`) più correzioni v1.2.0 non committate.
+Ultimo aggiornamento: 2026-11-20. Branch `main`, base `9425593` (v1.2.0) più correzioni audio v1.2.1 non committate.
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Dove siamo
@@ -372,10 +372,16 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
     invio contati e mostrati nel log, istante di cattura preso dal `presentationTimeUs`.
   Dettagli in `HANDOFF.md` («Uncommitted changes») e `ADR-009`.
 
+- **Prova v1.2.0 sul Redmi**: video migliorato, quasi sincronizzato nel 70–80% dei casi; audio spesso muto o
+  gracchiante.
+- **Correzioni audio `v1.2.1` (locale, da committare)**: buffer anti-jitter nel core Rust (`phantom_core::jitter`,
+  esposto come `AudioJitterBuffer`), player iOS riscritto sopra il buffer, cattura Android a priorità audio con
+  istanti dal conteggio dei campioni e senza PCM perso, `AudioSpecificConfig` ripetuto, ogni pacchetto audio spedito
+  due volte. Dettagli in `HANDOFF.md`.
+
 ## Prossimo passo
 
-1. Committare e pushare `v1.2.0`, installare il nuovo APK release sul Redmi (disinstallando prima il debug) e
-   confrontare HUD e log con la prova precedente.
+1. Committare e pushare `v1.2.1` e riprovare l'audio sul Redmi (musica o video), poi creare il tag della release.
 2. Fase «progetto completo»: controllo senza root (Shizuku/ADB wireless), adattamento di risoluzione e fps, tasti di
    sistema nell'app iOS, telemetria estesa, release seria.
 3. Quando il Redmi Note 11 Pro 5G avrà il root, verificare multi-touch/tastiera, audio Root Android 12+, `Schermo Off`

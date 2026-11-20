@@ -3,8 +3,14 @@ import AVFoundation
 import CoreMedia
 import AudioToolbox
 
-/// Riproduce i frame AAC-LC ricevuti dall'host Android a bassissima latenza tramite
-/// `AVSampleBufferAudioRenderer` + `AVSampleBufferRenderSynchronizer` (decodifica hardware nativa iOS).
+/// Riproduce i frame AAC-LC ricevuti dall'host Android tramite `AVSampleBufferAudioRenderer` +
+/// `AVSampleBufferRenderSynchronizer` (decodifica hardware nativa iOS).
+///
+/// I pacchetti non vengono più suonati appena arrivano: passano dal buffer anti-jitter del core
+/// (`AudioJitterBuffer`), che li mette al loro posto sulla linea del tempo (dall'istante di cattura dell'host),
+/// scarta le copie di ridondanza, aspetta i ritardatari finché c'è tempo e decide quando far ripartire
+/// l'orologio del riproduttore. Prima ogni pacchetto in ritardo diventava un buco o un salto (il gracchiare) e
+/// l'audio partiva senza alcun margine.
 final class AudioStreamPlayer {
     private let queue = DispatchQueue(label: "app.phantom.remote.audio", qos: .userInteractive)
     private let renderer = AVSampleBufferAudioRenderer()
@@ -15,8 +21,12 @@ final class AudioStreamPlayer {
     private var lastSampleRate: UInt32 = 0
     private var lastChannels: UInt8 = 0
     private var lastAsc = Data()
-    private var nextFrameIndex: Int64 = 0
-    private var startedClock = false
+    private var jitter: AudioJitterBuffer?
+    private var clockRunning = false
+    private var pumpTimer: DispatchSourceTimer?
+
+    /// Campioni per pacchetto AAC-LC.
+    private static let frameSamples: Int64 = 1024
 
     var isMuted: Bool {
         get { renderer.isMuted }
@@ -37,8 +47,9 @@ final class AudioStreamPlayer {
             self.active = true
             self.formatDescription = nil
             self.lastAsc = Data()
-            self.nextFrameIndex = 0
-            self.startedClock = false
+            self.lastSampleRate = 0
+            self.lastChannels = 0
+            self.resetStream()
             do {
                 let session = AVAudioSession.sharedInstance()
                 try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
@@ -46,6 +57,14 @@ final class AudioStreamPlayer {
             } catch {
                 // La riproduzione audio è opzionale: non interrompe mai lo streaming video
             }
+            // Il buffer va interrogato anche quando non arrivano pacchetti, per saltare in tempo quelli persi.
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.schedule(deadline: .now() + .milliseconds(10), repeating: .milliseconds(10), leeway: .milliseconds(2))
+            timer.setEventHandler { [weak self] in
+                self?.pump()
+            }
+            self.pumpTimer = timer
+            timer.resume()
         }
     }
 
@@ -53,12 +72,11 @@ final class AudioStreamPlayer {
         queue.async { [weak self] in
             guard let self = self else { return }
             self.active = false
-            self.startedClock = false
+            self.pumpTimer?.cancel()
+            self.pumpTimer = nil
             self.formatDescription = nil
             self.lastAsc = Data()
-            self.nextFrameIndex = 0
-            self.synchronizer.rate = 0
-            self.renderer.flush()
+            self.resetStream()
         }
     }
 
@@ -66,6 +84,25 @@ final class AudioStreamPlayer {
         queue.async { [weak self] in
             self?.handleFrame(frame)
         }
+    }
+
+    /// Contatori del buffer anti-jitter (per la telemetria); `nil` se l'audio non è ancora partito.
+    func counters(_ completion: @escaping (JitterAudioCounters?) -> Void) {
+        queue.async { [weak self] in
+            completion(self?.jitter?.counters())
+        }
+    }
+
+    private static func nowUs() -> UInt64 {
+        DispatchTime.now().uptimeNanoseconds / 1_000
+    }
+
+    /// Ferma l'orologio, svuota il riproduttore e dimentica la linea del tempo (nuova sessione o formato nuovo).
+    private func resetStream() {
+        synchronizer.rate = 0
+        renderer.flush()
+        clockRunning = false
+        jitter = nil
     }
 
     private func handleFrame(_ frame: AudioFrame) {
@@ -81,50 +118,61 @@ final class AudioStreamPlayer {
                     channels: frame.channels,
                     asc: frame.data
                 )
+                resetStream()
             }
             return
         }
 
-        if formatDescription == nil || frame.sampleRate != lastSampleRate || frame.channels != lastChannels {
-            lastSampleRate = frame.sampleRate
-            lastChannels = frame.channels
-            formatDescription = Self.makeFormatDescription(
-                sampleRate: frame.sampleRate,
-                channels: frame.channels,
-                asc: lastAsc.isEmpty ? nil : lastAsc
-            )
+        // Senza AudioSpecificConfig il decoder AAC non sa cosa decodificare (prima si provava lo stesso e il
+        // renderer falliva in silenzio): si aspetta, l'host lo ripete con i primi pacchetti e poi ogni secondo.
+        guard formatDescription != nil, frame.sampleRate == lastSampleRate, frame.channels == lastChannels else {
+            return
         }
-        guard let fmt = formatDescription else { return }
+        let buffer: AudioJitterBuffer
+        if let existing = jitter {
+            buffer = existing
+        } else {
+            buffer = AudioJitterBuffer(sampleRate: lastSampleRate)
+            jitter = buffer
+        }
+        buffer.push(nowUs: Self.nowUs(), captureTsUs: frame.captureTsUs, data: frame.data)
+        pump()
+    }
+
+    /// Chiede al buffer cosa accodare adesso e, se serve, fa ripartire l'orologio del riproduttore.
+    private func pump() {
+        guard active, let buffer = jitter, let fmt = formatDescription else { return }
+        let sr = Int32(max(8_000, lastSampleRate))
 
         if renderer.status == .failed {
+            // Il decoder si è bloccato: si svuota e si riparte (il buffer risincronizza se non ha la posizione).
             renderer.flush()
-            startedClock = false
-            nextFrameIndex = 0
+            clockRunning = false
         }
-        guard renderer.isReadyForMoreMediaData else { return }
 
-        let sr = Int32(max(8_000, frame.sampleRate))
-        let frameSamples: Int64 = 1024
-        let pts = CMTime(value: nextFrameIndex * frameSamples, timescale: sr)
-        let dur = CMTime(value: frameSamples, timescale: sr)
-        nextFrameIndex += 1
-
-        guard let sb = Self.makeSampleBuffer(data: frame.data, format: fmt, pts: pts, duration: dur) else { return }
-
-        if !startedClock {
-            startedClock = true
-            synchronizer.setRate(1.0, time: pts)
-        } else {
-            let current = synchronizer.currentTime()
-            if current.isNumeric {
-                let drift = CMTimeGetSeconds(CMTimeSubtract(pts, current))
-                if drift > 0.25 || drift < -0.15 {
-                    renderer.flush()
-                    synchronizer.setRate(1.0, time: pts)
-                }
+        var playhead: Int64?
+        if clockRunning {
+            let now = synchronizer.currentTime()
+            if now.isNumeric {
+                playhead = CMTimeConvertScale(now, timescale: sr, method: .roundTowardNegativeInfinity).value
             }
         }
-        renderer.enqueue(sb)
+
+        let result = buffer.poll(nowUs: Self.nowUs(), playheadSamples: playhead)
+        if let start = result.resyncPlayheadSamples {
+            renderer.flush()
+            synchronizer.setRate(1.0, time: CMTime(value: start, timescale: sr))
+            clockRunning = true
+        }
+
+        let duration = CMTime(value: Self.frameSamples, timescale: sr)
+        for frame in result.frames {
+            guard renderer.isReadyForMoreMediaData else { break }
+            let pts = CMTime(value: frame.ptsSamples, timescale: sr)
+            if let sb = Self.makeSampleBuffer(data: frame.data, format: fmt, pts: pts, duration: duration) {
+                renderer.enqueue(sb)
+            }
+        }
     }
 
     private static func makeFormatDescription(

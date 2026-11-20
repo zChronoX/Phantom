@@ -1,7 +1,7 @@
 # Handoff
 
-Scritto: 2026-11-20; aggiornato con le correzioni **v1.2.0** per i lag sul Redmi Note 11 Pro 5G reale (trasporto BBR, Wi-Fi lock, encoder adattato al SoC, build release, invio frame in una chiamata FFI, keyframe su frame scartati in iOS).
-Branch: main - base `0768f02` (= `origin/main`) + modifiche v1.2.0 non committate (vedi «Uncommitted changes»).
+Scritto: 2026-11-20; aggiornato con le correzioni audio **v1.2.1** (buffer anti-jitter nel core, cattura Android robusta, ridondanza dei pacchetti).
+Branch: main - base `9425593` (v1.2.0, pushato dall'utente) + modifiche v1.2.1 non committate (vedi «Uncommitted changes»).
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -84,15 +84,14 @@ Otto task della sessione precedente più T9 e T10 chiusi e verificati in Docker
 
 ## Next steps (in order)
 
-1. Eseguire `tools/repo-preflight.ps1`, rivedere il diff v1.2.0, committare e pushare (CI: `core.yml`, `android-app.yml`, `ios.yml`).
-2. (Facoltativo ma consigliato) Creare il keystore di release e i secret GitHub `PHANTOM_KEYSTORE_BASE64`,
-   `PHANTOM_KEYSTORE_PASSWORD`, `PHANTOM_KEY_ALIAS`, `PHANTOM_KEY_PASSWORD`: senza, l'APK è una release non debuggable
-   firmata con la chiave di debug della run (va disinstallata la versione precedente a ogni build).
-3. Disinstallare l'APK debug dal Redmi, installare il nuovo `Phantom.apk` (release) e provare in modalità Standard,
-   guardando nell'HUD iOS espanso Mbps, coda ms e risoluzione, e nel log Android le righe «Risoluzione adattata»,
-   «Frequenza adattata», «Wi-Fi a bassa latenza attivo» e «Rete in affanno».
-4. Fase successiva concordata con l'utente: controllo senza root (Shizuku/ADB wireless), adattamento di risoluzione e
-   fps, tasti di sistema nell'app iOS, telemetria estesa, release seria (firma, versioni, note).
+1. Preflight, commit e push della v1.2.1; aspettare la CI verde (`core`, `Android · Phantom APK`, `iOS · Phantom`).
+2. Prova sul Redmi (modalità Standard) con musica o un video: l'audio deve essere continuo, con circa 80–110 ms di
+   ritardo rispetto al video. Se gracchia ancora, guardare `JitterAudioCounters` (da esporre nell'HUD) per capire se
+   sono pacchetti persi (`skipped`), in ritardo (`late`) o risincronizzazioni (`resyncs`).
+3. Esito della prova v1.2.0 riferito dall'utente: video quasi sincronizzato nel 70–80% dei casi, audio spesso muto o
+   gracchiante (motivo della v1.2.1).
+4. Fase «progetto completo»: controllo senza root (Shizuku/ADB wireless), adattamento di risoluzione e fps, tasti di
+   sistema nell'app iOS, telemetria estesa (anche audio), release seria.
 
 ## Decisions and constraints from the user
 
@@ -186,34 +185,31 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-**v1.2.0 — lag e qualità sul Redmi Note 11 Pro 5G (Snapdragon 695, modalità Standard, Wi-Fi):**
+**v1.2.1 — audio muto o gracchiante sul Redmi (la v1.2.0 è nel commit `9425593`).**
 
-- Trasporto (`phantom-quic`, `phantom-p2p`): BBR al posto di Cubic, coda datagrammi in uscita 1 MiB → 512 KiB,
-  `datagram_send_buffer_space()` esposto; `noq-proto` aggiunto come dipendenza diretta di `phantom-p2p` (stessa
-  versione usata da `iroh`). Dettagli e motivazioni in `ADR-009` (aggiornamento v1.2.0).
-- Core: `Host::request_keyframe()` (keyframe chiesto dal lato host), `VideoReceiver::request_resync()` e
-  `Client::request_keyframe()` (il decoder dell'app ha perso un frame: scarta i non-key e chiede un keyframe, motivo 2).
-  Nuovo modulo di test `resync` (2 test). Due `if` dentro `match` trasformati in guardie per clippy 1.97.
-- FFI: `PhantomHost::send_frame_via(connection, …) -> FrameSendReport`, `PhantomHost::request_keyframe`,
-  `PhantomClient::request_keyframe`, `QuicConnection::queued_send_bytes`; il test loopback QUIC usa `send_frame_via`.
-- Android:
-  - `HostForegroundService`: Wi-Fi lock `LOW_LATENCY` + `HIGH_PERF` per tutta la sessione.
-  - `VideoEncoder`: allineamento 8 (non più 1080 → 1088 stirato), scala esatta (1080×2400 → 864×1920 con limite
-    1920), riduzione a passi del 3%, fps scelti dai `PerformancePoint` del SoC (120 → 60 se non regge),
-    istante di cattura da `presentationTimeUs`.
-  - `PhantomHostSession`: invio frame con `sendFrameVia`, contatori di invii falliti/pacchetti scartati e riga di log
-    «Rete in affanno» ogni 5 s quando cambiano.
-  - `HostFormatHelpers`: `scaledDimensions` senza arrotondare per eccesso, `fitEncoderSize`, `realisticFps`,
-    `captureTimeUs` (+ 3 test JVM).
-  - Gradle/CI: `assembleRelease` non debuggable, firma da keystore in secret o fallback chiave di debug,
-    `lint.checkReleaseBuilds = false`; versione `1.2.0`.
-- iOS: `RemoteControlSurface` segnala i frame scartati dal renderer o i fallimenti del decoder,
-  `RemoteSession.requestKeyframeAfterDecoderDrop()` manda la richiesta di keyframe; versione `1.2.0`.
-- `core/Cargo.lock` rigenerato: quello committato era fermo a prima di `phantom-p2p` (non conteneva `iroh`).
+Cause trovate:
+- iPhone: ogni pacchetto suonato appena arrivato, orologio avviato senza margine, linea del tempo costruita contando i
+  pacchetti ricevuti (una perdita la accorciava), flush e ripartenza a ogni scarto > 150 ms, e decodifica tentata
+  senza `AudioSpecificConfig` (se il primo pacchetto di configurazione si perdeva il renderer falliva per secondi).
+- Android: thread audio a priorità normale contro l'encoder video a `URGENT_DISPLAY` (l'`AudioRecord` perdeva
+  campioni), PCM buttato se l'encoder non dava un buffer entro 10 ms, istanti di cattura presi dall'ora di ritorno di
+  `read()` (ballavano di millisecondi), nessuna protezione dalle perdite.
 
-Verifiche fatte (container Linux, Rust 1.97): `cargo test --workspace --release` → 22 blocchi `test result: ok`;
-`cargo fmt --check` e `cargo clippy --workspace --all-targets -D warnings` puliti; binding Kotlin e Swift rigenerati;
-sorgenti Kotlin dell'app compilati con `kotlinc 2.0.21` contro `android.jar` API 34 + JNA + binding (unici errori:
-`MainActivity` per la libreria ZXing non disponibile offline, file non toccato); 17 test JVM dell'app eseguiti con
-uno stub JUnit → tutti ok. Non verificati: build Gradle/APK, compilazione Swift (lo fa la CI macOS), MSRV 1.82,
-prova sul telefono.
+Modifiche:
+- Core: nuovo modulo `phantom_core::jitter` (`AudioJitter`): indice di ogni pacchetto dall'istante di cattura,
+  riordino, doppioni, attesa dei mancanti fino a 12 ms dalla loro ora, ritardo iniziale 80 ms che cresce di 30 ms
+  (fino a 240) dopo 3 ritardatari in 3 s, ritorno al ritardo giusto se il buffer resta gonfio 1,5 s, ripartenza dopo
+  uno stallo della cattura. 10 test, compresa una simulazione di 30 s con ritardi fino a 70 ms e 5% di perdite.
+- FFI: `AudioJitterBuffer` (`push`, `poll`, `reset`, `counters`) con `JitterAudioPoll`, `JitterAudioFrame`,
+  `JitterAudioCounters` (+1 test).
+- Android: `AudioStreamer` a `THREAD_PRIORITY_URGENT_AUDIO`, buffer `AudioRecord` di 250 ms, blocchi interi da 1024
+  campioni, nessun PCM perso verso l'encoder, istanti da `AudioSampleClock` (conteggio campioni, nuovo file + 2 test
+  JVM), `AudioSpecificConfig` ripetuto con i primi 3 pacchetti e poi ogni secondo. `PhantomHostSession`: ogni pacchetto
+  audio spedito due volte (la seconda insieme al successivo).
+- iOS: `AudioPlayer.swift` riscritto sopra `AudioJitterBuffer` (timer di 10 ms, attesa dell'`AudioSpecificConfig`,
+  pts dalla linea del tempo del buffer, `counters()` per la telemetria futura).
+- Versione `1.2.1` su Android e iOS.
+
+Verifiche (container Linux, Rust 1.97): `cargo test --workspace --release` → 22 blocchi ok; `fmt`/`clippy -D warnings`
+puliti; binding Kotlin e Swift rigenerati; app Kotlin compilata con `kotlinc` (salvo `MainActivity`/ZXing); 19 test JVM
+ok con stub JUnit. Non verificati: compilazione Swift (CI macOS), build Gradle, prova sul telefono.

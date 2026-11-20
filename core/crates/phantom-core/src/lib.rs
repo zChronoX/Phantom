@@ -5,6 +5,7 @@
 //! scritti come macchine a stati pure — nessun thread, nessun sonno, tempo passato dal chiamante — così le stesse
 //! prove girano veloci e identiche su ogni piattaforma.
 
+pub mod jitter;
 pub mod rate;
 
 use std::collections::VecDeque;
