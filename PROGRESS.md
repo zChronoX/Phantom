@@ -344,7 +344,12 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 - **Fix crash worker root LDPlayer + audit stabilità (locale, incluso nello stesso blocco da committare)**:
   - Causa crash su LDPlayer (`Fallback encoder H265...` → `Worker root terminato (exit 0)`): `AudioStreamer.createForRoot()` chiamava `AudioRecord.Builder().setAudioSource(REMOTE_SUBMIX).build()` dentro `app_process64` (dove `ActivityThread.currentOpPackageName()` è `null`), causando un crash nativo in `libandroid_runtime` non catturabile da Java. Aggiunta guardia (`SDK_INT >= 30` + `currentOpPackageName()` valido), `restoreIfTurnedOff()` in `RootDisplayPower`, lock su `rootStdin` in `HostForegroundService`, flush 40 ms di `Close(UNAUTHORIZED)` in `PhantomHostSession` e fix race di `handleDisconnect` su generazioni obsolete in `RemoteSession.swift`.
 
+- **Verifica v1.0 su iPhone + LDPlayer 9 (Android 9, Root)**: confermati streaming 60 fps H.264, `Schermo Off/On` (`ok=true`), switch Wi-Fi ↔ 5G istantaneo nello stesso secondo grazie a preemption autenticata, e nuova UI Liquid Glass Light/Dark su entrambe le app.
+- **Rifinitura finale e rilascio v1.0.0 (locale, pronto per commit + tag `v1.0.0`)**:
+  - `AudioStreamer.kt`: aggiunto `RootAudioContext` (`AttributionSource` ufficiale Android 12+ / API 31+) per la cattura audio di sistema `REMOTE_SUBMIX` in modalità Root su Android 12+ (Redmi Note 11 Pro 5G), mantenendo solo-video sicuro su Android < 12 (LDPlayer 9 / Android 9).
+  - Workflow CI/Release: `iOS · Phantom` (`Phantom.ipa`) e `Android · Phantom APK` (`Phantom.apk`) pubblicano automaticamente le release ufficiali sui tag `v*`; ristretto `android-f0.yml` ai soli percorsi legacy (`android/module/**`, `android/probe/**`, `tools/**`); aggiornato `README.md`.
+
 ## Prossimo passo
 
-1. Committare e pushare il restyling UI/UX + icone su `origin/main` per generare i nuovi `.ipa` e `.apk` su GitHub Actions e verificarli su iPhone + LDPlayer (Light/Dark Mode, Home, QR modale, HUD Liquid Glass e Quick Settings Tile).
-2. (Quando il Redmi Note 11 Pro 5G avrà il root) verificare HEVC 1080p·120 fps, audio `REMOTE_SUBMIX`, `ScreenOff` e Doze su hardware reale.
+1. Committare, pushare su `origin/main` e creare/pushare il tag `v1.0.0` per pubblicare la release ufficiale GitHub con `Phantom.ipa` e `Phantom.apk`.
+2. Quando il Redmi Note 11 Pro 5G sarà pronto (Standard o Root), testare HEVC 1080p·120 fps, audio AAC-LC di sistema, `Schermo Off` fisico e Doze in 5G reale.

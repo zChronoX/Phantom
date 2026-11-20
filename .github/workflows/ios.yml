@@ -1,11 +1,12 @@
-# Build iOS su macOS (gratuita per i repository pubblici): serve a trovare subito gli
-# errori di compilazione. L'IPA si scarica dalla pagina dell'esecuzione, sezione Artifacts.
-name: iOS · Phantom F0
+# Build iOS su macOS: compila il core Rust + app SwiftUI e pubblica `Phantom.ipa`
+# nelle release taggate (`v*`) e nelle build di sviluppo su `main`.
+name: iOS · Phantom
 
 on:
   push:
     branches: [main]
     paths: ["ios/**", "core/**", ".github/workflows/ios.yml"]
+    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
@@ -16,32 +17,46 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      # l'app contiene il core Rust (build-ipa.sh lo compila): la cache evita di rifarlo da zero a ogni build
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
           key: ios-app
-      - name: Test del parser scrcpy
+      - name: Test Swift (parser, sessione, pairing e input)
         run: ./ios/Tests/run-tests.sh
 
-      - name: Compila e crea l'IPA
+      - name: Compila e crea Phantom.ipa
         env:
           BUILD_NUMBER: ${{ github.run_number }}
-        run: ./ios/build-ipa.sh
+        run: |
+          ./ios/build-ipa.sh
+          cp ios/build/PhantomF0.ipa ios/build/Phantom.ipa
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: PhantomF0-ipa
+          name: Phantom-ipa
           path: |
-            ios/build/*.ipa
+            ios/build/Phantom.ipa
             ios/build/xcodebuild.log
 
-      - name: Pubblica nella release «f0-latest»
+      - name: Pubblica release ufficiale (tag v*)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
+            --title "Phantom $TAG" \
+            --notes "Release ufficiale di **Phantom $TAG**: controllo remoto Android → iPhone in LAN (QUIC) e 5G/4G (P2P integrato iroh senza VPN), UI monocromatica Liquid Glass Light/Dark, sicurezza con token 128-bit e QR 1-tap. Scarica \`Phantom.ipa\` (da firmare con Sideloadly) e \`Phantom.apk\` (arm64-v8a + x86_64)." \
+            || true
+          gh release upload "$TAG" ios/build/Phantom.ipa --clobber
+
+      - name: Pubblica build continua su «f0-latest»
+        if: github.ref_type != 'tag' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view f0-latest >/dev/null 2>&1 || gh release create f0-latest --prerelease \
-            --title "Phantom F0 · ultime build" \
-            --notes "File sempre aggiornati dalle compilazioni automatiche: phantom-f0.zip (modulo per il POCO, da installare nel manager SukiSU) e PhantomF0.ipa (app per iPhone)." \
+            --title "Phantom · ultime build di sviluppo" \
+            --notes "Build automatiche generate da main: Phantom.ipa (iPhone) e Phantom.apk (Android)." \
             || true
-          gh release upload f0-latest ios/build/PhantomF0.ipa --clobber
+          gh release upload f0-latest ios/build/Phantom.ipa --clobber

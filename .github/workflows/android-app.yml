@@ -1,10 +1,11 @@
-# App host Android Kotlin (APK leggera per arm64-v8a e x86_64, con binding UniFFI dal core Rust).
-name: Android · Phantom Host APK
+# App host Android Kotlin (APK leggera arm64-v8a + x86_64 con binding UniFFI dal core Rust).
+name: Android · Phantom APK
 
 on:
   push:
     branches: [main]
     paths: ["android/app/**", "core/**", ".github/workflows/android-app.yml"]
+    tags: ["v*"]
   pull_request:
     paths: ["android/app/**", "core/**", ".github/workflows/android-app.yml"]
   workflow_dispatch:
@@ -77,28 +78,40 @@ jobs:
       - name: Accetta licenze Android SDK
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
 
-      - name: Test unitari JVM e build APK debug
+      - name: Test unitari JVM e build Phantom.apk
         env:
           BUILD_NUMBER: ${{ github.run_number }}
         run: |
           gradle -p android/app testDebugUnitTest assembleDebug --no-daemon
           mkdir -p dist
-          cp android/app/app/build/outputs/apk/debug/app-debug.apk dist/PhantomHost-debug.apk
-          ls -lh dist/PhantomHost-debug.apk
+          cp android/app/app/build/outputs/apk/debug/app-debug.apk dist/Phantom.apk
+          ls -lh dist/Phantom.apk
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: PhantomHost-apk
-          path: dist/PhantomHost-debug.apk
+          name: Phantom-apk
+          path: dist/Phantom.apk
 
-      - name: Pubblica nella release «f0-latest»
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+      - name: Pubblica release ufficiale (tag v*)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
+            --title "Phantom $TAG" \
+            --notes "Release ufficiale di **Phantom $TAG**: controllo remoto Android → iPhone in LAN (QUIC) e 5G/4G (P2P integrato iroh senza VPN), UI monocromatica Liquid Glass Light/Dark, sicurezza con token 128-bit e QR 1-tap. Scarica \`Phantom.ipa\` (da firmare con Sideloadly) e \`Phantom.apk\` (arm64-v8a + x86_64)." \
+            || true
+          gh release upload "$TAG" dist/Phantom.apk --clobber
+
+      - name: Pubblica build continua su «f0-latest»
+        if: github.event_name != 'pull_request' && github.ref_type != 'tag' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view f0-latest >/dev/null 2>&1 || gh release create f0-latest --prerelease \
-            --title "Phantom F0 · ultime build" \
-            --notes "File sempre aggiornati dalle compilazioni automatiche." \
+            --title "Phantom · ultime build di sviluppo" \
+            --notes "Build automatiche generate da main: Phantom.ipa (iPhone) e Phantom.apk (Android)." \
             || true
-          gh release upload f0-latest dist/PhantomHost-debug.apk --clobber
+          gh release upload f0-latest dist/Phantom.apk --clobber

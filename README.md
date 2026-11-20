@@ -1,14 +1,18 @@
 # Phantom
 
-Controllo remoto nativo di un telefono Android con root da iPhone: latenza obiettivo sotto i 40 ms in rete locale, a 120 fps, con il telefono raggiungibile anche bloccato e in Doze.
+Controllo remoto nativo di un telefono Android da iPhone: bassa latenza in rete locale (QUIC) e accesso 5G/4G ovunque senza VPN (`iroh` P2P), fino a 120 fps, con design monocromatico Liquid Glass Light/Dark.
 
-Il piano completo (obiettivi, architettura, roadmap, test) è nel documento di progetto. Questo repository segue quella struttura.
+## Download rapido (v1.0.0)
 
-## Stato
+Dalla pagina **Releases** di GitHub:
+- **iPhone**: scarica `Phantom.ipa` e firmalo con Sideloadly (o AltStore/SideStore).
+- **Android**: scarica `Phantom.apk` (`arm64-v8a` + `x86_64`), avvia l'host in modalità **Root** (consigliata) o **Standard** (`MediaProjection`) e tocca **Collega iPhone · QR**.
 
-- **Core Rust ([core/](core/README.md))**: protocollo v0 (`Hello`/`HelloAck` con autenticazione tramite token condiviso 128-bit, video H.264/HEVC con parità XOR + NACK + bitrate adattivo, audio AAC-LC in tempo reale, tocco multi-touch 240 Hz, tastiera HID, appunti bidirezionali e controllo display), trasporto QUIC diretto LAN (`phantom-quic`), trasporto P2P NAT traversal + relay cifrato (`phantom-p2p` su `iroh`) e binding UniFFI Swift/Kotlin (`phantom-ffi`).
-- **Host Android ([android/app/](android/app/))**: APK nativo leggero (`arm64-v8a` + `x86_64`) con root on-demand (`su` → `app_process64`) + fallback `MediaProjection`, identità persistente + QR 1-tap, doppio listener LAN + P2P `iroh` con preemption immediata al cambio rete, cattura audio AAC-LC, appunti condivisi, wake/screen-off fisico, esenzione Doze e protezione termica (`ThermalGuard`). Vedi [ADR-010](docs/adr/ADR-010-host-android-apk.md).
-- **Client iPhone ([ios/](ios/))**: app SwiftUI/VideoToolbox full-screen 120 fps con accoppiamento QR 1-tap, scoperta Bonjour LAN, switch automatico Wi-Fi ↔ 5G/4G (`NWPathMonitor`), player audio AAC-LC hardware (`AVSampleBufferAudioRenderer`), multi-touch 10 dita, tastiera/gamepad, appunti condivisi e controlli schermo host.
+## Funzionalità principali
+
+- **Core Rust ([core/](core/README.md))**: protocollo v0 (`Hello`/`HelloAck` con autenticazione tramite token condiviso 128-bit), video H.264/HEVC con parità XOR + NACK + bitrate adattivo, audio AAC-LC in tempo reale, tocco multi-touch 240 Hz, tastiera HID, appunti bidirezionali e controllo display, trasporto QUIC diretto LAN (`phantom-quic`), trasporto P2P NAT traversal + relay cifrato (`phantom-p2p` su `iroh`) e binding UniFFI Swift/Kotlin (`phantom-ffi`).
+- **Host Android ([android/app/](android/app/))**: APK nativo leggero senza Compose/Material (vedi [ADR-010](docs/adr/ADR-010-host-android-apk.md)) con root on-demand (`su` → `app_process64`) + fallback `MediaProjection`, identità persistente + QR 1-tap in modale, doppio listener LAN + P2P `iroh` con preemption istantanea al cambio rete, cattura audio AAC-LC (Android 12+ in modalità Root via `AttributionSource`; Android 10+ in modalità Standard via `AudioPlaybackCapture`; su Android 8/9 come LDPlayer 9 streaming solo video), appunti condivisi, spegnimento display fisico (`ScreenOff`/`ScreenOn`), esenzione Doze, protezione termica (`ThermalGuard`) e **Quick Settings Tile**.
+- **Client iPhone ([ios/](ios/))**: app SwiftUI/VideoToolbox full-screen 120 fps con Home dispositivi 1-tap in stile Liquid Glass ([ADR-011](docs/adr/ADR-011-ui-ux-liquid-glass.md)), scanner QR nativo, scoperta Bonjour LAN, switch automatico Wi-Fi ↔ 5G/4G (`NWPathMonitor`), player audio AAC-LC hardware (`AVSampleBufferAudioRenderer`), multi-touch 10 dita, tastiera/gamepad, appunti condivisi e HUD flottante minimizzabile/trascinabile.
 
 ## Struttura
 

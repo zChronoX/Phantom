@@ -1,6 +1,9 @@
 package app.phantom.host.stream
 
 import android.annotation.SuppressLint
+import android.content.AttributionSource
+import android.content.Context
+import android.content.ContextWrapper
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
@@ -11,6 +14,7 @@ import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.os.Build
+import android.os.Process
 import android.os.SystemClock
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -139,21 +143,18 @@ class AudioStreamer private constructor(
         private const val BITRATE_BPS = 128_000
         private const val SAMPLES_PER_FRAME = 1024
 
-        @SuppressLint("MissingPermission", "PrivateApi")
+        @SuppressLint("MissingPermission", "NewApi")
         fun createForRoot(onLog: (String) -> Unit): AudioStreamer? {
-            // In `app_process64` (senza `ActivityThread`/`Context`), chiamare `AudioRecord.Builder.build()`
-            // con `REMOTE_SUBMIX` su Android < 11 (incluso LDPlayer 9 / Android 9) provoca un crash nativo
-            // in `libandroid_runtime` (`opPackageName == null`) non intercettabili da try/catch Java.
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-                onLog("Audio di sistema root richiede Android 11+ (streaming solo video)")
-                return null
-            }
-            if (!hasValidOpPackageName()) {
-                onLog("Audio di sistema root non disponibile nel worker standalone (streaming solo video)")
+            // In `app_process64` (senza `ActivityThread`/`Context`), `AudioRecord.Builder.setContext`
+            // con `AttributionSource` è disponibile da Android 12 (API 31): su Android < 12
+            // (incluso LDPlayer 9 / Android 9) la chiamata nativa va in crash con `opPackageName == null`.
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                onLog("Audio di sistema root richiede Android 12+ (streaming solo video)")
                 return null
             }
             return createWithBuilder(onLog) { minBuf ->
                 AudioRecord.Builder()
+                    .setContext(RootAudioContext())
                     .setAudioSource(MediaRecorder.AudioSource.REMOTE_SUBMIX)
                     .setAudioFormat(pcmFormat())
                     .setBufferSizeInBytes(minBuf)
@@ -161,14 +162,22 @@ class AudioStreamer private constructor(
             }
         }
 
-        @SuppressLint("PrivateApi")
-        private fun hasValidOpPackageName(): Boolean {
-            return try {
-                val at = Class.forName("android.app.ActivityThread")
-                val pkg = at.getMethod("currentOpPackageName").invoke(null) as? String
-                pkg != null && pkg.isNotBlank()
-            } catch (_: Throwable) {
-                false
+        @SuppressLint("NewApi")
+        private class RootAudioContext : ContextWrapper(null) {
+            private val pkgName: String = if (Process.myUid() == 0) "root" else "com.android.shell"
+
+            override fun getPackageName(): String = pkgName
+
+            override fun getOpPackageName(): String = pkgName
+
+            override fun getAttributionTag(): String? = null
+
+            override fun getApplicationContext(): Context = this
+
+            override fun getAttributionSource(): AttributionSource {
+                return AttributionSource.Builder(Process.myUid())
+                    .setPackageName(pkgName)
+                    .build()
             }
         }
 

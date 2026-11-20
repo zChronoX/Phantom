@@ -1,7 +1,7 @@
 # Handoff
 
-Scritto: 2026-11-20; aggiornato dopo completamento restyling UI/UX monocromatico Liquid Glass (iOS + Android), icone ufficiali A2 e Quick Settings Tile Android.
-Branch: main - Commit locale: basato sull'ultimo push dell'utente su `origin/main` + modifiche locali UI/UX da committare.
+Scritto: 2026-11-20; aggiornato per la release ufficiale **v1.0.0** (audio Root Android 12+ con `AttributionSource`, pulizia workflow CI/release e documentazione finale).
+Branch: main - Commit locale: basato sull'ultimo push verificato su `origin/main` + rifinitura finale v1.0.0 pronta per commit e tag `v1.0.0`.
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -179,20 +179,6 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- **Documentazione & Brand (`ADR-011`)**:
-  - `docs/design-system.md`, `docs/adr/ADR-011-ui-ux-liquid-glass.md`, `README.md`, `HANDOFF.md`, `PROGRESS.md`: specifiche design system monocromatico Liquid Glass Light/Dark, logo ufficiale **A2 (Ghost Pure)** con alternative B/C archiviate e rename definitivo a **Phantom** (`1.0.0`).
-- **Icone & Risorse (iOS + Android)**:
-  - `ios/PhantomF0/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png` (+ `Contents.json`) e `ios/project.yml` (`CFBundleDisplayName: Phantom`, `MARKETING_VERSION: "1.0.0"`, `ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon`).
-  - `android/app/app/src/main/res/`: Adaptive + Monochrome Icon (`mipmap-anydpi-v26/ic_launcher*.xml`, `ic_launcher_background.xml`, `ic_launcher_foreground.xml`), `ic_phantom_tile.xml`, temi Light/Dark `values/styles.xml` e `values-night/styles.xml` (`Theme.Phantom`).
-- **Restyling UI/UX iOS**:
-  - `ios/PhantomF0/PhantomDesign.swift`: marchio vettoriale `PhantomGhostMark`, palette monocromatica `PhantomPalette`, superfici `PhantomGlassSurface` / `PhantomGlassCapsule` (compatibili Xcode 16 / iOS 17+) e button style.
-  - `ios/PhantomF0/PhantomF0App.swift`, `RemoteConnectView.swift` (`PhantomHomeView` + `PhantomSettingsSheet`), `ContentView.swift` (`DiagnosticsView`), `RemoteControlSurface.swift` (HUD Liquid Glass collassato di default, pillola trascinabile, indicatori tocco monocromatici), `QRScannerView.swift` e `NetworkPathObserver.swift` (fix riavvio `NWPathMonitor`).
-- **Restyling UI/UX Android + Quick Settings Tile**:
-  - `android/app/app/src/main/java/app/phantom/host/HostTheme.kt`: palette adattiva Light/Dark + drawable leggeri (zero Compose/Material).
-  - `android/app/app/src/main/java/app/phantom/host/MainActivity.kt`: Hero Card con stato live + metriche compatte, CTA monocromatica, QR in modale dedicata, controlli a pillole segmentate, riga Doze e scheda *Diagnostica* collassabile (chiusa di default).
-  - `android/app/app/src/main/java/app/phantom/host/PhantomTileService.kt`, `HostForegroundService.kt`, `AndroidManifest.xml`, `build.gradle.kts` (`versionName = "1.0.0"`): Quick Settings Tile 1-tap, icona notifica vettoriale A2, nome app `Phantom` e serializzazione `rootStdinLock` sui comandi verso `app_process64`.
-- **Fix stabilità & crash worker root LDPlayer**:
-  - `android/app/app/src/main/java/app/phantom/host/stream/AudioStreamer.kt`: guardia in `createForRoot` (`SDK_INT >= R` + `ActivityThread.currentOpPackageName()` non nullo) per evitare il crash nativo `libandroid_runtime` (`Worker root terminato (exit 0)`) alla connessione client su LDPlayer/Android 9; `AudioPlaybackCapture` resta attivo in modalità MediaProjection.
-  - `android/app/app/src/main/java/app/phantom/host/stream/PhantomHostSession.kt`: pausa 40 ms prima della chiusura QUIC su rifiuto token non valido per recapitare `Close(UNAUTHORIZED)`.
-  - `android/app/app/src/main/java/app/phantom/host/root/RootDisplayPower.kt` e `RootHostMain.kt`: `restoreIfTurnedOff()` tocca `SurfaceControl.setDisplayPowerMode` solo se il display era stato davvero spento.
-  - `ios/PhantomF0/RemoteSession.swift`: `handleDisconnect` ignora subito le generazioni obsolete senza chiudere la nuova sessione riconnessa e rilascia `P2pClientEndpoint` fuori da `stateLock`.
+- `android/app/app/src/main/java/app/phantom/host/stream/AudioStreamer.kt`: aggiunto `RootAudioContext` (`ContextWrapper` con `AttributionSource` ufficiale API 31+) per abilitare la cattura audio di sistema `REMOTE_SUBMIX` in modalità Root su Android 12+ (es. Redmi Note 11 Pro 5G), mantenendo il fallback sicuro solo-video su Android < 12 (incluso LDPlayer 9 / Android 9).
+- `.github/workflows/ios.yml`, `.github/workflows/android-app.yml`, `.github/workflows/android-f0.yml`: rinominati i workflow in `iOS · Phantom` e `Android · Phantom APK`, artefatti puliti `Phantom.ipa` e `Phantom.apk`, pubblicazione automatica della release ufficiale sui tag `v*` (es. `v1.0.0`) e restrizione di `android-f0.yml` ai soli percorsi legacy (`android/module/**`, `android/probe/**`, `tools/**`).
+- `README.md`, `HANDOFF.md`, `PROGRESS.md`: aggiornati per il rilascio **Phantom v1.0.0**.

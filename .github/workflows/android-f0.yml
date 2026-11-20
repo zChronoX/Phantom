@@ -5,9 +5,9 @@ name: Android · Phantom F0
 on:
   push:
     branches: [main]
-    paths: ["android/**", "tools/**", ".github/workflows/android-f0.yml"]
+    paths: ["android/module/**", "android/probe/**", "tools/**", ".github/workflows/android-f0.yml"]
   pull_request:
-    paths: ["android/**", "tools/**"]
+    paths: ["android/module/**", "android/probe/**", "tools/**"]
   workflow_dispatch:
 
 jobs:
