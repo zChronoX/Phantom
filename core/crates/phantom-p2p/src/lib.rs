@@ -219,6 +219,11 @@ impl P2pLink {
         Ok(datagram.len())
     }
 
+    /// Spazio libero (byte) nel buffer dei datagrammi in uscita.
+    pub fn datagram_send_buffer_space(&self) -> usize {
+        self.connection.datagram_send_buffer_space()
+    }
+
     /// Massimo datagramma applicativo accettato in questo momento.
     pub fn max_datagram_size(&self) -> Option<usize> {
         self.connection.max_datagram_size()
@@ -252,10 +257,15 @@ fn new_runtime() -> Result<Runtime, P2pError> {
         .map_err(|e| P2pError::Transport(e.to_string()))
 }
 
+/// Coda dei datagrammi in uscita: stesso ragionamento di `phantom-quic` (contiene un keyframe, non 0,7 s di video).
+const DATAGRAM_SEND_BUFFER: usize = 512 * 1024;
+
 fn transport_config() -> QuicTransportConfig {
     let mut builder = QuicTransportConfig::builder()
         .datagram_receive_buffer_size(Some(1 << 20))
-        .datagram_send_buffer_size(1 << 20)
+        .datagram_send_buffer_size(DATAGRAM_SEND_BUFFER)
+        // BBR (v3) invece di Cubic: le perdite casuali di Wi-Fi e 5G non svuotano la finestra di invio.
+        .congestion_controller_factory(Arc::new(noq_proto::congestion::Bbr3Config::default()))
         .keep_alive_interval(Duration::from_secs(3));
     if let Ok(timeout) = IdleTimeout::try_from(Duration::from_secs(15)) {
         builder = builder.max_idle_timeout(Some(timeout));

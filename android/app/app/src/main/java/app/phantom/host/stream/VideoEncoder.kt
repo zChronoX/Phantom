@@ -89,7 +89,11 @@ class VideoEncoder private constructor(
             val isConfig = (flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
             val isKey = (flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
             val prepared = configCache.prepareFrame(raw, isConfig = isConfig, isKeyFrame = isKey) ?: continue
-            val captureTsUs = SystemClock.elapsedRealtimeNanos() / 1_000L
+            val captureTsUs = HostFormatHelpers.captureTimeUs(
+                presentationTimeUs = info.presentationTimeUs,
+                nowMonotonicUs = System.nanoTime() / 1_000L,
+                nowElapsedUs = SystemClock.elapsedRealtimeNanos() / 1_000L,
+            )
             onFrame(prepared, isKey, captureTsUs)
         }
     }
@@ -190,26 +194,21 @@ class VideoEncoder private constructor(
             val mc = MediaCodec.createEncoderByType(mime)
             var surface: Surface? = null
             try {
-                var baseW = reqWidth
-                var baseH = reqHeight
-                if (maxLongSideOverride != null && maxOf(baseW, baseH) > maxLongSideOverride) {
-                    val (fw, fh) = HostFormatHelpers.fitWithinBounds(baseW, baseH, maxLongSideOverride, maxLongSideOverride)
-                    baseW = fw
-                    baseH = fh
-                }
-
                 val videoCaps = try {
                     mc.codecInfo.getCapabilitiesForType(mime).videoCapabilities
                 } catch (_: Throwable) {
                     null
                 }
 
-                val (actualW, actualH) = fitSizeToCapabilities(baseW, baseH, videoCaps)
+                val (actualW, actualH) = fitSizeToCapabilities(reqWidth, reqHeight, videoCaps, maxLongSideOverride)
                 if (actualW != reqWidth || actualH != reqHeight) {
                     onLog("Risoluzione adattata all'encoder ${codecType.name}: ${reqWidth}×${reqHeight} → ${actualW}×${actualH}")
                 }
 
                 val actualFps = clampFpsToCapabilities(actualW, actualH, reqFps, videoCaps)
+                if (actualFps < reqFps) {
+                    onLog("Frequenza adattata all'encoder ${codecType.name} a ${actualW}×${actualH}: $reqFps → $actualFps fps")
+                }
                 val clampedBitrate = clampBitrateToCapabilities(bitrateBps, videoCaps)
 
                 val format = MediaFormat.createVideoFormat(mime, actualW, actualH).apply {
@@ -260,24 +259,29 @@ class VideoEncoder private constructor(
             width: Int,
             height: Int,
             caps: MediaCodecInfo.VideoCapabilities?,
+            maxLongSideOverride: Int?,
         ): Pair<Int, Int> {
+            var maxW = Int.MAX_VALUE
+            var maxH = Int.MAX_VALUE
+            if (maxLongSideOverride != null) {
+                maxW = maxLongSideOverride
+                maxH = maxLongSideOverride
+            }
             if (caps == null) {
-                return HostFormatHelpers.align16(width) to HostFormatHelpers.align16(height)
+                return HostFormatHelpers.fitEncoderSize(width, height, maxW, maxH, alignment = 16)
             }
-            val align = maxOf(16, caps.widthAlignment, caps.heightAlignment)
-            val maxW = caps.supportedWidths.upper
-            val maxH = caps.supportedHeights.upper
-            var (w, h) = HostFormatHelpers.fitWithinBounds(width, height, maxW, maxH, align)
-
-            // Alcuni encoder (es. Qualcomm Snapdragon 695) limitano i macroblocchi totali (W×H)
-            // oltre ai singoli lati: scala progressivamente finché `isSizeSupported` è vero.
-            var steps = 0
-            while (!caps.isSizeSupported(w, h) && minOf(w, h) > 320 && steps < 10) {
-                w = HostFormatHelpers.alignDown((w * 0.9).toInt(), align).coerceAtLeast(caps.supportedWidths.lower)
-                h = HostFormatHelpers.alignDown((h * 0.9).toInt(), align).coerceAtLeast(caps.supportedHeights.lower)
-                steps++
+            // Allineamento a 8 (come scrcpy) salvo richieste più severe del codec: 1080×2400 resta 1080×2400
+            // invece di diventare 1088×2400 stirato.
+            val align = maxOf(8, caps.widthAlignment, caps.heightAlignment)
+            maxW = minOf(maxW, caps.supportedWidths.upper)
+            maxH = minOf(maxH, caps.supportedHeights.upper)
+            return HostFormatHelpers.fitEncoderSize(width, height, maxW, maxH, align) { w, h ->
+                try {
+                    caps.isSizeSupported(w, h)
+                } catch (_: Throwable) {
+                    true
+                }
             }
-            return w to h
         }
 
         private fun clampFpsToCapabilities(
@@ -287,12 +291,35 @@ class VideoEncoder private constructor(
             caps: MediaCodecInfo.VideoCapabilities?,
         ): Int {
             if (caps == null) return requestedFps
-            return try {
-                val range = caps.getSupportedFrameRatesFor(width, height)
-                val maxSupported = range.upper.toInt().coerceAtLeast(15)
-                requestedFps.coerceAtMost(maxSupported).coerceAtLeast(15)
+            val declaredMax = try {
+                caps.getSupportedFrameRatesFor(width, height).upper.toInt().coerceAtLeast(15)
             } catch (_: Throwable) {
                 requestedFps
+            }
+            val capped = requestedFps.coerceAtMost(declaredMax).coerceAtLeast(15)
+            return HostFormatHelpers.realisticFps(capped) { fps -> coversPerformance(caps, width, height, fps) }
+        }
+
+        /**
+         * `true`/`false` se il SoC dichiara (o misura) di reggere `fps` a questa risoluzione, `null` se non lo dice.
+         * Prima i `PerformancePoint` di Android 10+, poi le frequenze misurate dal produttore (`achievable`).
+         */
+        private fun coversPerformance(caps: MediaCodecInfo.VideoCapabilities, width: Int, height: Int, fps: Int): Boolean? {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    val points = caps.supportedPerformancePoints
+                    if (!points.isNullOrEmpty()) {
+                        val wanted = MediaCodecInfo.VideoCapabilities.PerformancePoint(width, height, fps)
+                        return points.any { it.covers(wanted) }
+                    }
+                } catch (_: Throwable) {
+                }
+            }
+            return try {
+                val achievable = caps.getAchievableFrameRatesFor(width, height) ?: return null
+                achievable.upper >= fps * 0.9
+            } catch (_: Throwable) {
+                null
             }
         }
 

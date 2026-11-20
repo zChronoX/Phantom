@@ -414,6 +414,19 @@ impl From<Delivered> for VideoFrame {
     }
 }
 
+/// Esito di [`PhantomHost::send_frame_via`].
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct FrameSendReport {
+    /// Datagrammi prodotti per il frame (dati e parità).
+    pub datagrams: u32,
+    /// Byte spediti (intestazioni Phantom comprese).
+    pub bytes: u64,
+    /// Datagrammi entrati in una coda di invio piena: per farli entrare QUIC ha scartato datagrammi più vecchi.
+    pub queue_overflows: u32,
+    /// Datagrammi rifiutati dal trasporto (connessione chiusa, troppo grandi, datagrammi non supportati).
+    pub send_errors: u32,
+}
+
 /// Contatori dell'host.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct HostCounters {
@@ -513,6 +526,44 @@ impl PhantomHost {
         let id = g.next_frame_id;
         g.next_frame_id = id.wrapping_add(1);
         g.host.send_frame(id, key, capture_ts_us, &data)
+    }
+
+    /// Frammenta un frame codificato e lo spedisce direttamente su `connection`, in una sola chiamata dall'app.
+    ///
+    /// Equivale a [`PhantomHost::send_frame`] più un `send_datagram` per ogni frammento, ma senza far passare ogni
+    /// pacchetto attraverso JNA/Swift (a 1080p sono migliaia di chiamate e copie al secondo). Se la coda di invio
+    /// di QUIC è piena e spedire scarta datagrammi più vecchi, il frame precedente arriverà rotto: l'host chiede
+    /// subito un keyframe (con la solita distanza minima) invece di aspettare che se ne accorga il client.
+    pub fn send_frame_via(
+        &self,
+        connection: Arc<QuicConnection>,
+        key: bool,
+        capture_ts_us: u64,
+        data: Vec<u8>,
+    ) -> FrameSendReport {
+        let datagrams = self.send_frame(key, capture_ts_us, data);
+        let mut report = FrameSendReport { datagrams: 0, bytes: 0, queue_overflows: 0, send_errors: 0 };
+        for d in &datagrams {
+            report.datagrams += 1;
+            report.bytes += d.len() as u64;
+            let outcome = connection.send_counted(d);
+            if outcome.displaced_older {
+                report.queue_overflows += 1;
+            }
+            if !outcome.sent {
+                report.send_errors += 1;
+            }
+        }
+        if report.queue_overflows > 0 || report.send_errors > 0 {
+            lock(&self.inner).host.request_keyframe();
+        }
+        report
+    }
+
+    /// Chiede un keyframe dal lato host (vale la distanza minima tra keyframe): lo si legge poi da
+    /// [`PhantomHost::wants_keyframe`].
+    pub fn request_keyframe(&self) {
+        lock(&self.inner).host.request_keyframe();
     }
 
     /// Bitrate che l'encoder dovrebbe usare adesso (bit/s): cambia con le condizioni della rete.
@@ -700,6 +751,13 @@ impl PhantomClient {
     /// Chiude la sessione: restituisce il datagramma `Close` da spedire all'host, oppure `None` se era già chiusa.
     pub fn close(&self, reason: u8) -> Option<Vec<u8>> {
         lock(&self.inner).close(reason)
+    }
+
+    /// Da chiamare quando il decoder dell'app scarta o non decodifica un frame già consegnato (coda del renderer
+    /// piena, errore): i frame non-key successivi sarebbero corrotti fino al prossimo keyframe. Il ricevitore li
+    /// scarta e restituisce la richiesta di keyframe da spedire (`None` se ce n'è già una in corso).
+    pub fn request_keyframe(&self, now_us: u64) -> Option<Vec<u8>> {
+        lock(&self.inner).request_keyframe(now_us)
     }
 
     /// Contatori e misure; `now_us` è l'ora locale del client.
@@ -1106,6 +1164,42 @@ impl QuicConnection {
             ConnectionBackend::P2p(link) => link.is_closed(),
         }
     }
+
+    /// Byte di datagrammi in coda di invio, non ancora usciti (telemetria: se resta alto il collegamento non regge
+    /// il bitrate).
+    pub fn queued_send_bytes(&self) -> u64 {
+        let space = self.send_buffer_space();
+        SEND_BUFFER_BYTES.saturating_sub(space) as u64
+    }
+}
+
+/// Coda dei datagrammi in uscita impostata nei due trasporti.
+const SEND_BUFFER_BYTES: usize = phantom_quic::DATAGRAM_SEND_BUFFER;
+
+/// Esito di un invio contato.
+struct SendOutcome {
+    sent: bool,
+    displaced_older: bool,
+}
+
+impl QuicConnection {
+    fn send_buffer_space(&self) -> usize {
+        match &self.link {
+            ConnectionBackend::Direct(link) => link.datagram_send_buffer_space(),
+            ConnectionBackend::P2p(link) => link.datagram_send_buffer_space(),
+        }
+    }
+
+    /// Spedisce un datagramma dicendo se è stato accettato e se, per farlo entrare, QUIC ha dovuto scartare
+    /// datagrammi più vecchi ancora in coda.
+    fn send_counted(&self, datagram: &[u8]) -> SendOutcome {
+        let displaced_older = datagram.len() > self.send_buffer_space();
+        let sent = match &self.link {
+            ConnectionBackend::Direct(link) => link.send_datagram(datagram).is_ok(),
+            ConnectionBackend::P2p(link) => link.send_datagram(datagram).is_ok(),
+        };
+        SendOutcome { sent, displaced_older: displaced_older && sent }
+    }
 }
 
 #[cfg(test)]
@@ -1380,9 +1474,12 @@ mod tests {
                 if host.negotiated().is_some() && !frame_sent {
                     let now = start.elapsed().as_micros() as u64;
                     let key = host.wants_keyframe(now);
-                    for d in host.send_frame(key, now, vec![0xCD; 8_000]) {
-                        link.send_datagram(d).expect("invio frame su QUIC");
-                    }
+                    // invio in una sola chiamata (percorso usato dall'app Android)
+                    let report = host.send_frame_via(link.clone(), key, now, vec![0xCD; 8_000]);
+                    assert!(report.datagrams >= 8, "8 000 byte in frammenti da ~1 100 più la parità");
+                    assert_eq!(report.send_errors, 0);
+                    assert_eq!(report.queue_overflows, 0, "coda vuota: nessun datagramma scartato");
+                    assert!(report.bytes > 8_000);
                     frame_sent = true;
                 }
                 if host.is_closed() {

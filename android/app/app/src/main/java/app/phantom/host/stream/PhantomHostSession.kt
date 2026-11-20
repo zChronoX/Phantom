@@ -25,6 +25,7 @@ import java.io.FileInputStream
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.random.Random
@@ -392,14 +393,23 @@ class PhantomHostSession(
             val clientActive = AtomicBoolean(true)
             val negotiatedOnce = AtomicBoolean(false)
 
+            // Contatori dei problemi di rete: prima ogni errore di invio finiva in un `catch {}` vuoto.
+            val sendErrors = AtomicLong(0)
+            val queueOverflows = AtomicLong(0)
+
+            fun sendCounted(dgram: ByteArray) {
+                try {
+                    conn.sendDatagram(dgram)
+                } catch (_: Throwable) {
+                    sendErrors.incrementAndGet()
+                }
+            }
+
             fun processIncoming(dgram: ByteArray) {
                 val nowUs = SystemClock.elapsedRealtimeNanos() / 1_000L
                 val replies = phantomHost.onDatagram(nowUs.toULong(), dgram)
                 for (reply in replies) {
-                    try {
-                        conn.sendDatagram(reply)
-                    } catch (_: Throwable) {
-                    }
+                    sendCounted(reply)
                 }
                 if (phantomHost.wantsKeyframe(nowUs.toULong())) {
                     encRef.get()?.requestKeyFrame()
@@ -478,10 +488,7 @@ class PhantomHostSession(
                             data,
                         )
                         if (dgram != null) {
-                            try {
-                                conn.sendDatagram(dgram)
-                            } catch (_: Throwable) {
-                            }
+                            sendCounted(dgram)
                         }
                     }
                 } else {
@@ -504,6 +511,9 @@ class PhantomHostSession(
                     var lastStatsMs = lastBitrateCheckMs
                     var lastRotCheckMs = lastBitrateCheckMs
                     var winStartMs = lastBitrateCheckMs
+                    var lastNetLogMs = lastBitrateCheckMs
+                    var loggedOverflows = 0L
+                    var loggedErrors = 0L
                     while (running.get() && clientActive.get() && !conn.isClosed() && !phantomHost.isClosed()) {
                         val nowMs = SystemClock.elapsedRealtime()
                         val policy = thermalProvider()
@@ -568,6 +578,25 @@ class PhantomHostSession(
                             )
                             winStartMs = nowMs
                         }
+
+                        if (nowMs - lastNetLogMs >= 5_000L) {
+                            lastNetLogMs = nowMs
+                            val overflows = queueOverflows.get()
+                            val errors = sendErrors.get()
+                            if (overflows != loggedOverflows || errors != loggedErrors) {
+                                val queuedKb = try {
+                                    conn.queuedSendBytes().toLong() / 1024
+                                } catch (_: Throwable) {
+                                    -1L
+                                }
+                                onLog(
+                                    "Rete in affanno (ultimi 5 s): ${overflows - loggedOverflows} pacchetti scartati per coda piena, " +
+                                        "${errors - loggedErrors} invii falliti · coda $queuedKb KB · bitrate ${appliedBitrate / 1_000_000} Mbps",
+                                )
+                                loggedOverflows = overflows
+                                loggedErrors = errors
+                            }
+                        }
                         Thread.sleep(25)
                     }
                 }, "phantom-host-ctrl")
@@ -615,11 +644,15 @@ class PhantomHostSession(
                             framesInWindow++
                             bytesInWindow += frameBytes.size
                         }
-                        val datagrams = phantomHost.sendFrame(isKey, captureTsUs.toULong(), frameBytes)
-                        for (d in datagrams) {
-                            try {
-                                conn.sendDatagram(d)
-                            } catch (_: Throwable) {
+                        // Frammentazione e invio in una sola chiamata Rust: niente più un passaggio JNA per pacchetto.
+                        val report = phantomHost.sendFrameVia(conn, isKey, captureTsUs.toULong(), frameBytes)
+                        if (report.queueOverflows > 0u || report.sendErrors > 0u) {
+                            queueOverflows.addAndGet(report.queueOverflows.toLong())
+                            sendErrors.addAndGet(report.sendErrors.toLong())
+                            // Il core ha già chiesto un keyframe (il frame precedente arriverà rotto): lo si
+                            // passa subito all'encoder invece di aspettare il giro del thread di controllo.
+                            if (phantomHost.wantsKeyframe((SystemClock.elapsedRealtimeNanos() / 1_000L).toULong())) {
+                                encRef.get()?.requestKeyFrame()
                             }
                         }
                     }

@@ -242,6 +242,19 @@ final class RemoteSession: ObservableObject {
         }
     }
 
+    /// Il renderer ha scartato (coda piena) o non è riuscito a decodificare un frame: i frame successivi sarebbero
+    /// corrotti fino al prossimo keyframe, che con gli I-frame ogni 10 s può arrivare molto tardi. Il core scarta i
+    /// frame non-key in arrivo e chiede subito un keyframe all'host (una sola richiesta alla volta).
+    func requestKeyframeAfterDecoderDrop() {
+        let (c, q): (PhantomClient?, QuicConnection?) = withLock { (client, connection) }
+        guard let c = c, let q = q else { return }
+        ioQueue.async {
+            if let datagram = c.requestKeyframe(nowUs: Self.nowUs()) {
+                try? q.sendDatagram(datagram: datagram)
+            }
+        }
+    }
+
     func sendKeyEvents(_ events: [HidKeyEvent]) {
         guard !events.isEmpty else { return }
         let (c, q): (PhantomClient?, QuicConnection?) = withLock { (client, connection) }

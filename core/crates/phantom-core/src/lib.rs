@@ -369,6 +369,15 @@ impl Host {
             && self.last_key_ts_us.is_none_or(|t| now_us.saturating_sub(t) >= self.cfg.min_keyframe_gap_us)
     }
 
+    /// Chiede un keyframe dal lato host, senza aspettare il client: per esempio quando il trasporto ha dovuto scartare
+    /// datagrammi già in coda (il client vedrebbe un frame rotto solo dopo il timeout). Vale il distanziamento minimo
+    /// di [`Host::wants_keyframe`]; prima dell'apertura della sessione non fa nulla.
+    pub fn request_keyframe(&mut self) {
+        if self.negotiated.is_some() && self.closed.is_none() {
+            self.keyframe_wanted = true;
+        }
+    }
+
     /// Spedisce un frame già codificato: restituisce i datagrammi da mandare al client. `key` dice cosa ha prodotto
     /// l'encoder; chi chiama deve chiedere un keyframe all'encoder quando [`Host::wants_keyframe`] è `true`.
     /// `capture_ts_us` è l'istante di cattura sull'orologio dell'host. Prima dell'apertura della sessione non esce
@@ -529,20 +538,16 @@ impl Host {
                     self.stats.key_events += 1;
                 }
             }
-            Message::Clipboard { clip_seq, text } => {
-                if is_newer_seq(self.last_clip_seq, clip_seq) {
-                    self.last_clip_seq = Some(clip_seq);
-                    self.pending_clipboard = Some(text.to_owned());
-                }
+            Message::Clipboard { clip_seq, text } if is_newer_seq(self.last_clip_seq, clip_seq) => {
+                self.last_clip_seq = Some(clip_seq);
+                self.pending_clipboard = Some(text.to_owned());
             }
-            Message::Control { ctrl_seq, command } => {
-                if is_newer_seq(self.last_ctrl_seq, ctrl_seq) {
-                    self.last_ctrl_seq = Some(ctrl_seq);
-                    if self.controls.len() == MAX_PENDING_CONTROLS {
-                        self.controls.pop_front();
-                    }
-                    self.controls.push_back(command);
+            Message::Control { ctrl_seq, command } if is_newer_seq(self.last_ctrl_seq, ctrl_seq) => {
+                self.last_ctrl_seq = Some(ctrl_seq);
+                if self.controls.len() == MAX_PENDING_CONTROLS {
+                    self.controls.pop_front();
                 }
+                self.controls.push_back(command);
             }
             _ => {}
         }
@@ -779,11 +784,9 @@ impl Client {
                     data: a.payload.to_vec(),
                 });
             }
-            Message::Clipboard { clip_seq, text } => {
-                if is_newer_seq(self.last_clip_seq, clip_seq) {
-                    self.last_clip_seq = Some(clip_seq);
-                    self.pending_clipboard = Some(text.to_owned());
-                }
+            Message::Clipboard { clip_seq, text } if is_newer_seq(self.last_clip_seq, clip_seq) => {
+                self.last_clip_seq = Some(clip_seq);
+                self.pending_clipboard = Some(text.to_owned());
             }
             _ => {}
         }
@@ -875,6 +878,19 @@ impl Client {
         } else {
             None
         }
+    }
+
+    /// Il decoder dell'app ha scartato o non è riuscito a decodificare un frame già consegnato: i frame successivi
+    /// sarebbero corrotti fino al prossimo keyframe. Il ricevitore li scarta e chiede un keyframe all'host;
+    /// restituisce il datagramma da spedire (`None` se una richiesta è già in corso o la sessione non è aperta).
+    pub fn request_keyframe(&mut self, now_us: u64) -> Option<Vec<u8>> {
+        if self.closed.is_some() || self.negotiated.is_none() {
+            return None;
+        }
+        let outs = self.video.request_resync(now_us);
+        let mut send = Vec::new();
+        self.handle_outputs(now_us, outs, &mut send);
+        send.into_iter().next()
     }
 
     /// Statistiche per l'host. Prima dell'apertura della sessione non parte nulla.
@@ -1467,5 +1483,73 @@ mod close {
         host.on_datagram(8, &ctrl); // duplicato ignorato
         assert_eq!(host.take_control(), Some(ControlCommand::ScreenOff));
         assert_eq!(host.take_control(), None);
+    }
+}
+
+#[cfg(test)]
+mod resync {
+    use super::*;
+
+    /// Apre la sessione tra un client e un host appena creati.
+    fn open(cfg: &SessionConfig) -> (Host, Client) {
+        let mut host = Host::new(cfg.clone());
+        let mut client = Client::new(cfg.clone());
+        let hello = client.tick(0).remove(0);
+        let ack = host.on_datagram(0, &hello).remove(0);
+        client.on_datagram(0, &ack);
+        assert!(client.negotiated().is_some());
+        (host, client)
+    }
+
+    fn deliver(host: &mut Host, client: &mut Client, now_us: u64, id: u32, key: bool) -> usize {
+        let before = client.delivered.len();
+        for d in host.send_frame(id, key, now_us, &[id as u8; 300]) {
+            client.on_datagram(now_us, &d);
+        }
+        client.delivered.len() - before
+    }
+
+    /// L'host può chiedere un keyframe da solo (coda del trasporto piena), ma solo a sessione aperta e rispettando la
+    /// distanza minima tra keyframe.
+    #[test]
+    fn host_side_keyframe_request_respects_gate_and_gap() {
+        let cfg = SessionConfig::default();
+        let mut closed_host = Host::new(cfg.clone());
+        closed_host.request_keyframe();
+        assert!(!closed_host.wants_keyframe(1_000_000), "prima dell'apertura non si chiede nulla");
+
+        let (mut host, _client) = open(&cfg);
+        assert!(host.wants_keyframe(0));
+        host.send_frame(0, true, 0, &[0; 100]);
+        assert!(!host.wants_keyframe(0), "keyframe appena spedito");
+        host.request_keyframe();
+        assert!(!host.wants_keyframe(cfg.min_keyframe_gap_us - 1), "troppo presto dopo l'ultimo keyframe");
+        assert!(host.wants_keyframe(cfg.min_keyframe_gap_us), "dopo la distanza minima sì");
+    }
+
+    /// Se l'app perde un frame consegnato, il client chiede un keyframe (una volta sola), scarta i frame non-key che
+    /// sarebbero corrotti e riprende dal keyframe.
+    #[test]
+    fn client_resync_drops_delta_frames_until_keyframe() {
+        let cfg = SessionConfig::default();
+        let mut never_opened = Client::new(cfg.clone());
+        assert!(never_opened.request_keyframe(0).is_none(), "sessione non aperta: niente richiesta");
+
+        let (mut host, mut client) = open(&cfg);
+        assert_eq!(deliver(&mut host, &mut client, 1_000, 0, true), 1);
+        assert_eq!(deliver(&mut host, &mut client, 2_000, 1, false), 1);
+
+        let req = client.request_keyframe(3_000).expect("richiesta di keyframe");
+        assert!(client.request_keyframe(3_500).is_none(), "una richiesta è già in corso");
+        let before = host.stats().keyframe_requests;
+        host.on_datagram(3_600, &req);
+        assert_eq!(host.stats().keyframe_requests, before + 1);
+
+        assert_eq!(deliver(&mut host, &mut client, 4_000, 2, false), 0, "frame non-key scartato: sarebbe corrotto");
+        assert_eq!(deliver(&mut host, &mut client, 400_000, 3, true), 1, "il keyframe riprende la riproduzione");
+        assert_eq!(deliver(&mut host, &mut client, 410_000, 4, false), 1, "e i frame successivi tornano normali");
+
+        let again = cfg.receiver.key_retry_us + 3_000;
+        assert!(client.request_keyframe(again).is_some(), "dopo il keyframe si può richiedere di nuovo");
     }
 }

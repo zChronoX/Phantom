@@ -1,7 +1,7 @@
 # Handoff
 
-Scritto: 2026-11-20; aggiornato con ottimizzazioni **v1.1.0** per fluidità e qualità video (encoder low-latency, bitrate LAN 12–32 Mbps, keyframe istantanei e telemetria live nell'HUD iOS).
-Branch: main - Commit locale: basato sull'ultimo push su `origin/main` + ottimizzazioni v1.1.0 pronte per commit e release `v1.1.0`.
+Scritto: 2026-11-20; aggiornato con le correzioni **v1.2.0** per i lag sul Redmi Note 11 Pro 5G reale (trasporto BBR, Wi-Fi lock, encoder adattato al SoC, build release, invio frame in una chiamata FFI, keyframe su frame scartati in iOS).
+Branch: main - base `0768f02` (= `origin/main`) + modifiche v1.2.0 non committate (vedi «Uncommitted changes»).
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -84,12 +84,15 @@ Otto task della sessione precedente più T9 e T10 chiusi e verificati in Docker
 
 ## Next steps (in order)
 
-1. Eseguire `powershell -NoProfile -ExecutionPolicy Bypass -File tools/repo-preflight.ps1`.
-2. Committare e pushare su `origin/main` per far partire `.github/workflows/android-app.yml` su GitHub Actions.
-3. Scaricare `PhantomHost-debug.apk` dalla release `f0-latest` (o dagli artifacts della run):
-   - provarlo in **modalità Root** su **LDPlayer** (x86_64, Root + Network Bridging abilitati) per testare end-to-end video + multi-touch + tastiera dall'iPhone;
-   - provarlo in **modalità Standard (MediaProjection)** sul **Redmi Note 11 Pro 5G** (in attesa dello sblocco bootloader/root) per testare video QUIC 1080p · 120 fps sull'hardware reale.
-4. A fine sessione aggiornare `PROGRESS.md` e questo file.
+1. Eseguire `tools/repo-preflight.ps1`, rivedere il diff v1.2.0, committare e pushare (CI: `core.yml`, `android-app.yml`, `ios.yml`).
+2. (Facoltativo ma consigliato) Creare il keystore di release e i secret GitHub `PHANTOM_KEYSTORE_BASE64`,
+   `PHANTOM_KEYSTORE_PASSWORD`, `PHANTOM_KEY_ALIAS`, `PHANTOM_KEY_PASSWORD`: senza, l'APK è una release non debuggable
+   firmata con la chiave di debug della run (va disinstallata la versione precedente a ogni build).
+3. Disinstallare l'APK debug dal Redmi, installare il nuovo `Phantom.apk` (release) e provare in modalità Standard,
+   guardando nell'HUD iOS espanso Mbps, coda ms e risoluzione, e nel log Android le righe «Risoluzione adattata»,
+   «Frequenza adattata», «Wi-Fi a bassa latenza attivo» e «Rete in affanno».
+4. Fase successiva concordata con l'utente: controllo senza root (Shizuku/ADB wireless), adattamento di risoluzione e
+   fps, tasti di sistema nell'app iOS, telemetria estesa, release seria (firma, versioni, note).
 
 ## Decisions and constraints from the user
 
@@ -146,6 +149,10 @@ Otto task della sessione precedente più T9 e T10 chiusi e verificati in Docker
   client l'ack; i test di ping e tastiera aprono prima la sessione. Non aggirare
   il cancello con un `SessionConfig` o un percorso separato: è voluto.
 
+- Portare `DATAGRAM_SEND_BUFFER` sotto la dimensione di un keyframe (≈ 300–500 KB a 1080p ad alto bitrate): QUIC
+  scarterebbe l'inizio del keyframe appena spedito e il client ne chiederebbe un altro all'infinito.
+- Arrotondare per eccesso le dimensioni dell'encoder (`align16(1080) = 1088`): l'immagine si stira e si sfoca.
+
 ## How to verify
 
 Core:
@@ -179,8 +186,34 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- **Ottimizzazioni qualità & fluidità `v1.1.0`**:
-  - `android/app/app/src/main/java/app/phantom/host/stream/VideoEncoder.kt`: `KEY_I_FRAME_INTERVAL = 10` (elimina i micro-lag dei keyframe ogni 2 s), flag low-latency (`KEY_PRIORITY = 0`, `KEY_MAX_B_FRAMES = 0` su Android 10+, `KEY_LATENCY = 1` su Android 11+ con fallback pulito se il driver li rifiuta), priorità thread `THREAD_PRIORITY_URGENT_DISPLAY` e `dequeueOutputBuffer` a 5 ms.
-  - `android/app/app/src/main/java/app/phantom/host/stream/PhantomHostSession.kt`: profili bitrate differenziati LAN (`12 → 32 Mbps`, min `3 Mbps`) vs P2P 5G (`8 → 20 Mbps`, min `1.5 Mbps`), richiesta keyframe immediata dentro `recvThread` (0 ms di attesa invece di 50 ms), aggiornamento bitrate ogni 250 ms (soglia 5%) e priorità `URGENT_DISPLAY` su `recvThread`.
-  - `ios/PhantomF0/RemoteControlSurface.swift`: riga telemetria live nell'HUD espanso (`risoluzione · codec · Mbps · coda ms`) per monitorare nitidezza e latenza in tempo reale.
-  - `android/app/app/build.gradle.kts`, `ios/project.yml`, `HANDOFF.md`, `PROGRESS.md`: versione aggiornata a `1.1.0`.
+**v1.2.0 — lag e qualità sul Redmi Note 11 Pro 5G (Snapdragon 695, modalità Standard, Wi-Fi):**
+
+- Trasporto (`phantom-quic`, `phantom-p2p`): BBR al posto di Cubic, coda datagrammi in uscita 1 MiB → 512 KiB,
+  `datagram_send_buffer_space()` esposto; `noq-proto` aggiunto come dipendenza diretta di `phantom-p2p` (stessa
+  versione usata da `iroh`). Dettagli e motivazioni in `ADR-009` (aggiornamento v1.2.0).
+- Core: `Host::request_keyframe()` (keyframe chiesto dal lato host), `VideoReceiver::request_resync()` e
+  `Client::request_keyframe()` (il decoder dell'app ha perso un frame: scarta i non-key e chiede un keyframe, motivo 2).
+  Nuovo modulo di test `resync` (2 test). Due `if` dentro `match` trasformati in guardie per clippy 1.97.
+- FFI: `PhantomHost::send_frame_via(connection, …) -> FrameSendReport`, `PhantomHost::request_keyframe`,
+  `PhantomClient::request_keyframe`, `QuicConnection::queued_send_bytes`; il test loopback QUIC usa `send_frame_via`.
+- Android:
+  - `HostForegroundService`: Wi-Fi lock `LOW_LATENCY` + `HIGH_PERF` per tutta la sessione.
+  - `VideoEncoder`: allineamento 8 (non più 1080 → 1088 stirato), scala esatta (1080×2400 → 864×1920 con limite
+    1920), riduzione a passi del 3%, fps scelti dai `PerformancePoint` del SoC (120 → 60 se non regge),
+    istante di cattura da `presentationTimeUs`.
+  - `PhantomHostSession`: invio frame con `sendFrameVia`, contatori di invii falliti/pacchetti scartati e riga di log
+    «Rete in affanno» ogni 5 s quando cambiano.
+  - `HostFormatHelpers`: `scaledDimensions` senza arrotondare per eccesso, `fitEncoderSize`, `realisticFps`,
+    `captureTimeUs` (+ 3 test JVM).
+  - Gradle/CI: `assembleRelease` non debuggable, firma da keystore in secret o fallback chiave di debug,
+    `lint.checkReleaseBuilds = false`; versione `1.2.0`.
+- iOS: `RemoteControlSurface` segnala i frame scartati dal renderer o i fallimenti del decoder,
+  `RemoteSession.requestKeyframeAfterDecoderDrop()` manda la richiesta di keyframe; versione `1.2.0`.
+- `core/Cargo.lock` rigenerato: quello committato era fermo a prima di `phantom-p2p` (non conteneva `iroh`).
+
+Verifiche fatte (container Linux, Rust 1.97): `cargo test --workspace --release` → 22 blocchi `test result: ok`;
+`cargo fmt --check` e `cargo clippy --workspace --all-targets -D warnings` puliti; binding Kotlin e Swift rigenerati;
+sorgenti Kotlin dell'app compilati con `kotlinc 2.0.21` contro `android.jar` API 34 + JNA + binding (unici errori:
+`MainActivity` per la libreria ZXing non disponibile offline, file non toccato); 17 test JVM dell'app eseguiti con
+uno stub JUnit → tutti ok. Non verificati: build Gradle/APK, compilazione Swift (lo fa la CI macOS), MSRV 1.82,
+prova sul telefono.

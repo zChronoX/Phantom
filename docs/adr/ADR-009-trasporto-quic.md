@@ -34,3 +34,26 @@ QUIC richiede TLS 1.3 anche in rete locale. Non esiste ancora un'identità stabi
 - Il crate non è ancora nei binding UniFFI né nell'app: l'integrazione richiede una prova su un dispositivo vero, che oggi non c'è. Il programma Swift di prova e il core continuano a girare su UDP.
 - La prova end-to-end è in `core/crates/phantom-quic/tests/quic_loopback.rs`: due endpoint veri su UDP loopback, handshake, negoziazione, video, tocco, tastiera, chiusura e rifiuto di un certificato sbagliato.
 - Prossimi passi: esporre il trasporto nei binding, collegare l'app, accoppiamento e identità stabile nella fase 5, adattamento automatico di `frag_size` al `max_datagram_size`.
+
+## Aggiornamento v1.2.0 (2026-11-20): coda e controllo di congestione
+
+Sul Redmi Note 11 Pro 5G in Wi-Fi la qualità crollava mentre su LDPlayer (cavo) era buona. Cause lato trasporto:
+
+- **Cubic** (predefinito di quinn) dimezza la finestra a ogni perdita, e sul Wi-Fi di un telefono molte perdite sono
+  casuali: il trasporto spediva meno di quanto l'encoder produceva e i datagrammi si accumulavano.
+- **Coda di invio di 1 MiB**: a 12 Mbit/s sono circa 0,7 s di video in attesa; quando si riempie QUIC scarta i
+  datagrammi più vecchi, il frame arriva rotto, il client chiede un keyframe (più grosso) e la coda cresce ancora.
+
+Decisioni:
+
+- Controllo di congestione **BBR** (`quinn::congestion::BbrConfig` in LAN, `noq_proto::congestion::Bbr3Config` nel P2P
+  `iroh`). Il bitrate vero resta deciso da Phantom (ADR-007); BBR evita solo che il trasporto si strozzi da solo.
+  Il BBR di quinn è marcato «sperimentale»: se dà problemi si torna a Cubic cambiando una riga in `transport_config()`.
+- **Coda di invio di 512 KiB** (`DATAGRAM_SEND_BUFFER`): contiene ancora un keyframe 1080p ad alto bitrate (una coda
+  più corta del keyframe ne scarterebbe l'inizio appena spedito), ma dimezza la latenza possibile.
+- **Invio del frame in una chiamata** (`PhantomHost::send_frame_via`): frammenta e spedisce senza passare da
+  JNA/Swift per ogni pacchetto, conta i datagrammi entrati in coda piena (`queue_overflows`) e in quel caso chiede
+  subito un keyframe dal lato host (`Host::request_keyframe`, con la solita distanza minima).
+- `frag_size` resta calcolato sulla MTU iniziale (1162 → 1122 byte di payload): il protocollo limita comunque i
+  datagrammi a 1200 byte (ADR-004), quindi la path MTU discovery guadagnerebbe al massimo il 2%. Alzare
+  `initial_mtu` rischierebbe di rompere la connessione su VPN/5G con MTU più piccola.

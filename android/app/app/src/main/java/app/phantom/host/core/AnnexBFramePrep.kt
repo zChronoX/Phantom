@@ -71,18 +71,94 @@ object HostFormatHelpers {
         return w to h
     }
 
+    /**
+     * Riduce la sorgente perché il lato corto non superi `maxShortSide`, **senza arrotondare per eccesso**
+     * (il vecchio `align16` portava 1080 a 1088 e stirava l'immagine di 8 px). Restituisce valori pari: l'allineamento
+     * vero lo decide poi l'encoder in base alle sue `VideoCapabilities` ([fitEncoderSize]).
+     */
     fun scaledDimensions(srcW: Int, srcH: Int, maxShortSide: Int): Pair<Int, Int> {
         if (srcW <= 0 || srcH <= 0 || maxShortSide <= 0) {
             return 1080 to 2400
         }
         val shortSide = minOf(srcW, srcH)
         if (shortSide <= maxShortSide) {
-            return align16(srcW) to align16(srcH)
+            return alignDown(srcW, 2) to alignDown(srcH, 2)
         }
         val scale = maxShortSide.toDouble() / shortSide.toDouble()
-        val w = align16((srcW * scale).toInt())
-        val h = align16((srcH * scale).toInt())
-        return w to h
+        return alignDown((srcW * scale).toInt(), 2) to alignDown((srcH * scale).toInt(), 2)
+    }
+
+    /**
+     * Sceglie la risoluzione dell'encoder più grande possibile che:
+     * - non supera `width`×`height` (mai ingrandire) né `maxWidth`×`maxHeight`;
+     * - ha entrambi i lati multipli di `alignment`;
+     * - mantiene le proporzioni: si preferisce una scala esatta (es. 1080×2400 → 864×1920 = 0,8) se costa al massimo
+     *   il 3% di risoluzione, altrimenti si arrotondano i due lati per difetto (errore di proporzione < 1%);
+     * - è accettata dall'encoder (`isSupported`, es. limite sui macroblocchi totali): se no si riduce a passi del 3%,
+     *   non più del 10% alla volta come prima (2400 → 2160 → 1944 → 1744 buttava via risoluzione).
+     */
+    fun fitEncoderSize(
+        width: Int,
+        height: Int,
+        maxWidth: Int,
+        maxHeight: Int,
+        alignment: Int,
+        isSupported: (Int, Int) -> Boolean = { _, _ -> true },
+    ): Pair<Int, Int> {
+        val step = alignment.coerceAtLeast(2)
+        if (width <= 0 || height <= 0) return alignDown(1080, step) to alignDown(1920, step)
+        var scale = minOf(1.0, maxWidth.toDouble() / width, maxHeight.toDouble() / height)
+        var best = alignedAtScale(width, height, scale, step)
+        var attempts = 0
+        while (!isSupported(best.first, best.second) && minOf(best.first, best.second) > 320 && attempts < 40) {
+            scale *= 0.97
+            best = alignedAtScale(width, height, scale, step)
+            attempts++
+        }
+        return best
+    }
+
+    private fun alignedAtScale(width: Int, height: Int, scale: Double, step: Int): Pair<Int, Int> {
+        val targetW = width * scale
+        // Cerca una larghezza multipla di `step` che dia un'altezza intera e allineata (proporzioni esatte).
+        var w = alignDown(targetW.toInt(), step)
+        while (w >= step && w >= targetW * 0.97) {
+            val num = w.toLong() * height
+            if (num % width == 0L) {
+                val h = (num / width).toInt()
+                if (h % step == 0 && h >= step) return w to h
+            }
+            w -= step
+        }
+        return alignDown(targetW.toInt(), step) to alignDown((height * scale).toInt(), step)
+    }
+
+    /**
+     * Frequenza da chiedere all'encoder. Se il SoC dichiara i suoi `PerformancePoint` (Android 10+) si sceglie la più
+     * alta tra 120/90/60/… che sia davvero coperta a questa risoluzione: lo Snapdragon 695 accetta di configurarsi a
+     * 120 fps ma regge circa 1080p60, e i frame in più si accumulano dentro l'encoder come latenza.
+     * `covers(w, h, fps)` è `null` se il SoC non dichiara nulla: in quel caso si tiene la richiesta.
+     */
+    fun realisticFps(requestedFps: Int, covers: (Int) -> Boolean?): Int {
+        val ladder = listOf(120, 90, 60, 50, 48, 30).filter { it <= requestedFps }.ifEmpty { listOf(requestedFps) }
+        if (covers(requestedFps) != false) return requestedFps
+        for (fps in ladder) {
+            if (covers(fps) == true) return fps
+        }
+        return minOf(requestedFps, 60)
+    }
+
+    /**
+     * Istante di cattura sull'orologio dell'host (`elapsedRealtime`, µs) a partire dal `presentationTimeUs` del frame,
+     * che con l'ingresso a superficie è sull'orologio monotono (`System.nanoTime`). Così la latenza misurata include
+     * anche il tempo passato dentro l'encoder. Se il valore è assurdo (≤ 0, nel futuro o più vecchio di 2 s) si usa
+     * l'istante attuale, come prima.
+     */
+    fun captureTimeUs(presentationTimeUs: Long, nowMonotonicUs: Long, nowElapsedUs: Long): Long {
+        if (presentationTimeUs <= 0L) return nowElapsedUs
+        val ageUs = nowMonotonicUs - presentationTimeUs
+        if (ageUs < 0L || ageUs > 2_000_000L) return nowElapsedUs
+        return nowElapsedUs - ageUs
     }
 
     fun toHex(bytes: ByteArray): String {

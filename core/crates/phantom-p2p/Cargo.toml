@@ -12,4 +12,6 @@ workspace = true
 [dependencies]
 bytes = "1"
 iroh = "1"
+# Solo per il controllo di congestione BBR v3: stessa versione che usa `iroh` (non scaricare una copia diversa).
+noq-proto = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }

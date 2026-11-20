@@ -676,7 +676,23 @@ impl VideoReceiver {
         out.push(Output::Dropped { frame_id: id, reason });
     }
 
-    /// `reason`: 0 = perdita, 1 = avvio, 3 = ripetizione (il keyframe atteso non è arrivato).
+    /// Il decoder dell'app ha perso un frame già consegnato (coda del renderer piena, errore di decodifica): da qui in
+    /// poi i frame non-key sarebbero corrotti, quindi si scartano fino al prossimo keyframe e se ne chiede uno
+    /// (motivo 2, richiesta esplicita). Se una richiesta è partita da meno di `key_retry_us` non se ne manda un'altra:
+    /// ci pensa già la ripetizione automatica in [`VideoReceiver::poll`].
+    pub fn request_resync(&mut self, now_us: u64) -> Vec<Output> {
+        let mut out = Vec::new();
+        let recent = self.last_key_request_us.is_some_and(|t| now_us.saturating_sub(t) < self.cfg.key_retry_us);
+        if self.need_key && recent {
+            return out;
+        }
+        self.need_key = true;
+        self.request_keyframe(now_us, 2, &mut out);
+        out
+    }
+
+    /// `reason`: 0 = perdita, 1 = avvio, 2 = richiesta esplicita dell'app, 3 = ripetizione (il keyframe atteso non è
+    /// arrivato).
     fn request_keyframe(&mut self, now_us: u64, reason: u8, out: &mut Vec<Output>) {
         self.stats.keyframe_requests += 1;
         self.last_key_request_us = Some(now_us);

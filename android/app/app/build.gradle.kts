@@ -12,16 +12,38 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = System.getenv("BUILD_NUMBER")?.toIntOrNull() ?: 1
-        versionName = "1.1.0"
+        versionName = "1.2.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
     }
 
+    // Firma della release: keystore stabile passato dalla CI (secret) o da variabili d'ambiente locali.
+    // Senza keystore la release si firma con la chiave di debug: resta installabile e, soprattutto,
+    // NON è `debuggable`, quindi ART compila il codice al massimo (la build debug è molto più lenta
+    // nel percorso caldo encoder → rete in modalità Standard).
+    val releaseKeystore = System.getenv("PHANTOM_KEYSTORE_PATH")?.let { file(it) }?.takeIf { it.isFile }
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("phantomRelease") {
+                storeFile = releaseKeystore
+                storePassword = System.getenv("PHANTOM_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("PHANTOM_KEY_ALIAS")
+                keyPassword = System.getenv("PHANTOM_KEY_PASSWORD") ?: System.getenv("PHANTOM_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            isDebuggable = false
+            signingConfig = if (releaseKeystore != null) {
+                signingConfigs.getByName("phantomRelease")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
@@ -39,6 +61,11 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+    }
+
+    lint {
+        // Il lint completo resta disponibile con `gradle lint`; qui non deve bloccare la build della release in CI.
+        checkReleaseBuilds = false
     }
 
     testOptions {

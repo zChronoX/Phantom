@@ -1,6 +1,6 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-20. Branch `main`, commit `f851c3a` (allineato a `origin/main`) più fix `panic = "unwind"` per `iroh` su Android e diagnostica P2P/iOS.
+Ultimo aggiornamento: 2026-11-20. Branch `main`, base `0768f02` (= `origin/main`) più correzioni v1.2.0 non committate.
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Dove siamo
@@ -359,7 +359,24 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
   - `PhantomHostSession.kt`: bitrate LAN alzato (`12–32 Mbps`, min `3 Mbps`) e P2P 5G (`8–20 Mbps`, min `1.5 Mbps`), keyframe on-demand immediato su `recvThread` (0 ms di ritardo), adattamento bitrate ogni 250 ms (soglia 5%) e priorità `URGENT_DISPLAY`.
   - `RemoteControlSurface.swift`: telemetria live nell'HUD espanso (`risoluzione · codec · Mbps · coda ms`); versioni bumpate a `1.1.0` su iOS e Android.
 
+- **Correzioni lag Redmi `v1.2.0` (locale, da committare)**: analisi del perché il Redmi (Wi-Fi, modalità Standard,
+  1080×2400, Snapdragon 695) andasse molto peggio di LDPlayer (cavo, Root, risoluzione bassa) e correzione dei
+  cinque colpevoli più i bug trovati:
+  1. trasporto QUIC con BBR e coda di invio 512 KiB (prima Cubic e 1 MiB: coda lunga, poi datagrammi scartati);
+  2. Wi-Fi lock a bassa latenza sul telefono (prima il risparmio energetico della radio ritardava ping e NACK, il
+     controllo del bitrate lo leggeva come congestione e i frame scadevano);
+  3. encoder: niente più 1088 stirato, scala esatta, fps scelti dalle prestazioni dichiarate dal SoC;
+  4. APK release non debuggable in CI (firma da secret o chiave di debug);
+  5. invio dei frame in una sola chiamata FFI (`send_frame_via`) invece di una chiamata JNA per pacchetto;
+  - bug: frame scartati dal renderer iOS ora chiedono un keyframe (prima immagine rovinata fino a 10 s), errori di
+    invio contati e mostrati nel log, istante di cattura preso dal `presentationTimeUs`.
+  Dettagli in `HANDOFF.md` («Uncommitted changes») e `ADR-009`.
+
 ## Prossimo passo
 
-1. Committare, pushare su `origin/main` e creare il tag `v1.1.0` per testare sul Redmi la nuova fluidità, nitidezza e i valori live di risoluzione/codec/Mbps nell'HUD espanso su iPhone.
-2. Quando il Redmi Note 11 Pro 5G avrà il root, verificare multi-touch/tastiera, audio Root Android 12+ (`RootAudioContext`), `Schermo Off` fisico e Doze in 5G reale.
+1. Committare e pushare `v1.2.0`, installare il nuovo APK release sul Redmi (disinstallando prima il debug) e
+   confrontare HUD e log con la prova precedente.
+2. Fase «progetto completo»: controllo senza root (Shizuku/ADB wireless), adattamento di risoluzione e fps, tasti di
+   sistema nell'app iOS, telemetria estesa, release seria.
+3. Quando il Redmi Note 11 Pro 5G avrà il root, verificare multi-touch/tastiera, audio Root Android 12+, `Schermo Off`
+   fisico e Doze in 5G reale.

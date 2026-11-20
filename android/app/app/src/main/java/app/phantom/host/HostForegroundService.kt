@@ -22,6 +22,7 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.wifi.WifiManager
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.BatteryManager
@@ -57,6 +58,7 @@ import java.util.concurrent.atomic.AtomicReference
  */
 class HostForegroundService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
+    private val wifiLocks = ArrayList<WifiManager.WifiLock>(2)
     private val currentThermalPolicy = AtomicReference(ThermalGuard.evaluate(null, 0))
     private var batteryTempTenths: Int? = null
 
@@ -773,6 +775,7 @@ class HostForegroundService : Service() {
             setReferenceCounted(false)
             acquire(6 * 60 * 60 * 1000L)
         }
+        acquireWifiLocks()
     }
 
     private fun releaseWakeLock() {
@@ -781,6 +784,50 @@ class HostForegroundService : Service() {
         } catch (_: Throwable) {
         }
         wakeLock = null
+        releaseWifiLocks()
+    }
+
+    /**
+     * Tiene la radio Wi-Fi fuori dal risparmio energetico per tutta la sessione. Senza questo lock Android
+     * accumula i pacchetti in arrivo (ping, NACK, statistiche dell'iPhone) e li consegna a raffiche con
+     * 50–200 ms di ritardo: il controllo del bitrate li scambia per congestione e i NACK arrivano troppo tardi.
+     * `LOW_LATENCY` (Android 10+) vale solo con app in primo piano e schermo acceso, quindi si tiene anche
+     * `HIGH_PERF`, che resta attivo quando l'utente usa altre app sul telefono.
+     */
+    private fun acquireWifiLocks() {
+        if (wifiLocks.any { it.isHeld }) return
+        releaseWifiLocks()
+        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
+        val modes = ArrayList<Pair<Int, String>>(2)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            modes.add(WifiManager.WIFI_MODE_FULL_LOW_LATENCY to "phantom:wifi-low-latency")
+        }
+        @Suppress("DEPRECATION")
+        modes.add(WifiManager.WIFI_MODE_FULL_HIGH_PERF to "phantom:wifi-high-perf")
+        for ((mode, tag) in modes) {
+            try {
+                val lock = wm.createWifiLock(mode, tag).apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+                wifiLocks.add(lock)
+            } catch (t: Throwable) {
+                HostStateStore.addLog("Wi-Fi lock $tag non disponibile: ${t.javaClass.simpleName}")
+            }
+        }
+        if (wifiLocks.isNotEmpty()) {
+            HostStateStore.addLog("Wi-Fi a bassa latenza attivo (risparmio energetico radio sospeso)")
+        }
+    }
+
+    private fun releaseWifiLocks() {
+        for (lock in wifiLocks) {
+            try {
+                if (lock.isHeld) lock.release()
+            } catch (_: Throwable) {
+            }
+        }
+        wifiLocks.clear()
     }
 
     private fun ensureChannel() {

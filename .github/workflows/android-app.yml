@@ -78,13 +78,31 @@ jobs:
       - name: Accetta licenze Android SDK
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
 
-      - name: Test unitari JVM e build Phantom.apk
+      # Keystore stabile (secret PHANTOM_KEYSTORE_BASE64 + password/alias): gli aggiornamenti si installano sopra
+      # senza disinstallare. Senza secret si firma con la chiave di debug della run (va disinstallata la versione
+      # precedente), ma l'APK resta una release non debuggable, molto più veloce della build debug.
+      - name: Prepara keystore di firma (se configurato)
+        env:
+          PHANTOM_KEYSTORE_BASE64: ${{ secrets.PHANTOM_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$PHANTOM_KEYSTORE_BASE64" ]; then
+            echo "$PHANTOM_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/phantom-release.jks"
+            echo "PHANTOM_KEYSTORE_PATH=$RUNNER_TEMP/phantom-release.jks" >> "$GITHUB_ENV"
+            echo "Keystore di release configurato"
+          else
+            echo "::warning::Secret PHANTOM_KEYSTORE_BASE64 assente: APK firmato con chiave di debug della run"
+          fi
+
+      - name: Test unitari JVM e build Phantom.apk (release)
         env:
           BUILD_NUMBER: ${{ github.run_number }}
+          PHANTOM_KEYSTORE_PASSWORD: ${{ secrets.PHANTOM_KEYSTORE_PASSWORD }}
+          PHANTOM_KEY_ALIAS: ${{ secrets.PHANTOM_KEY_ALIAS }}
+          PHANTOM_KEY_PASSWORD: ${{ secrets.PHANTOM_KEY_PASSWORD }}
         run: |
-          gradle -p android/app testDebugUnitTest assembleDebug --no-daemon
+          gradle -p android/app testDebugUnitTest assembleRelease --no-daemon
           mkdir -p dist
-          cp android/app/app/build/outputs/apk/debug/app-debug.apk dist/Phantom.apk
+          cp android/app/app/build/outputs/apk/release/app-release.apk dist/Phantom.apk
           ls -lh dist/Phantom.apk
 
       - uses: actions/upload-artifact@v4

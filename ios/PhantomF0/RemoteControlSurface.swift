@@ -42,14 +42,27 @@ final class RemoteDisplayTouchView: UIView, UIKeyInput {
 
     required init?(coder: NSCoder) { fatalError("non supportato") }
 
+    /// Chiamato (sulla coda di rendering) quando un frame non arriva al decoder o il decoder fallisce: serve un
+    /// keyframe, altrimenti i frame successivi restano corrotti fino al prossimo I-frame periodico.
+    var onFrameDropped: (() -> Void)?
+
     func enqueueOnBackground(_ sb: CMSampleBuffer, flushBeforeEnqueue: Bool) {
         guard let renderer = videoRenderer else { return }
-        renderQueue.async {
-            if flushBeforeEnqueue || renderer.status == .failed || renderer.requiresFlushToResumeDecoding {
+        renderQueue.async { [weak self] in
+            // `flushBeforeEnqueue` arriva con un keyframe (formato nuovo): ripartire da lì è sicuro. Un flush per
+            // errore del decoder, invece, lascia il decoder senza riferimento: il prossimo frame utile è un keyframe.
+            let decoderFailed = renderer.status == .failed || renderer.requiresFlushToResumeDecoding
+            if flushBeforeEnqueue || decoderFailed {
                 renderer.flush()
             }
             if renderer.isReadyForMoreMediaData {
                 renderer.enqueue(sb)
+                if decoderFailed && !flushBeforeEnqueue {
+                    self?.onFrameDropped?()
+                }
+            } else {
+                // Prima il frame veniva perso in silenzio e l'immagine restava rovinata anche per secondi.
+                self?.onFrameDropped?()
             }
         }
     }
@@ -271,6 +284,9 @@ private struct RemoteDisplayControllerRepresentable: UIViewControllerRepresentab
         }
         session.onSample = { [weak view] sb, flush in
             view?.enqueueOnBackground(sb, flushBeforeEnqueue: flush)
+        }
+        view.onFrameDropped = { [weak session] in
+            session?.requestKeyframeAfterDecoderDrop()
         }
         return controller
     }

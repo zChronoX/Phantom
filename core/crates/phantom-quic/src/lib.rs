@@ -310,6 +310,12 @@ impl QuicLink {
         Ok(datagram.len())
     }
 
+    /// Spazio libero (byte) nel buffer dei datagrammi in uscita. Se un datagramma è più grande di questo spazio,
+    /// spedirlo fa scartare datagrammi più vecchi ancora in coda.
+    pub fn datagram_send_buffer_space(&self) -> usize {
+        self.connection.datagram_send_buffer_space()
+    }
+
     /// Massimo datagramma accettato dalla connessione, secondo la stima del
     /// path MTU. Può crescere durante la connessione; `None` se i datagrammi
     /// non sono supportati.
@@ -345,10 +351,25 @@ fn new_runtime() -> Result<Runtime, QuicError> {
         .map_err(QuicError::Io)
 }
 
+/// Byte di datagrammi in uscita che QUIC tiene in coda prima di scartare i più vecchi.
+///
+/// Prima era 1 MiB: a 12 Mbit/s sono circa 0,7 s di video che possono aspettare in coda sul telefono, con la latenza
+/// che sale e il controllo del bitrate che se ne accorge tardi. 512 KiB contengono ancora un keyframe 1080p ad alto
+/// bitrate (se la coda fosse più corta del keyframe, QUIC ne butterebbe via l'inizio appena spedito), ma dimezzano la
+/// coda possibile. Il resto lo fa BBR, che non svuota la finestra a ogni perdita casuale del Wi-Fi.
+pub const DATAGRAM_SEND_BUFFER: usize = 512 * 1024;
+
+/// Byte di datagrammi in arrivo tenuti in attesa che l'app li legga.
+pub const DATAGRAM_RECEIVE_BUFFER: usize = 1 << 20;
+
 fn transport_config() -> Arc<TransportConfig> {
     let mut config = TransportConfig::default();
     // I datagrammi sono opzionali: senza buffer di ricezione QUIC li rifiuta.
-    config.datagram_receive_buffer_size(Some(1 << 20)).datagram_send_buffer_size(1 << 20);
+    config.datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE_BUFFER)).datagram_send_buffer_size(DATAGRAM_SEND_BUFFER);
+    // BBR invece di Cubic: Cubic dimezza la finestra a ogni perdita, e sul Wi-Fi di un telefono le perdite sono
+    // spesso casuali, non congestione. Con Cubic i datagrammi si accumulavano in coda (latenza) e poi venivano
+    // scartati (frame rotti → keyframe → ancora più coda). Il controllo del bitrate vero resta quello di Phantom.
+    config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     // Keep-alive e timeout calibrati anche per reti mobili (4G/5G / NAT / Tailscale).
     config.keep_alive_interval(Some(Duration::from_secs(3)));
     if let Ok(timeout) = IdleTimeout::try_from(Duration::from_secs(15)) {
