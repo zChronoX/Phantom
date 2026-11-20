@@ -166,7 +166,7 @@ class AudioStreamer private constructor(
             return try {
                 val at = Class.forName("android.app.ActivityThread")
                 val pkg = at.getMethod("currentOpPackageName").invoke(null) as? String
-                !pkg.isNullOrBlank()
+                pkg != null && pkg.isNotBlank()
             } catch (_: Throwable) {
                 false
             }
