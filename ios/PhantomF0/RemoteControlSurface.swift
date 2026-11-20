@@ -342,6 +342,20 @@ struct RemoteSessionView: View {
             } else {
                 hudBar
             }
+
+            if let toast = session.toastText {
+                VStack {
+                    Spacer()
+                    Text(toast)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(.black.opacity(0.75), in: Capsule())
+                        .padding(.bottom, 28)
+                }
+                .allowsHitTesting(false)
+            }
         }
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
@@ -452,6 +466,12 @@ struct RemoteSessionView: View {
                 Spacer()
 
                 Button {
+                    session.toggleAudioMute()
+                } label: {
+                    Image(systemName: session.audioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                }
+
+                Button {
                     resetTouchesToken &+= 1
                     toggleKeyboardToken &+= 1
                 } label: {
@@ -479,6 +499,21 @@ struct RemoteSessionView: View {
                     quickButton("Recenti", systemImage: "square.on.square", action: .recents)
                     quickButton("Vol−", systemImage: "speaker.wave.1", action: .volumeDown)
                     quickButton("Vol+", systemImage: "speaker.wave.3", action: .volumeUp)
+                }
+
+                HStack(spacing: 12) {
+                    controlButton("Invia appunti", systemImage: "doc.on.clipboard") {
+                        session.sendClipboardFromPasteboard()
+                    }
+                    controlButton(
+                        session.hostScreenOff ? "Schermo On" : "Schermo Off",
+                        systemImage: session.hostScreenOff ? "sun.max.fill" : "moon.fill"
+                    ) {
+                        session.sendControl(session.hostScreenOff ? .screenOn : .screenOff)
+                    }
+                    controlButton("Risveglia", systemImage: "power") {
+                        session.sendControl(.wakeScreen)
+                    }
                 }
 
                 if case .localQuicLoopback = mode {
@@ -509,9 +544,13 @@ struct RemoteSessionView: View {
     }
 
     private func quickButton(_ title: String, systemImage: String, action: RemoteQuickAction) -> some View {
-        Button {
+        controlButton(title, systemImage: systemImage) {
             session.sendKeyEvents(action.hidSequence)
-        } label: {
+        }
+    }
+
+    private func controlButton(_ title: String, systemImage: String, onTap: @escaping () -> Void) -> some View {
+        Button(action: onTap) {
             VStack(spacing: 3) {
                 Image(systemName: systemImage)
                     .font(.footnote.weight(.semibold))

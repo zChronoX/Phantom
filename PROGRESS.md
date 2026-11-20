@@ -328,14 +328,19 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
   - `android/app/.../PhantomHostSession.kt`: timeout `online` a 8 s e log esplicito `online` vs `in attesa relay`.
   - `ios/PhantomF0/RemoteSession.swift`: aggregati gli errori di tutti i candidati tentati (`LAN: ... · P2P: ...`).
 
+- Verifica reale su LDPlayer + iPhone dopo il fix `panic = "unwind"`:
+  - `iroh` cattura `ndk-context` e va online in 1 s (`P2P integrato (iroh) online`);
+  - connessione LAN (Wi-Fi), passaggio Wi-Fi → 5G (~10 s dovuti all'attesa dell'`idle_timeout` della vecchia sessione LAN) e passaggio 5G → Wi-Fi (quasi istantaneo senza caduta della sessione) tutti riusciti.
+- Implementazione blocco completo di produzione (locale, da committare e pushare):
+  1. **Preemption immediata + switch Wi-Fi → 5G rapido (~1–2 s)**: Android pre-autentica il primo `Hello` della nuova connessione e chiude subito la sessione precedente stale; iOS usa ritardo immediato (50 ms) sul passaggio Wi-Fi → 5G attivo e `onlineTimeoutMs = 2500`.
+  2. **Sicurezza P2P + LAN (autenticazione mutua)**: token segreto persistente 128-bit (`auth.token`) generato sull'host e incluso nel QR (`&tok=`), verificato a tempo costante in `phantom-core` / `verify_client_hello` (rifiuto con `Close(UNAUTHORIZED = 2)` senza interrompere sessioni attive).
+  3. **Audio in tempo reale Android → iPhone**: `Message::Audio` (AAC-LC 48 kHz stereo in singolo datagramma), `AudioStreamer.kt` (`REMOTE_SUBMIX` / `AudioPlaybackCapture` + `MediaCodec` AAC-LC con fallback pulito su emulatori) e `AudioPlayer.swift` (`AVSampleBufferAudioRenderer` + cookie `esds` ISO 14496-1 + tasto muto nell'HUD).
+  4. **Controllo display, Doze e appunti condivisi**: `Message::Control` (`WakeScreen`, `ScreenOff`, `ScreenOn`) con `RootDisplayPower` (`SurfaceControl.setDisplayPowerMode`, ripristino schermo garantito su disconnessione/stop) + `KEYCODE_WAKEUP` automatico alla connessione, pulsante esenzione Doze su Android e `Message::Clipboard` bidirezionale iPhone ↔ Android.
+  5. **Documentazione**: aggiornato `README.md` allo stato reale (Redmi Note 11 Pro 5G / LDPlayer, APK Android, iOS, P2P `iroh`).
+
 ## Prossimo passo
 
-Modifiche locali pronte su `f851c3a` (da committare e pushare dall'utente su `origin/main` per rigenerare APK e IPA su GitHub Actions):
-- `core/Cargo.toml`
-- `core/crates/phantom-p2p/src/lib.rs`
-- `core/crates/phantom-ffi/src/lib.rs`
-- `android/app/app/src/main/java/app/phantom/host/stream/PhantomHostSession.kt`
-- `ios/PhantomF0/RemoteSession.swift`
-- `HANDOFF.md`, `PROGRESS.md`
-
-Nota: Docker non è attivo sul PC locale, quindi build/test/fmt/clippy gireranno sui 3 workflow GitHub Actions al push. Poi aggiornare APK (+ IPA per la diagnostica completa) da `f0-latest` e verificare Wi-Fi + 5G!
+Modifiche locali pronte per commit e push dell'utente su `origin/main` (le verifiche Rust/Swift/Kotlin gireranno sui 3 workflow GitHub Actions). Dopo il build:
+1. Aggiornare APK su LDPlayer e IPA su iPhone da `f0-latest`.
+2. **Riscansionare una volta il QR** su iPhone per salvare il nuovo token segreto 128-bit (`&tok=`, badge «protetto»).
+3. Provare su LDPlayer + iPhone: switch rapido Wi-Fi → 5G (~1–2 s), appunti bidirezionali, audio e tasti controllo schermo.

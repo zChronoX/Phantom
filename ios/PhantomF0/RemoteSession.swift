@@ -7,8 +7,14 @@ import QuartzCore
 
 /// Modalità di avvio della sessione remota.
 enum RemoteSessionMode: Equatable {
-    /// Connessione reale verso l'host Android tramite QUIC con failover automatico LAN → Remoto (5G/4G) e riconnessione.
-    case remote(endpoints: [RemoteEndpointCandidate], certificateDer: Data, codec: VideoCodec, autoReconnect: Bool = true)
+    /// Connessione reale verso l'host Android tramite QUIC con failover automatico LAN → P2P 5G/4G e riconnessione.
+    case remote(
+        endpoints: [RemoteEndpointCandidate],
+        certificateDer: Data,
+        authToken: Data? = nil,
+        codec: VideoCodec,
+        autoReconnect: Bool = true
+    )
     /// Prova locale su iPhone con host QUIC + encoder hardware HEVC in loopback.
     case localQuicLoopback(fps: Int, width: Int, height: Int)
 }
@@ -37,6 +43,9 @@ final class RemoteSession: ObservableObject {
     @Published private(set) var statusText = "Pronto"
     @Published private(set) var metrics = RemoteSessionMetrics()
     @Published private(set) var videoSize = VideoDimensions.zero
+    @Published private(set) var audioMuted = false
+    @Published private(set) var hostScreenOff = false
+    @Published private(set) var toastText: String?
 
     var onSample: ((CMSampleBuffer, Bool) -> Void)?
 
@@ -56,6 +65,8 @@ final class RemoteSession: ObservableObject {
     private var connection: QuicConnection?
     private var hostLoopback: LocalQuicHostRunner?
     private var pathObserver: NetworkPathObserver?
+    private let audioPlayer = AudioStreamPlayer()
+    private var toastClearWorkItem: DispatchWorkItem?
 
     private let ioQueue = DispatchQueue(label: "app.phantom.remote.io", qos: .userInteractive)
     private let recvQueue = DispatchQueue(label: "app.phantom.remote.recv", qos: .userInteractive)
@@ -148,6 +159,7 @@ final class RemoteSession: ObservableObject {
         }
 
         activeObserver?.stop()
+        audioPlayer.stop()
         if let c = activeClient, let q = activeConn, let closeDatagram = c.close(reason: 0) {
             try? q.sendDatagram(datagram: closeDatagram)
         }
@@ -159,7 +171,61 @@ final class RemoteSession: ObservableObject {
         DispatchQueue.main.async {
             self.running = false
             self.metrics.connected = false
+            self.hostScreenOff = false
             UIApplication.shared.isIdleTimerDisabled = false
+        }
+    }
+
+    func toggleAudioMute() {
+        let next = !audioMuted
+        audioMuted = next
+        audioPlayer.isMuted = next
+        showToast(next ? "Audio disattivato" : "Audio attivo")
+    }
+
+    func sendClipboardFromPasteboard() {
+        guard let text = UIPasteboard.general.string, !text.isEmpty else {
+            showToast("Appunti iPhone vuoti")
+            return
+        }
+        let (c, q): (PhantomClient?, QuicConnection?) = withLock { (client, connection) }
+        guard let c = c, let q = q else { return }
+        if let datagram = c.sendClipboard(text: text) {
+            try? q.sendDatagram(datagram: datagram)
+            showToast("Appunti inviati ad Android")
+        }
+    }
+
+    func sendControl(_ command: RemoteControlCommand) {
+        let (c, q): (PhantomClient?, QuicConnection?) = withLock { (client, connection) }
+        guard let c = c, let q = q else { return }
+        if let datagram = c.sendControl(command: command) {
+            try? q.sendDatagram(datagram: datagram)
+            DispatchQueue.main.async {
+                switch command {
+                case .screenOff:
+                    self.hostScreenOff = true
+                    self.showToast("Schermo fisico Android spento")
+                case .screenOn:
+                    self.hostScreenOff = false
+                    self.showToast("Schermo fisico Android acceso")
+                case .wakeScreen:
+                    self.hostScreenOff = false
+                    self.showToast("Risveglio inviato ad Android")
+                }
+            }
+        }
+    }
+
+    private func showToast(_ text: String) {
+        DispatchQueue.main.async {
+            self.toastClearWorkItem?.cancel()
+            self.toastText = text
+            let item = DispatchWorkItem { [weak self] in
+                self?.toastText = nil
+            }
+            self.toastClearWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.2, execute: item)
         }
     }
 
@@ -201,11 +267,12 @@ final class RemoteSession: ObservableObject {
             let candidates: [RemoteEndpointCandidate]
             let bindAddr: String
             let certDer: Data
+            let authToken: Data?
             let preferredCodec: VideoCodec
             var loopback: LocalQuicHostRunner?
 
             switch mode {
-            case let .remote(endpoints, certificateDer, codec, _):
+            case let .remote(endpoints, certificateDer, token, codec, _):
                 guard !endpoints.isEmpty else {
                     publishError("Nessun indirizzo configurato per il dispositivo")
                     return
@@ -218,6 +285,7 @@ final class RemoteSession: ObservableObject {
                 candidates = (cellularOnly && !nonLan.isEmpty) ? nonLan : endpoints
                 bindAddr = "0.0.0.0:0"
                 certDer = certificateDer
+                authToken = token
                 preferredCodec = codec
 
             case let .localQuicLoopback(fps, width, height):
@@ -232,6 +300,7 @@ final class RemoteSession: ObservableObject {
                 ]
                 bindAddr = "127.0.0.1:0"
                 certDer = runner.certificateDer
+                authToken = nil
                 preferredCodec = .h265
                 loopback = runner
             }
@@ -275,7 +344,7 @@ final class RemoteSession: ObservableObject {
                         chosenIsLan = isLan
 
                     case let .p2pIroh(endpointId):
-                        let ep = try P2pClientEndpoint.bind(onlineTimeoutMs: 4_000)
+                        let ep = try P2pClientEndpoint.bind(onlineTimeoutMs: 2_500)
                         let link = try ep.connect(
                             remoteEndpointId: endpointId,
                             timeoutMs: candidate.timeoutMs
@@ -305,7 +374,8 @@ final class RemoteSession: ObservableObject {
             if let maxDgram = conn.maxDatagramSize() {
                 settings.fragSize = videoPayloadForDatagram(maxDatagramSize: maxDgram)
             }
-            let phantomClient = PhantomClient.newMultiCodec(settings: settings)
+            let phantomClient = PhantomClient.newWithAuth(settings: settings, authToken: authToken ?? Data())
+            audioPlayer.start()
 
             let installed = withLock { () -> Bool in
                 guard generation == gen && !stopRequested else { return false }
@@ -348,6 +418,7 @@ final class RemoteSession: ObservableObject {
                         try? conn.sendDatagram(datagram: reply)
                     }
                     self.drainDeliveredFrames(client: client, gen: gen)
+                    self.drainAudioAndClipboard(client: client, gen: gen)
                 } catch QuicTransportError.Timeout {
                     continue
                 } catch {
@@ -404,7 +475,21 @@ final class RemoteSession: ObservableObject {
         }
 
         drainDeliveredFrames(client: client, gen: gen)
+        drainAudioAndClipboard(client: client, gen: gen)
         refreshSessionAndMetrics(client: client, nowUs: now, gen: gen)
+    }
+
+    private func drainAudioAndClipboard(client: PhantomClient, gen: UInt64) {
+        guard isGenerationActive(gen) else { return }
+        for audio in client.takeAudio() {
+            audioPlayer.enqueue(audio)
+        }
+        if let clip = client.takeClipboard(), !clip.isEmpty {
+            DispatchQueue.main.async {
+                UIPasteboard.general.string = clip
+            }
+            showToast("Appunti ricevuti da Android")
+        }
     }
 
     private func drainDeliveredFrames(client: PhantomClient, gen: UInt64) {
@@ -498,7 +583,7 @@ final class RemoteSession: ObservableObject {
         enum PathAction {
             case none
             case migrateP2p(P2pClientEndpoint)
-            case triggerFastReconnect(gen: UInt64)
+            case triggerFastReconnect(gen: UInt64, immediate: Bool)
             case retryNow(mode: RemoteSessionMode, nextGen: UInt64)
         }
 
@@ -514,7 +599,7 @@ final class RemoteSession: ObservableObject {
                 return .migrateP2p(p2p)
             }
             if activeTargetIsLan && (isCellularOnly || !isSatisfied) {
-                return .triggerFastReconnect(gen: generation)
+                return .triggerFastReconnect(gen: generation, immediate: isCellularOnly && isSatisfied)
             }
             return .none
         }
@@ -526,8 +611,8 @@ final class RemoteSession: ObservableObject {
             DispatchQueue.global(qos: .userInitiated).async {
                 p2p.networkChange()
             }
-        case let .triggerFastReconnect(gen):
-            handleDisconnect(reason: "Cambio rete (Wi-Fi ↔ 5G/4G)", orderly: false, gen: gen)
+        case let .triggerFastReconnect(gen, immediate):
+            handleDisconnect(reason: "Cambio rete (Wi-Fi ↔ 5G/4G)", orderly: false, gen: gen, immediate: immediate)
         case let .retryNow(mode, nextGen):
             DispatchQueue.main.async {
                 self.statusText = "Nuova rete rilevata · riconnessione…"
@@ -538,7 +623,7 @@ final class RemoteSession: ObservableObject {
         }
     }
 
-    private func handleDisconnect(reason: String, orderly: Bool, gen: UInt64) {
+    private func handleDisconnect(reason: String, orderly: Bool, gen: UInt64, immediate: Bool = false) {
         let decision: (retryMode: RemoteSessionMode, nextGen: UInt64, attempt: Int, delay: Double)? = withLock {
             guard generation == gen && !stopRequested else { return nil }
             tickTimer?.cancel()
@@ -557,7 +642,7 @@ final class RemoteSession: ObservableObject {
             guard !orderly,
                   hasConnectedOnce,
                   let mode = currentMode,
-                  case let .remote(_, _, _, autoReconnect) = mode,
+                  case let .remote(_, _, _, _, autoReconnect) = mode,
                   autoReconnect,
                   reconnectAttempt < ReconnectBackoff.maxAttempts else {
                 return nil
@@ -565,9 +650,11 @@ final class RemoteSession: ObservableObject {
             reconnectAttempt += 1
             waitingForReconnect = true
             generation &+= 1
-            return (mode, generation, reconnectAttempt, ReconnectBackoff.delaySeconds(attempt: reconnectAttempt))
+            let delay = immediate ? 0.05 : ReconnectBackoff.delaySeconds(attempt: reconnectAttempt)
+            return (mode, generation, reconnectAttempt, delay)
         }
 
+        audioPlayer.stop()
         guard let retry = decision else {
             publishError(reason)
             return

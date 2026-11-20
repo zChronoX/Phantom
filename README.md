@@ -6,35 +6,28 @@ Il piano completo (obiettivi, architettura, roadmap, test) è nel documento di p
 
 ## Stato
 
-**Fase 0 · Fattibilità** — in corso. Strumenti per verificare sul telefono reale i tre rischi principali: cattura ed encoder, rete di casa, raggiungibilità in Doze. Guida: [docs/f0-guida.md](docs/f0-guida.md).
-
-**Fase 1 · Fondamenta** — iniziata. Il core Rust ([core/](core/README.md)) ha protocollo v0, apertura obbligatoria (`Hello`/`HelloAck`: senza accordo non passano video né input) e chiusura ordinata della sessione, simulatore di rete, sincronia degli orologi, video con parità e NACK, controllo del bitrate, prove sul simulatore e su UDP reale, CI su tre sistemi operativi. Il crate `phantom-quic` porta gli stessi datagrammi su QUIC (fase 2, prima parte: trasporto provato in loopback, non ancora collegato all'app). I binding UniFFI (`phantom-ffi`) espongono host e client a Swift e Kotlin: la CI li genera, ne compila ed esegue una prova per entrambe le lingue e pubblica le librerie per iPhone e Android.
+- **Core Rust ([core/](core/README.md))**: protocollo v0 (`Hello`/`HelloAck` con autenticazione tramite token condiviso 128-bit, video H.264/HEVC con parità XOR + NACK + bitrate adattivo, audio AAC-LC in tempo reale, tocco multi-touch 240 Hz, tastiera HID, appunti bidirezionali e controllo display), trasporto QUIC diretto LAN (`phantom-quic`), trasporto P2P NAT traversal + relay cifrato (`phantom-p2p` su `iroh`) e binding UniFFI Swift/Kotlin (`phantom-ffi`).
+- **Host Android ([android/app/](android/app/))**: APK nativo leggero (`arm64-v8a` + `x86_64`) con root on-demand (`su` → `app_process64`) + fallback `MediaProjection`, identità persistente + QR 1-tap, doppio listener LAN + P2P `iroh` con preemption immediata al cambio rete, cattura audio AAC-LC, appunti condivisi, wake/screen-off fisico, esenzione Doze e protezione termica (`ThermalGuard`). Vedi [ADR-010](docs/adr/ADR-010-host-android-apk.md).
+- **Client iPhone ([ios/](ios/))**: app SwiftUI/VideoToolbox full-screen 120 fps con accoppiamento QR 1-tap, scoperta Bonjour LAN, switch automatico Wi-Fi ↔ 5G/4G (`NWPathMonitor`), player audio AAC-LC hardware (`AVSampleBufferAudioRenderer`), multi-touch 10 dita, tastiera/gamepad, appunti condivisi e controlli schermo host.
 
 ## Struttura
 
 ```
 android/
-  probe/      phantom-probe: sonda C statica (rete, Doze, video di base)
-  module/     modulo SukiSU/KernelSU/Magisk "Phantom F0" con WebUI
-core/         core Rust condiviso: protocollo, simulatore di rete, orologi, video, bitrate (fase 1)
-ios/          app Swift (dalla fase 0, seconda metà)
-tools/        client di test per PC e utilità di build
-docs/adr/     decisioni architetturali
+  app/        app host Android Kotlin leggera (Root on-demand + MediaProjection)
+  probe/      archivio fase 0: sonda C statica
+  module/     archivio fase 0: modulo SukiSU/KernelSU/Magisk con WebUI
+core/         core Rust condiviso: protocollo, video, audio, QUIC LAN, P2P iroh, binding UniFFI
+ios/          app client iPhone Swift/SwiftUI (VideoToolbox + AVSampleBufferAudioRenderer)
+tools/        client di test per PC e utilità di build/preflight
+docs/adr/     decisioni architetturali (ADR-001 … ADR-010)
 dist/         pacchetti generati (non versionati)
-```
-
-## Build della fase 0
-
-Serve solo `zig` come cross-compilatore (`pip install ziglang`) e `zip`.
-
-```
-android/module/build.sh      # → dist/phantom-f0.zip
 ```
 
 ## Dispositivi di riferimento
 
 | Ruolo | Dispositivo |
 | --- | --- |
-| Host | POCO F4 GT (ingres), Snapdragon 8 Gen 1, LineageOS non ufficiale, root SukiSU |
+| Host | Redmi Note 11 Pro 5G (`arm64-v8a`, target reale) · LDPlayer 9 (`x86_64`, test Root su PC) |
 | Client | iPhone 17 Pro Max |
-| Sviluppo | PC Windows, build iOS in cloud |
+| Sviluppo | PC Windows, build iOS/Android/Rust in cloud (GitHub Actions) |

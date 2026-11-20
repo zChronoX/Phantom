@@ -32,6 +32,7 @@ struct PairedDevice: Codable, Identifiable, Equatable {
     var lanAddress: String?
     var p2pEndpointId: String?
     var remoteAddress: String?
+    var authToken: Data?
     var certificateDer: Data
     var preferredCodec: String
 
@@ -40,6 +41,7 @@ struct PairedDevice: Codable, Identifiable, Equatable {
         lanAddress: String?,
         p2pEndpointId: String? = nil,
         remoteAddress: String? = nil,
+        authToken: Data? = nil,
         certificateDer: Data,
         preferredCodec: String = "h265"
     ) {
@@ -49,6 +51,7 @@ struct PairedDevice: Codable, Identifiable, Equatable {
         let cleanedP2p = p2pEndpointId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.p2pEndpointId = cleanedP2p.isEmpty ? nil : cleanedP2p
         self.remoteAddress = remoteAddress.flatMap { EndpointParser.normalizeAddress($0) }
+        self.authToken = (authToken?.isEmpty == false) ? authToken : nil
         self.certificateDer = certificateDer
         self.preferredCodec = preferredCodec == "h264" ? "h264" : "h265"
     }
@@ -60,11 +63,12 @@ struct ParsedPairing: Equatable {
     var lanAddress: String?
     var p2pEndpointId: String?
     var remoteAddress: String?
+    var authToken: Data?
     var certificateDer: Data
     var fingerprintHex: String
 }
 
-/// Codifica e decodifica dell'URI `phantom://pair?name=...&lan=...&p2p=...&wan=...&cert=...`.
+/// Codifica e decodifica dell'URI `phantom://pair?name=...&lan=...&p2p=...&wan=...&tok=...&cert=...`.
 enum PairingURI {
     static func parse(_ raw: String) -> ParsedPairing? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -91,17 +95,26 @@ enum PairingURI {
         let lan = map["lan"].flatMap { EndpointParser.normalizeAddress($0) }
         let wan = map["wan"].flatMap { EndpointParser.normalizeAddress($0) }
         let p2p = (map["p2p"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let tok = map["tok"].flatMap { decodeBase64UrlOrStandard($0) }.flatMap { $0.isEmpty ? nil : $0 }
         return ParsedPairing(
             name: name.isEmpty ? "Android" : name,
             lanAddress: lan,
             p2pEndpointId: p2p.isEmpty ? nil : p2p,
             remoteAddress: wan,
+            authToken: tok,
             certificateDer: certDer,
             fingerprintHex: PhantomSHA256.fingerprintHex(certDer)
         )
     }
 
-    static func build(name: String, lan: String?, p2pId: String? = nil, wan: String? = nil, certDer: Data) -> String {
+    static func build(
+        name: String,
+        lan: String?,
+        p2pId: String? = nil,
+        wan: String? = nil,
+        authToken: Data? = nil,
+        certDer: Data
+    ) -> String {
         var components = URLComponents()
         components.scheme = "phantom"
         components.host = "pair"
@@ -116,6 +129,9 @@ enum PairingURI {
         }
         if let wan = wan, !wan.isEmpty {
             items.append(URLQueryItem(name: "wan", value: wan))
+        }
+        if let tok = authToken, !tok.isEmpty {
+            items.append(URLQueryItem(name: "tok", value: encodeBase64UrlNoPad(tok)))
         }
         items.append(URLQueryItem(name: "cert", value: encodeBase64UrlNoPad(certDer)))
         components.queryItems = items

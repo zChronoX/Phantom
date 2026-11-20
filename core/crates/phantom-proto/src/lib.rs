@@ -38,6 +38,12 @@ pub const MAX_VIDEO_PAYLOAD: usize = MAX_DATAGRAM - HEADER_LEN - VIDEO_HEADER_LE
 pub const MAX_FINGERS: usize = 10;
 /// Numero massimo di frammenti indicati in un NACK.
 pub const MAX_NACK: usize = 32;
+/// Intestazione specifica del messaggio audio, escluso il payload.
+pub const AUDIO_HEADER_LEN: usize = 22;
+/// Byte di audio trasportabili in un singolo datagramma.
+pub const MAX_AUDIO_PAYLOAD: usize = MAX_DATAGRAM - HEADER_LEN - AUDIO_HEADER_LEN;
+/// Lunghezza massima del testo UTF-8 negli appunti condivisi.
+pub const MAX_CLIPBOARD_BYTES: usize = 1024;
 
 /// Tipo di messaggio.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -65,6 +71,12 @@ pub enum Kind {
     Stats = 10,
     /// Chiusura della sessione (entrambi i versi).
     Close = 11,
+    /// Pacchetto audio codificato a bassa latenza (host → client).
+    Audio = 12,
+    /// Testo degli appunti condivisi UTF-8 (entrambi i versi).
+    Clipboard = 13,
+    /// Comando di controllo remoto del dispositivo host (client → host).
+    Control = 14,
 }
 
 impl Kind {
@@ -81,6 +93,9 @@ impl Kind {
             9 => Kind::Key,
             10 => Kind::Stats,
             11 => Kind::Close,
+            12 => Kind::Audio,
+            13 => Kind::Clipboard,
+            14 => Kind::Control,
             _ => return None,
         })
     }
@@ -157,6 +172,32 @@ impl Codec {
     }
 }
 
+/// Codec audio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AudioCodec {
+    /// AAC-LC (raw Access Unit, es. `audio/mp4a-latm`).
+    AacLc = 1,
+}
+
+/// Flag di un pacchetto audio.
+pub mod audio_flags {
+    /// Il payload contiene l'`AudioSpecificConfig` del codec (non un frame PCM/AAC da riprodurre).
+    pub const CONFIG: u8 = 1;
+}
+
+/// Comando di controllo remoto inviato dal client all'host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ControlCommand {
+    /// Risveglia lo schermo dell'host se spento.
+    WakeScreen = 1,
+    /// Spegne/oscura il display fisico dell'host mantenendo lo streaming attivo.
+    ScreenOff = 2,
+    /// Riaccende il display fisico dell'host.
+    ScreenOn = 3,
+}
+
 /// Funzioni annunciate nell'apertura della sessione (`Hello`/`HelloAck`): un bit per funzione.
 ///
 /// Ognuno dichiara quelle che sa fare; quelle comuni sono quelle che la sessione potrà usare.
@@ -173,6 +214,12 @@ pub mod caps {
     pub const KEYFRAME_REQUEST: u32 = 1 << 4;
     /// Misura del ritardo di coda riportata in `Stats::queue_delay_us`.
     pub const QUEUE_DELAY: u32 = 1 << 5;
+    /// Streaming audio AAC-LC in tempo reale (host → client).
+    pub const AUDIO_AAC: u32 = 1 << 6;
+    /// Sincronizzazione bidirezionale degli appunti (`Message::Clipboard`).
+    pub const CLIPBOARD: u32 = 1 << 7;
+    /// Controllo risveglio e spegnimento display fisico (`Message::Control`).
+    pub const SCREEN_POWER: u32 = 1 << 8;
 }
 
 /// Motivi del messaggio [`Message::Close`].
@@ -181,6 +228,8 @@ pub mod close_reason {
     pub const NORMAL: u8 = 0;
     /// Nessuna versione del protocollo in comune con l'altro lato.
     pub const BAD_PROTOCOL: u8 = 1;
+    /// Token di accoppiamento mancante o non valido.
+    pub const UNAUTHORIZED: u8 = 2;
 }
 
 /// Flag di un frammento video.
@@ -231,6 +280,8 @@ pub enum Message<'a> {
         caps: u32,
         /// Valore casuale scelto da chi scrive.
         nonce: [u8; 16],
+        /// Token di accoppiamento condiviso (16 byte), opzionale per retrocompatibilità e loopback locale.
+        auth_token: Option<[u8; 16]>,
     },
     /// Risposta all'apertura.
     HelloAck {
@@ -302,6 +353,41 @@ pub enum Message<'a> {
         /// Motivo (0 = normale).
         reason: u8,
     },
+    /// Pacchetto audio codificato (host → client).
+    Audio(AudioPacket<'a>),
+    /// Appunti condivisi in UTF-8 (entrambi i versi).
+    Clipboard {
+        /// Numero progressivo del messaggio appunti.
+        clip_seq: u32,
+        /// Testo UTF-8 (massimo [`MAX_CLIPBOARD_BYTES`] byte).
+        text: &'a str,
+    },
+    /// Comando di controllo remoto del dispositivo host (client → host).
+    Control {
+        /// Numero progressivo del comando.
+        ctrl_seq: u32,
+        /// Comando richiesto.
+        command: ControlCommand,
+    },
+}
+
+/// Pacchetto audio codificato a bassa latenza.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AudioPacket<'a> {
+    /// Numero progressivo del pacchetto audio.
+    pub audio_seq: u32,
+    /// Codec audio.
+    pub codec: AudioCodec,
+    /// Numero di canali (1 = mono, 2 = stereo).
+    pub channels: u8,
+    /// Flag ([`audio_flags`]).
+    pub flags: u8,
+    /// Frequenza di campionamento in Hz (es. 48000).
+    pub sample_rate: u32,
+    /// Istante di cattura sull'orologio dell'host (µs).
+    pub capture_ts_us: u64,
+    /// Frame codificato oppure `AudioSpecificConfig` se [`audio_flags::CONFIG`] è impostato.
+    pub payload: &'a [u8],
 }
 
 /// Frammento di un frame video.
@@ -451,6 +537,9 @@ impl Message<'_> {
             Message::Key { .. } => Kind::Key,
             Message::Stats(_) => Kind::Stats,
             Message::Close { .. } => Kind::Close,
+            Message::Audio(_) => Kind::Audio,
+            Message::Clipboard { .. } => Kind::Clipboard,
+            Message::Control { .. } => Kind::Control,
         }
     }
 
@@ -466,12 +555,15 @@ impl Message<'_> {
         put_u32(out, hdr.conn_id);
         put_u32(out, hdr.seq);
         match self {
-            Message::Hello { role, proto_min, proto_max, caps, nonce } => {
+            Message::Hello { role, proto_min, proto_max, caps, nonce, auth_token } => {
                 out.push(*role as u8);
                 out.push(*proto_min);
                 out.push(*proto_max);
                 put_u32(out, *caps);
                 out.extend_from_slice(nonce);
+                if let Some(tok) = auth_token {
+                    out.extend_from_slice(tok);
+                }
             }
             Message::HelloAck { proto, caps, nonce } => {
                 out.push(*proto);
@@ -540,6 +632,30 @@ impl Message<'_> {
                 put_u32(out, s.rtt_us);
             }
             Message::Close { reason } => out.push(*reason),
+            Message::Audio(a) => {
+                put_u32(out, a.audio_seq);
+                out.push(a.codec as u8);
+                out.push(a.channels);
+                out.push(a.flags);
+                out.push(0);
+                put_u32(out, a.sample_rate);
+                put_u64(out, a.capture_ts_us);
+                put_u16(out, a.payload.len() as u16);
+                out.extend_from_slice(a.payload);
+            }
+            Message::Clipboard { clip_seq, text } => {
+                if text.len() > MAX_CLIPBOARD_BYTES {
+                    out.truncate(start);
+                    return Err(DecodeError::TooLarge);
+                }
+                put_u32(out, *clip_seq);
+                put_u16(out, text.len() as u16);
+                out.extend_from_slice(text.as_bytes());
+            }
+            Message::Control { ctrl_seq, command } => {
+                put_u32(out, *ctrl_seq);
+                out.push(*command as u8);
+            }
         }
         if out.len() - start > MAX_DATAGRAM {
             out.truncate(start);
@@ -584,7 +700,12 @@ pub fn decode(buf: &[u8]) -> Result<(Header, Message<'_>), DecodeError> {
                 2 => Role::Client,
                 _ => return Err(DecodeError::BadField("role")),
             };
-            Message::Hello { role, proto_min: r.u8()?, proto_max: r.u8()?, caps: r.u32()?, nonce: r.arr16()? }
+            let proto_min = r.u8()?;
+            let proto_max = r.u8()?;
+            let caps = r.u32()?;
+            let nonce = r.arr16()?;
+            let auth_token = if r.done() { None } else { Some(r.arr16()?) };
+            Message::Hello { role, proto_min, proto_max, caps, nonce, auth_token }
         }
         Kind::HelloAck => Message::HelloAck { proto: r.u8()?, caps: r.u32()?, nonce: r.arr16()? },
         Kind::Ping => Message::Ping { id: r.u32()?, t_client_us: r.u64()? },
@@ -684,6 +805,52 @@ pub fn decode(buf: &[u8]) -> Result<(Header, Message<'_>), DecodeError> {
             rtt_us: r.u32()?,
         }),
         Kind::Close => Message::Close { reason: r.u8()? },
+        Kind::Audio => {
+            let audio_seq = r.u32()?;
+            let codec = match r.u8()? {
+                1 => AudioCodec::AacLc,
+                _ => return Err(DecodeError::BadField("audio codec")),
+            };
+            let channels = r.u8()?;
+            if channels != 1 && channels != 2 {
+                return Err(DecodeError::BadField("audio channels"));
+            }
+            let flags = r.u8()?;
+            if r.u8()? != 0 {
+                return Err(DecodeError::BadField("audio reserved"));
+            }
+            let sample_rate = r.u32()?;
+            if !(8_000..=96_000).contains(&sample_rate) {
+                return Err(DecodeError::BadField("audio sample_rate"));
+            }
+            let capture_ts_us = r.u64()?;
+            let plen = r.u16()? as usize;
+            if plen > MAX_AUDIO_PAYLOAD {
+                return Err(DecodeError::BadField("audio payload"));
+            }
+            let payload = r.take(plen)?;
+            Message::Audio(AudioPacket { audio_seq, codec, channels, flags, sample_rate, capture_ts_us, payload })
+        }
+        Kind::Clipboard => {
+            let clip_seq = r.u32()?;
+            let len = r.u16()? as usize;
+            if len > MAX_CLIPBOARD_BYTES {
+                return Err(DecodeError::BadField("clipboard len"));
+            }
+            let raw = r.take(len)?;
+            let text = core::str::from_utf8(raw).map_err(|_| DecodeError::BadField("clipboard utf8"))?;
+            Message::Clipboard { clip_seq, text }
+        }
+        Kind::Control => {
+            let ctrl_seq = r.u32()?;
+            let command = match r.u8()? {
+                1 => ControlCommand::WakeScreen,
+                2 => ControlCommand::ScreenOff,
+                3 => ControlCommand::ScreenOn,
+                _ => return Err(DecodeError::BadField("control command")),
+            };
+            Message::Control { ctrl_seq, command }
+        }
     };
     // Dopo un messaggio a lunghezza fissa non devono restare byte (tranne il video, che ha già letto il suo payload).
     if !r.done() {
@@ -725,6 +892,15 @@ mod tests {
             proto_max: 3,
             caps: 0xA5A5_0001,
             nonce: [7; 16],
+            auth_token: None,
+        });
+        roundtrip(&Message::Hello {
+            role: Role::Client,
+            proto_min: 0,
+            proto_max: 0,
+            caps: caps::H265 | caps::AUDIO_AAC | caps::CLIPBOARD | caps::SCREEN_POWER,
+            nonce: [8; 16],
+            auth_token: Some([0x5A; 16]),
         });
         roundtrip(&Message::HelloAck { proto: 0, caps: 1, nonce: [9; 16] });
     }
@@ -796,6 +972,20 @@ mod tests {
         }));
         roundtrip(&Message::Stats(Stats::default()));
         roundtrip(&Message::Close { reason: 0 });
+        roundtrip(&Message::Close { reason: close_reason::UNAUTHORIZED });
+        roundtrip(&Message::Audio(AudioPacket {
+            audio_seq: 42,
+            codec: AudioCodec::AacLc,
+            channels: 2,
+            flags: audio_flags::CONFIG,
+            sample_rate: 48_000,
+            capture_ts_us: 999_000,
+            payload: &[0x11, 0x90],
+        }));
+        roundtrip(&Message::Clipboard { clip_seq: 7, text: "ciao Phantom 🚀" });
+        roundtrip(&Message::Control { ctrl_seq: 3, command: ControlCommand::ScreenOff });
+        roundtrip(&Message::Control { ctrl_seq: 4, command: ControlCommand::WakeScreen });
+        roundtrip(&Message::Control { ctrl_seq: 5, command: ControlCommand::ScreenOn });
     }
 
     #[test]

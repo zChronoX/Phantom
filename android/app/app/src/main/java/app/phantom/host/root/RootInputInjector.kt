@@ -152,6 +152,27 @@ class RootInputInjector(
         }
     }
 
+    fun injectKeyCode(androidCode: Int) {
+        synchronized(inputLock) {
+            val nowMs = SystemClock.uptimeMillis()
+            for (action in intArrayOf(KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP)) {
+                val event = KeyEvent(
+                    nowMs,
+                    nowMs,
+                    action,
+                    androidCode,
+                    0,
+                    0,
+                    KeyCharacterMap.VIRTUAL_KEYBOARD,
+                    0,
+                    0,
+                    InputDevice.SOURCE_KEYBOARD,
+                )
+                inject(event)
+            }
+        }
+    }
+
     fun reset() {
         synchronized(inputLock) {
             synthesizer.reset()

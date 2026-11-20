@@ -12,14 +12,16 @@ private func check(_ cond: Bool, _ msg: String) {
 let abcFp = PhantomSHA256.fingerprintHex(Data("abc".utf8), length: 16)
 check(abcFp == "ba7816bf8f01cfea", "SHA-256 fingerprint 'abc' coerente con Android")
 
-// 2. Roundtrip PairingURI con LAN + P2P integrato + WAN opzionale + nome con spazi
+// 2. Roundtrip PairingURI con LAN + P2P integrato + WAN opzionale + token + nome con spazi
 let sampleCert = Data([0x30, 0x82, 0x01, 0x0A, 0x05, 0xFF, 0x7E, 0x11])
 let sampleP2p = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+let sampleTok = Data((1...16).map { UInt8($0) })
 let uri = PairingURI.build(
     name: "Redmi Note 11 Pro",
     lan: "192.168.1.42:47800",
     p2pId: sampleP2p,
     wan: "100.88.12.5:47800",
+    authToken: sampleTok,
     certDer: sampleCert
 )
 let parsed = PairingURI.parse(uri)
@@ -28,6 +30,7 @@ check(parsed?.name == "Redmi Note 11 Pro", "nome dispositivo preservato")
 check(parsed?.lanAddress == "192.168.1.42:47800", "indirizzo LAN preservato")
 check(parsed?.p2pEndpointId == sampleP2p, "EndpointId P2P preservato")
 check(parsed?.remoteAddress == "100.88.12.5:47800", "indirizzo remoto opzionale preservato")
+check(parsed?.authToken == sampleTok, "token di accoppiamento 16 byte preservato")
 check(parsed?.certificateDer == sampleCert, "certificato DER intatto dopo Base64URL")
 check(PairingURI.parse("https://example.com") == nil, "URI non Phantom rifiutato")
 check(PairingURI.parse("phantom://pair?name=solo") == nil, "URI senza certificato rifiutato")

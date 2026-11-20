@@ -5,14 +5,20 @@ import android.view.Surface
 import app.phantom.host.core.HostFormatHelpers
 import app.phantom.host.core.ThermalGuard
 import app.phantom.host.core.ThermalPolicy
+import uniffi.phantom_ffi.AudioCodec
+import uniffi.phantom_ffi.Capability
 import uniffi.phantom_ffi.KeyInput
 import uniffi.phantom_ffi.P2pHostEndpoint
 import uniffi.phantom_ffi.PhantomHost
 import uniffi.phantom_ffi.QuicConnection
 import uniffi.phantom_ffi.QuicHostEndpoint
 import uniffi.phantom_ffi.QuicTransportException
+import uniffi.phantom_ffi.RemoteControlCommand
 import uniffi.phantom_ffi.TouchState
+import uniffi.phantom_ffi.buildCloseDatagram
+import uniffi.phantom_ffi.capsContains
 import uniffi.phantom_ffi.defaultSessionSettings
+import uniffi.phantom_ffi.verifyClientHello
 import uniffi.phantom_ffi.videoPayloadForDatagram
 import java.io.FileInputStream
 import java.util.concurrent.LinkedBlockingQueue
@@ -35,10 +41,16 @@ data class HostLiveStats(
     val activeProfile: String,
 )
 
+private data class PendingClient(
+    val transportLabel: String,
+    val connection: QuicConnection,
+    val initialHello: ByteArray?,
+)
+
 /**
- * Gestisce il ciclo completo lato host: endpoint QUIC in ascolto (con identità persistente),
- * negoziazione `PhantomHost`, streaming hardware `VideoEncoder` con adattamento live alla rotazione
- * Portrait ↔ Landscape, controllo termico del bitrate e consegna tocco/tastiera.
+ * Gestisce il ciclo completo lato host: endpoint QUIC LAN + P2P (`iroh`), autenticazione con token
+ * di accoppiamento e preemption immediata di sessioni stale (cambio Wi-Fi → 5G in ~1–2 s), streaming
+ * video hardware `VideoEncoder` + audio AAC-LC, appunti condivisi e comandi controllo display.
  */
 class PhantomHostSession(
     private val config: HostRunConfig,
@@ -48,9 +60,14 @@ class PhantomHostSession(
     private val identityCertDer: ByteArray? = null,
     private val identityKeyDer: ByteArray? = null,
     private val p2pSecretKey: ByteArray? = null,
+    private val authToken: ByteArray? = null,
+    private val audioFactory: (() -> AudioStreamer?)? = null,
     private val onSourceSizeChanged: (Int, Int) -> Unit = { _, _ -> },
     private val onTouch: (TouchState) -> Unit,
     private val onKey: (KeyInput) -> Unit,
+    private val onClipboardFromClient: (String) -> Unit = {},
+    private val onControlCommand: (RemoteControlCommand) -> Unit = {},
+    private val onClientConnected: () -> Unit = {},
     private val onReady: (port: Int, certHex: String) -> Unit,
     private val onP2pReady: (endpointId: String) -> Unit = {},
     private val onStats: (HostLiveStats) -> Unit,
@@ -60,6 +77,7 @@ class PhantomHostSession(
 ) {
     private val running = AtomicBoolean(false)
     private val activeConnection = AtomicReference<QuicConnection?>(null)
+    private val activeHost = AtomicReference<PhantomHost?>(null)
     private val activeP2pEndpoint = AtomicReference<P2pHostEndpoint?>(null)
 
     private fun randomNonce16(): ByteArray {
@@ -84,7 +102,65 @@ class PhantomHostSession(
         var endpoint: QuicHostEndpoint? = null
         var lanAcceptThread: Thread? = null
         var p2pAcceptThread: Thread? = null
-        val incomingQueue = LinkedBlockingQueue<Pair<String, QuicConnection>>()
+        val incomingQueue = LinkedBlockingQueue<PendingClient>()
+        val expectedConnId = defaultSessionSettings().connId
+        val expectedToken = authToken?.takeIf { it.size == 16 } ?: ByteArray(0)
+
+        fun authenticateAndEnqueue(conn: QuicConnection, label: String) {
+            Thread({
+                var accepted = false
+                try {
+                    val deadline = SystemClock.elapsedRealtime() + 2_500L
+                    var validHello: ByteArray? = null
+                    while (running.get() && !conn.isClosed() && SystemClock.elapsedRealtime() < deadline) {
+                        val dgram = try {
+                            conn.recvDatagram(2048u, 100uL)
+                        } catch (_: QuicTransportException.Timeout) {
+                            continue
+                        }
+                        if (verifyClientHello(expectedConnId, expectedToken, dgram)) {
+                            validHello = dgram
+                            break
+                        }
+                        if (expectedToken.isNotEmpty()) {
+                            try {
+                                val closeDgram = buildCloseDatagram(expectedConnId, 2u.toUByte())
+                                if (closeDgram.isNotEmpty()) conn.sendDatagram(closeDgram)
+                            } catch (_: Throwable) {
+                            }
+                            onLog("Connessione ($label) rifiutata: token di accoppiamento non valido")
+                            return@Thread
+                        }
+                    }
+                    if (!running.get() || validHello == null) return@Thread
+
+                    accepted = true
+                    incomingQueue.offer(PendingClient(label, conn, validHello))
+                    // Preemption immediata: se c'era una vecchia sessione stale (es. Wi-Fi caduto),
+                    // la chiude subito così il nuovo link P2P/LAN subentra in ~1–2 s invece di 15 s.
+                    val previous = activeConnection.get()
+                    if (previous != null && previous !== conn) {
+                        onLog("Nuova connessione autenticata ($label): sostituzione sessione precedente")
+                        try {
+                            previous.close(0u, ByteArray(0))
+                        } catch (_: Throwable) {
+                        }
+                    }
+                } catch (_: Throwable) {
+                } finally {
+                    if (!accepted) {
+                        try {
+                            conn.close(2u, ByteArray(0))
+                            conn.close()
+                        } catch (_: Throwable) {
+                        }
+                    }
+                }
+            }, "phantom-auth-$label").apply {
+                isDaemon = true
+                start()
+            }
+        }
 
         try {
             val cert = identityCertDer
@@ -104,7 +180,7 @@ class PhantomHostSession(
                 while (running.get()) {
                     try {
                         val conn = lanEp.accept(400uL)
-                        incomingQueue.offer("LAN" to conn)
+                        authenticateAndEnqueue(conn, "LAN")
                     } catch (_: QuicTransportException.Timeout) {
                         continue
                     } catch (e: QuicTransportException) {
@@ -136,7 +212,7 @@ class PhantomHostSession(
                         while (running.get()) {
                             try {
                                 val conn = ep.accept(400uL)
-                                incomingQueue.offer("P2P" to conn)
+                                authenticateAndEnqueue(conn, "P2P")
                             } catch (_: QuicTransportException.Timeout) {
                                 continue
                             } catch (e: QuicTransportException) {
@@ -172,7 +248,7 @@ class PhantomHostSession(
                 }
 
                 val item = incomingQueue.poll(400L, TimeUnit.MILLISECONDS) ?: continue
-                serveClient(item.second, item.first)
+                serveClient(item)
             }
         } catch (t: Throwable) {
             if (running.get()) {
@@ -188,8 +264,8 @@ class PhantomHostSession(
             while (true) {
                 val leftover = incomingQueue.poll() ?: break
                 try {
-                    leftover.second.close(0u, ByteArray(0))
-                    leftover.second.close()
+                    leftover.connection.close(0u, ByteArray(0))
+                    leftover.connection.close()
                 } catch (_: Throwable) {
                 }
             }
@@ -219,6 +295,17 @@ class PhantomHostSession(
         }, "phantom-p2p-netchg").start()
     }
 
+    fun sendClipboardToClient(text: String) {
+        if (text.isEmpty()) return
+        val h = activeHost.get() ?: return
+        val conn = activeConnection.get() ?: return
+        try {
+            val dgram = h.sendClipboard(text) ?: return
+            conn.sendDatagram(dgram)
+        } catch (_: Throwable) {
+        }
+    }
+
     fun stop() {
         running.set(false)
         try {
@@ -227,7 +314,9 @@ class PhantomHostSession(
         }
     }
 
-    private fun serveClient(conn: QuicConnection, transportLabel: String) {
+    private fun serveClient(pending: PendingClient) {
+        val conn = pending.connection
+        val transportLabel = pending.transportLabel
         activeConnection.set(conn)
         val defaults = defaultSessionSettings().copy(minBitrateBps = 1_000_000uL)
         val initialPolicy = thermalProvider()
@@ -244,9 +333,15 @@ class PhantomHostSession(
         )
         var currentEncoder: VideoEncoder? = null
         var currentCapture: AutoCloseable? = null
+        var currentAudio: AudioStreamer? = null
         var host: PhantomHost? = null
 
         try {
+            try {
+                onClientConnected()
+            } catch (_: Throwable) {
+            }
+
             var (curSrcW, curSrcH) = sourceSizeProvider()
             onSourceSizeChanged(curSrcW, curSrcH)
             val (initEncW, initEncH) = HostFormatHelpers.scaledDimensions(curSrcW, curSrcH, config.profile.maxShortSide)
@@ -268,40 +363,69 @@ class PhantomHostSession(
                 nonce = nonce,
                 fragSize = videoPayloadForDatagram(maxDgram),
             )
-            val phantomHost = PhantomHost(settings)
-            host = phantomHost
+            val audioStreamer = try {
+                audioFactory?.invoke()
+            } catch (_: Throwable) {
+                null
+            }
+            currentAudio = audioStreamer
 
-            val profileRef = AtomicReference("${enc.actualWidth}×${enc.actualHeight} @ ${enc.actualFps} fps (${enc.actualCodec.name})")
+            val tokenBytes = authToken?.takeIf { it.size == 16 } ?: ByteArray(0)
+            val phantomHost = PhantomHost.newWithOptions(settings, tokenBytes, audioStreamer != null)
+            host = phantomHost
+            activeHost.set(phantomHost)
+
+            val audioLabel = if (audioStreamer != null) " + audio AAC" else ""
+            val profileRef = AtomicReference("${enc.actualWidth}×${enc.actualHeight} @ ${enc.actualFps} fps (${enc.actualCodec.name})$audioLabel")
             onLog("Client connesso ($transportLabel) · ${profileRef.get()}")
 
             val clientActive = AtomicBoolean(true)
             val negotiatedOnce = AtomicBoolean(false)
 
-            // Thread ricezione datagrammi dal client (Hello, ping, NACK, tocco, tastiera, Close)
+            fun processIncoming(dgram: ByteArray) {
+                val nowUs = SystemClock.elapsedRealtimeNanos() / 1_000L
+                val replies = phantomHost.onDatagram(nowUs.toULong(), dgram)
+                for (reply in replies) {
+                    try {
+                        conn.sendDatagram(reply)
+                    } catch (_: Throwable) {
+                    }
+                }
+                if (!negotiatedOnce.get() && phantomHost.negotiated() != null) {
+                    negotiatedOnce.set(true)
+                    onLog("Sessione negoziata (Hello/HelloAck)")
+                }
+                while (true) {
+                    val ts = phantomHost.takeTouch() ?: break
+                    onTouch(ts)
+                }
+                while (true) {
+                    val key = phantomHost.takeKey() ?: break
+                    onKey(key)
+                }
+                phantomHost.takeClipboard()?.let { clipText ->
+                    try {
+                        onClipboardFromClient(clipText)
+                    } catch (_: Throwable) {
+                    }
+                }
+                while (true) {
+                    val cmd = phantomHost.takeControl() ?: break
+                    try {
+                        onControlCommand(cmd)
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+
+            pending.initialHello?.let { processIncoming(it) }
+
+            // Thread ricezione datagrammi dal client (Hello, ping, NACK, tocco, tastiera, appunti, controllo, Close)
             val recvThread = Thread({
                 while (running.get() && clientActive.get() && !conn.isClosed() && !phantomHost.isClosed()) {
                     try {
                         val dgram = conn.recvDatagram(2048u, 25uL)
-                        val nowUs = SystemClock.elapsedRealtimeNanos() / 1_000L
-                        val replies = phantomHost.onDatagram(nowUs.toULong(), dgram)
-                        for (reply in replies) {
-                            try {
-                                conn.sendDatagram(reply)
-                            } catch (_: Throwable) {
-                            }
-                        }
-                        if (!negotiatedOnce.get() && phantomHost.negotiated() != null) {
-                            negotiatedOnce.set(true)
-                            onLog("Sessione negoziata (Hello/HelloAck)")
-                        }
-                        while (true) {
-                            val ts = phantomHost.takeTouch() ?: break
-                            onTouch(ts)
-                        }
-                        while (true) {
-                            val key = phantomHost.takeKey() ?: break
-                            onKey(key)
-                        }
+                        processIncoming(dgram)
                     } catch (_: QuicTransportException.Timeout) {
                         continue
                     } catch (_: Throwable) {
@@ -323,7 +447,34 @@ class PhantomHostSession(
                 Thread.sleep(10)
             }
 
-            if (running.get() && clientActive.get() && phantomHost.negotiated() != null) {
+            val negotiatedInfo = phantomHost.negotiated()
+            if (running.get() && clientActive.get() && negotiatedInfo != null) {
+                if (audioStreamer != null && capsContains(negotiatedInfo.caps, Capability.AUDIO_AAC)) {
+                    audioStreamer.start { data, isConfig, captureTsUs ->
+                        if (!running.get() || !clientActive.get() || conn.isClosed() || phantomHost.isClosed()) return@start
+                        val dgram = phantomHost.sendAudio(
+                            AudioCodec.AAC_LC,
+                            audioStreamer.sampleRate.toUInt(),
+                            audioStreamer.channels.toUByte(),
+                            isConfig,
+                            captureTsUs.toULong(),
+                            data,
+                        )
+                        if (dgram != null) {
+                            try {
+                                conn.sendDatagram(dgram)
+                            } catch (_: Throwable) {
+                            }
+                        }
+                    }
+                } else {
+                    try {
+                        audioStreamer?.close()
+                    } catch (_: Throwable) {
+                    }
+                    currentAudio = null
+                }
+
                 var appliedBitrate = startBps
                 val encRef = AtomicReference(enc)
                 val reconfigureRequested = AtomicBoolean(false)
@@ -481,6 +632,11 @@ class PhantomHostSession(
                 onLog("Errore sessione client: ${t.javaClass.simpleName}: ${t.message}$cause")
             }
         } finally {
+            activeHost.compareAndSet(host, null)
+            try {
+                currentAudio?.close()
+            } catch (_: Throwable) {
+            }
             try {
                 host?.close(0u.toUByte())?.let { closeDgram ->
                     try {

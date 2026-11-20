@@ -1,5 +1,6 @@
 package app.phantom.host
 
+import android.Manifest
 import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
@@ -7,9 +8,12 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -21,11 +25,15 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.BatteryManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.view.WindowManager
 import app.phantom.host.core.HostFormatHelpers
+import app.phantom.host.core.PairingCodec
 import app.phantom.host.core.ThermalGuard
+import app.phantom.host.stream.AudioStreamer
 import app.phantom.host.stream.CaptureMode
 import app.phantom.host.stream.HostRunConfig
 import app.phantom.host.stream.PhantomHostSession
@@ -60,6 +68,10 @@ class HostForegroundService : Service() {
     private var nsdListener: NsdManager.RegistrationListener? = null
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var clipboardManager: ClipboardManager? = null
+    private var clipboardListener: ClipboardManager.OnPrimaryClipChangedListener? = null
+    private val lastSyncedClipboard = AtomicReference<String?>(null)
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var activeIdentity: StoredHostIdentity? = null
 
     private val batteryReceiver = object : BroadcastReceiver() {
@@ -179,9 +191,11 @@ class HostForegroundService : Service() {
                 fingerprintHex = identity?.fingerprintHex ?: "",
                 p2pEndpointId = identity?.p2pEndpointId ?: "",
                 p2pReady = false,
+                authToken = identity?.authToken ?: ByteArray(0),
             )
         }
         registerNetworkMonitor()
+        registerClipboardMonitor()
         HostStateStore.addLog("Avvio Root · ${config.profile.label}")
 
         val thread = Thread({
@@ -196,6 +210,7 @@ class HostForegroundService : Service() {
                 val certPathArg = identity?.certFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
                 val keyPathArg = identity?.keyFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
                 val p2pPathArg = identity?.p2pSecretFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
+                val authPathArg = identity?.authTokenFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
 
                 val cmd = "export CLASSPATH=${shellQuote(apkPath)} LD_LIBRARY_PATH=${shellQuote(libDir)}:/system/lib64:/vendor/lib64; " +
                     "APP_PROC=/system/bin/app_process64; [ -x \"\$APP_PROC\" ] || APP_PROC=app_process; " +
@@ -204,7 +219,7 @@ class HostForegroundService : Service() {
                     "-Djna.boot.library.path=${shellQuote(libDir)} " +
                     "-Djna.nounpack=true " +
                     "/system/bin --nice-name=phantom-host app.phantom.host.root.RootHostMain " +
-                    "${config.port} ${config.profile.name} ${config.preferHevc} ${shellQuote(libDir)}$certPathArg$keyPathArg$p2pPathArg"
+                    "${config.port} ${config.profile.name} ${config.preferHevc} ${shellQuote(libDir)}$certPathArg$keyPathArg$p2pPathArg$authPathArg"
 
                 val pb = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true)
                 proc = pb.start()
@@ -303,6 +318,12 @@ class HostForegroundService : Service() {
                 }
                 updateNotification(status)
             }
+            line.startsWith("SET_CLIP|") -> {
+                val raw = PairingCodec.decodeBase64UrlNoPad(line.removePrefix("SET_CLIP|"))
+                if (raw != null && raw.isNotEmpty()) {
+                    applyRemoteClipboard(String(raw, Charsets.UTF_8))
+                }
+            }
             line.startsWith("LOG|") -> {
                 HostStateStore.addLog(line.removePrefix("LOG|"))
             }
@@ -351,9 +372,11 @@ class HostForegroundService : Service() {
                 fingerprintHex = identity?.fingerprintHex ?: "",
                 p2pEndpointId = identity?.p2pEndpointId ?: "",
                 p2pReady = false,
+                authToken = identity?.authToken ?: ByteArray(0),
             )
         }
         registerNetworkMonitor()
+        registerClipboardMonitor()
 
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         val projection = mpm.getMediaProjection(resultCode, resultData)
@@ -399,8 +422,18 @@ class HostForegroundService : Service() {
             identityCertDer = identity?.certDer,
             identityKeyDer = identity?.keyDer,
             p2pSecretKey = identity?.p2pSecretKey,
+            authToken = identity?.authToken,
+            audioFactory = {
+                val hasRecord = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                if (hasRecord) {
+                    AudioStreamer.createForProjection(projection) { msg -> HostStateStore.addLog(msg) }
+                } else {
+                    null
+                }
+            },
             onTouch = {},
             onKey = {},
+            onClipboardFromClient = { text -> applyRemoteClipboard(text) },
             onReady = { boundPort, certHex ->
                 val addr = formatAddr(ip, boundPort)
                 HostStateStore.update {
@@ -474,6 +507,7 @@ class HostForegroundService : Service() {
     }
 
     private fun stopAllWork() {
+        unregisterClipboardMonitor()
         unregisterNetworkMonitor()
         unregisterMdns()
         projectionSession?.stop()
@@ -551,6 +585,69 @@ class HostForegroundService : Service() {
         if (mgr != null && listener != null) {
             try {
                 mgr.unregisterService(listener)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private fun registerClipboardMonitor() {
+        unregisterClipboardMonitor()
+        mainHandler.post {
+            try {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return@post
+                val listener = ClipboardManager.OnPrimaryClipChangedListener {
+                    try {
+                        val clip = cm.primaryClip ?: return@OnPrimaryClipChangedListener
+                        if (clip.itemCount <= 0) return@OnPrimaryClipChangedListener
+                        val text = clip.getItemAt(0).coerceToText(this)?.toString().orEmpty()
+                        if (text.isEmpty() || text == lastSyncedClipboard.get()) return@OnPrimaryClipChangedListener
+                        lastSyncedClipboard.set(text)
+                        projectionSession?.sendClipboardToClient(text)
+                        val writer = rootStdin
+                        if (writer != null) {
+                            val b64 = PairingCodec.encodeBase64UrlNoPad(text.toByteArray(Charsets.UTF_8))
+                            Thread({
+                                try {
+                                    writer.write("CLIP|$b64\n")
+                                    writer.flush()
+                                } catch (_: Throwable) {
+                                }
+                            }, "phantom-clip-out").start()
+                        }
+                    } catch (_: Throwable) {
+                    }
+                }
+                clipboardManager = cm
+                clipboardListener = listener
+                cm.addPrimaryClipChangedListener(listener)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private fun unregisterClipboardMonitor() {
+        val cm = clipboardManager
+        val listener = clipboardListener
+        clipboardManager = null
+        clipboardListener = null
+        if (cm != null && listener != null) {
+            mainHandler.post {
+                try {
+                    cm.removePrimaryClipChangedListener(listener)
+                } catch (_: Throwable) {
+                }
+            }
+        }
+    }
+
+    private fun applyRemoteClipboard(text: String) {
+        if (text.isEmpty()) return
+        lastSyncedClipboard.set(text)
+        mainHandler.post {
+            try {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return@post
+                cm.setPrimaryClip(ClipData.newPlainText("Phantom", text))
+                HostStateStore.addLog("Appunti ricevuti da iPhone (${text.length} car.)")
             } catch (_: Throwable) {
             }
         }

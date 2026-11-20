@@ -12,8 +12,11 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
@@ -58,6 +61,7 @@ class MainActivity : Activity() {
     private lateinit var copyAddrButton: Button
     private lateinit var copyCertButton: Button
     private lateinit var regenIdentityButton: Button
+    private lateinit var batteryExemptButton: Button
 
     private lateinit var modeGroup: RadioGroup
     private lateinit var rootRadio: RadioButton
@@ -106,6 +110,7 @@ class MainActivity : Activity() {
                         certificateHex = HostFormatHelpers.toHex(id.certDer),
                         fingerprintHex = id.fingerprintHex,
                         p2pEndpointId = id.p2pEndpointId,
+                        authToken = id.authToken,
                     )
                 }
             } catch (t: Throwable) {
@@ -357,6 +362,12 @@ class MainActivity : Activity() {
             }
         }
         cfgCard.addView(hevcSwitch)
+
+        batteryExemptButton = Button(this).apply {
+            textSize = 12f
+            setOnClickListener { requestBatteryOptimizationExemption() }
+        }
+        cfgCard.addView(batteryExemptButton)
         root.addView(cfgCard, marginBottom(px(12)))
 
         toggleButton = Button(this).apply {
@@ -409,6 +420,7 @@ class MainActivity : Activity() {
                         fingerprintHex = id.fingerprintHex,
                         p2pEndpointId = id.p2pEndpointId,
                         p2pReady = false,
+                        authToken = id.authToken,
                     )
                 }
                 HostStateStore.addLog("Nuova identità TLS generata (ID ${id.fingerprintHex})")
@@ -444,6 +456,38 @@ class MainActivity : Activity() {
                 val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                 @Suppress("DEPRECATION")
                 startActivityForResult(mpm.createScreenCaptureIntent(), REQ_MEDIA_PROJECTION)
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshBatteryButton()
+    }
+
+    private fun refreshBatteryButton() {
+        if (!::batteryExemptButton.isInitialized) return
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val exempt = pm?.isIgnoringBatteryOptimizations(packageName) == true
+        batteryExemptButton.text = if (exempt) {
+            "Doze / risparmio batteria: escluso ✓"
+        } else {
+            "Escludi da Doze (raggiungibile a schermo spento)"
+        }
+        batteryExemptButton.isEnabled = !exempt
+    }
+
+    @android.annotation.SuppressLint("BatteryLife")
+    private fun requestBatteryOptimizationExemption() {
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:$packageName")
+            }
+            startActivity(intent)
+        } catch (_: Throwable) {
+            try {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            } catch (_: Throwable) {
             }
         }
     }
@@ -532,6 +576,7 @@ class MainActivity : Activity() {
             wan = wan,
             certDer = s.certificateDer,
             p2pId = s.p2pEndpointId.takeIf { it.isNotBlank() },
+            authToken = s.authToken.takeIf { it.size == 16 },
         )
         qrImage.visibility = View.VISIBLE
         if (uri == lastQrUri) return

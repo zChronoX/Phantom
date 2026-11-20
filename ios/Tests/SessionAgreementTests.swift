@@ -38,6 +38,7 @@ check(none.summary.contains("nessun codec video in comune"), "il riassunto dice 
 check(SessionAgreement.closeText(nil) == "ancora aperta", "sessione aperta")
 check(SessionAgreement.closeText(0) == "normale (motivo 0)", "motivo 0: chiusura normale")
 check(SessionAgreement.closeText(1).contains("versione"), "motivo 1: versione non supportata")
+check(SessionAgreement.closeText(2).contains("token"), "motivo 2: token di accoppiamento non valido")
 check(SessionAgreement.closeText(9) == "motivo 9", "motivo sconosciuto riportato così com'è")
 
 print(failures == 0 ? "\nTutti i test superati" : "\n\(failures) test falliti")

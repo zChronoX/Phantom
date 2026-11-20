@@ -1,7 +1,7 @@
 # Handoff
 
-Scritto: 2026-11-20; aggiornato dopo il fix `panic = "abort"` per `iroh` su Android.
-Branch: main - Commit locale: `f851c3a` (allineato a `origin/main`) + fix `panic = "unwind"` (`core/Cargo.toml`), `P2pEndpoint::is_online` e diagnostica errori candidati iOS.
+Scritto: 2026-11-20; aggiornato dopo preemption Wi-Fi→5G, autenticazione token 128-bit, audio AAC-LC, appunti condivisi e controllo display/Doze.
+Branch: main - Commit locale: basato sull'ultimo push dell'utente su `origin/main` + modifiche locali da committare.
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -178,8 +178,16 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- `core/Cargo.toml`: rimosso `panic = "abort"` da `[profile.release]` (default `unwind`) per permettere a `iroh` su Android di fare fallback DNS tramite `catch_unwind` senza abortire `app_process64` (e a UniFFI di convertire eventuali panic in eccezioni leggibili).
-- `core/crates/phantom-p2p/src/lib.rs` e `core/crates/phantom-ffi/src/lib.rs`: aggiunto `is_online()` su `P2pEndpoint`/`P2pHostEndpoint` per esporre l'esito di `ep.online()`.
-- `android/app/app/src/main/java/app/phantom/host/stream/PhantomHostSession.kt`: timeout `online` P2P a 8s e log esplicito `online` vs `in attesa relay`.
-- `ios/PhantomF0/RemoteSession.swift`: mostra gli errori di tutti i candidati tentati (`LAN: ... · P2P: ...`) invece del solo ultimo errore.
-- `HANDOFF.md`, `PROGRESS.md`: aggiornati.
+- `core/crates/phantom-proto/src/lib.rs`, `core/crates/phantom-core/src/lib.rs`, `core/crates/phantom-ffi/src/lib.rs`:
+  - Token di accoppiamento opzionale 128-bit in `Hello` (`auth_token`, `close_reason::UNAUTHORIZED = 2`, `verify_client_hello`, `build_close_datagram`) con confronto a tempo costante.
+  - Nuovi messaggi di protocollo: `Audio` (AAC-LC in singolo datagramma), `Clipboard` (UTF-8 bidirezionale fino a 1024 byte) e `Control` (`WakeScreen`, `ScreenOff`, `ScreenOn`) + relative capability e test unitari.
+- `android/app/`:
+  - `HostIdentityStore.kt`, `PairingCodec.kt`, `PairingCodecTest.kt`, `MainActivity.kt`: token persistente 16 byte nel QR (`&tok=...`), pulsante esenzione Doze (`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) e permesso `RECORD_AUDIO`.
+  - `PhantomHostSession.kt`: pre-autenticazione del `Hello` su thread leggero prima di accettare + preemption immediata della connessione precedente (switch Wi-Fi → 5G in ~1–2 s invece di 15 s, zero DoS da client non autenticati).
+  - `AudioStreamer.kt`: cattura audio di sistema (`REMOTE_SUBMIX` in Root / `AudioPlaybackCapture` in MediaProjection) + encoder AAC-LC 48 kHz stereo con fallback pulito se non supportato.
+  - `RootDisplayPower.kt`, `RootInputInjector.kt`, `RootHostMain.kt`, `HostForegroundService.kt`: wake-up automatico (`KEYCODE_WAKEUP`), spegnimento/riaccensione display fisico (`SurfaceControl.setDisplayPowerMode` con ripristino garantito su disconnessione/stop) e sync appunti bidirezionale via `ClipboardManager`.
+- `ios/`:
+  - `PairingModels.swift`, `PairedDeviceStore.swift`, `SessionAgreement.swift`, `PairingModelsTests.swift`, `SessionAgreementTests.swift`: supporto `&tok=` nel QR, badge «protetto» e testo chiusura motivo 2.
+  - `AudioPlayer.swift`: player hardware AAC-LC (`AVSampleBufferAudioRenderer` + descrittore `esds` ISO 14496-1).
+  - `RemoteSession.swift`, `RemoteControlSurface.swift`, `RemoteConnectView.swift`: riconnessione immediata Wi-Fi → 5G (50 ms), invio `authToken`, audio con tasto muto, appunti bidirezionali con toast, tasti `Schermo Off/On` e `Risveglia`.
+- `README.md`, `HANDOFF.md`, `PROGRESS.md`: aggiornati.

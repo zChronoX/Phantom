@@ -27,6 +27,9 @@ final class PairedDeviceStore: ObservableObject {
             if let wan = parsed.remoteAddress {
                 updated.remoteAddress = wan
             }
+            if let tok = parsed.authToken {
+                updated.authToken = tok
+            }
             updated.certificateDer = parsed.certificateDer
             devices[idx] = updated
             save()
@@ -38,6 +41,7 @@ final class PairedDeviceStore: ObservableObject {
             lanAddress: parsed.lanAddress,
             p2pEndpointId: parsed.p2pEndpointId,
             remoteAddress: parsed.remoteAddress,
+            authToken: parsed.authToken,
             certificateDer: parsed.certificateDer
         )
         devices.insert(created, at: 0)

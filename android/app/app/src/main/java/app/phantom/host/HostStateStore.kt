@@ -23,6 +23,7 @@ data class HostUiState(
     val fingerprintHex: String = "",
     val p2pEndpointId: String = "",
     val p2pReady: Boolean = false,
+    val authToken: ByteArray = ByteArray(0),
     val activeProfileText: String = "",
     val fps: Double = 0.0,
     val mbps: Double = 0.0,

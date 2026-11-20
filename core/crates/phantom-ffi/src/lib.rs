@@ -19,9 +19,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use phantom_core::phantom_proto::{
-    caps, Codec, Finger, HEADER_LEN, MAX_DATAGRAM, MAX_FINGERS, MAX_VIDEO_PAYLOAD, VIDEO_HEADER_LEN,
+    caps, AudioCodec as ProtoAudioCodec, Codec, ControlCommand as ProtoControlCommand, Finger, Header, Message,
+    HEADER_LEN, MAX_DATAGRAM, MAX_FINGERS, MAX_VIDEO_PAYLOAD, VIDEO_HEADER_LEN,
 };
-use phantom_core::{Client, Delivered, Host, KeyEvent, Negotiated, SessionConfig};
+use phantom_core::{AudioSample, Client, Delivered, Host, KeyEvent, Negotiated, SessionConfig};
 use phantom_p2p::{P2pEndpoint, P2pError, P2pLink};
 use phantom_quic::{ClientEndpoint, HostEndpoint, QuicError, QuicLink};
 
@@ -124,6 +125,117 @@ impl From<SessionSettings> for SessionConfig {
     }
 }
 
+/// Codec audio esposto ai binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AudioCodec {
+    /// AAC-LC (raw Access Unit, `audio/mp4a-latm`).
+    AacLc,
+}
+
+impl From<AudioCodec> for ProtoAudioCodec {
+    fn from(c: AudioCodec) -> Self {
+        match c {
+            AudioCodec::AacLc => ProtoAudioCodec::AacLc,
+        }
+    }
+}
+
+impl From<ProtoAudioCodec> for AudioCodec {
+    fn from(c: ProtoAudioCodec) -> Self {
+        match c {
+            ProtoAudioCodec::AacLc => AudioCodec::AacLc,
+        }
+    }
+}
+
+/// Pacchetto audio ricevuto dal client, pronto per il player.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AudioFrame {
+    /// Numero progressivo del pacchetto audio.
+    pub seq: u32,
+    /// Codec audio.
+    pub codec: AudioCodec,
+    /// Frequenza di campionamento in Hz (es. 48000).
+    pub sample_rate: u32,
+    /// Numero di canali (1 = mono, 2 = stereo).
+    pub channels: u8,
+    /// `true` se contiene l'`AudioSpecificConfig` invece di un frame codificato.
+    pub config: bool,
+    /// Istante di cattura sull'orologio dell'host (µs).
+    pub capture_ts_us: u64,
+    /// Dati codificati.
+    pub data: Vec<u8>,
+}
+
+impl From<AudioSample> for AudioFrame {
+    fn from(a: AudioSample) -> Self {
+        AudioFrame {
+            seq: a.seq,
+            codec: a.codec.into(),
+            sample_rate: a.sample_rate,
+            channels: a.channels,
+            config: a.config,
+            capture_ts_us: a.capture_ts_us,
+            data: a.data,
+        }
+    }
+}
+
+/// Comando di controllo remoto inviato dal client all'host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RemoteControlCommand {
+    /// Risveglia lo schermo dell'host se spento.
+    WakeScreen,
+    /// Spegne/oscura il display fisico dell'host mantenendo attivo lo streaming.
+    ScreenOff,
+    /// Riaccende il display fisico dell'host.
+    ScreenOn,
+}
+
+impl From<RemoteControlCommand> for ProtoControlCommand {
+    fn from(c: RemoteControlCommand) -> Self {
+        match c {
+            RemoteControlCommand::WakeScreen => ProtoControlCommand::WakeScreen,
+            RemoteControlCommand::ScreenOff => ProtoControlCommand::ScreenOff,
+            RemoteControlCommand::ScreenOn => ProtoControlCommand::ScreenOn,
+        }
+    }
+}
+
+impl From<ProtoControlCommand> for RemoteControlCommand {
+    fn from(c: ProtoControlCommand) -> Self {
+        match c {
+            ProtoControlCommand::WakeScreen => RemoteControlCommand::WakeScreen,
+            ProtoControlCommand::ScreenOff => RemoteControlCommand::ScreenOff,
+            ProtoControlCommand::ScreenOn => RemoteControlCommand::ScreenOn,
+        }
+    }
+}
+
+fn parse_optional_auth_token(token: &[u8]) -> Option<[u8; 16]> {
+    if token.is_empty() {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    let n = token.len().min(16);
+    out[..n].copy_from_slice(&token[..n]);
+    Some(out)
+}
+
+/// Verifica un primo datagramma `Hello` del client contro il token di accoppiamento atteso prima di sostituire una
+/// sessione attiva sull'host.
+#[uniffi::export]
+pub fn verify_client_hello(conn_id: u32, expected_auth_token: Vec<u8>, datagram: Vec<u8>) -> bool {
+    let expected = parse_optional_auth_token(&expected_auth_token);
+    phantom_core::verify_client_hello(conn_id, expected, &datagram)
+}
+
+/// Costruisce un datagramma `Close` con il motivo indicato (es. `2` = `UNAUTHORIZED`) per rifiutare client non accoppiati.
+#[uniffi::export]
+pub fn build_close_datagram(conn_id: u32, reason: u8) -> Vec<u8> {
+    Message::Close { reason }.encode(Header { conn_id, seq: 0 }).unwrap_or_default()
+}
+
 /// Una funzione che host e client possono concordare all'apertura della sessione.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Capability {
@@ -139,6 +251,12 @@ pub enum Capability {
     KeyframeRequest,
     /// Ritardo di coda misurato dal client e riportato all'host.
     QueueDelay,
+    /// Audio AAC-LC in tempo reale (host → client).
+    AudioAac,
+    /// Appunti condivisi bidirezionali.
+    Clipboard,
+    /// Controllo risveglio/oscuramento display fisico dell'host.
+    ScreenPower,
 }
 
 impl Capability {
@@ -150,6 +268,9 @@ impl Capability {
             Capability::Nack => caps::NACK,
             Capability::KeyframeRequest => caps::KEYFRAME_REQUEST,
             Capability::QueueDelay => caps::QUEUE_DELAY,
+            Capability::AudioAac => caps::AUDIO_AAC,
+            Capability::Clipboard => caps::CLIPBOARD,
+            Capability::ScreenPower => caps::SCREEN_POWER,
         }
     }
 }
@@ -364,6 +485,15 @@ impl PhantomHost {
         Arc::new(PhantomHost { inner: Mutex::new(HostInner { host: Host::new(settings.into()), next_frame_id: 0 }) })
     }
 
+    /// Crea l'host con token di accoppiamento opzionale (vuoto = disabilitato) e flag audio.
+    #[uniffi::constructor]
+    pub fn new_with_options(settings: SessionSettings, auth_token: Vec<u8>, audio_enabled: bool) -> Arc<Self> {
+        let mut cfg: SessionConfig = settings.into();
+        cfg.auth_token = parse_optional_auth_token(&auth_token);
+        cfg.audio_enabled = audio_enabled;
+        Arc::new(PhantomHost { inner: Mutex::new(HostInner { host: Host::new(cfg), next_frame_id: 0 }) })
+    }
+
     /// Elabora un datagramma arrivato dal client; `now_us` è l'ora locale dell'host. Restituisce i datagrammi da
     /// rimandare al client (risposte ai ping, frammenti ritrasmessi).
     pub fn on_datagram(&self, now_us: u64, data: Vec<u8>) -> Vec<Vec<u8>> {
@@ -425,6 +555,34 @@ impl PhantomHost {
         lock(&self.inner).host.take_key().map(KeyInput::from)
     }
 
+    /// Spedisce un pacchetto audio codificato al client; restituisce il datagramma pronto o `None` prima dell'apertura.
+    pub fn send_audio(
+        &self,
+        codec: AudioCodec,
+        sample_rate: u32,
+        channels: u8,
+        config: bool,
+        capture_ts_us: u64,
+        data: Vec<u8>,
+    ) -> Option<Vec<u8>> {
+        lock(&self.inner).host.send_audio(codec.into(), sample_rate, channels, config, capture_ts_us, &data)
+    }
+
+    /// Spedisce il testo degli appunti dell'host al client.
+    pub fn send_clipboard(&self, text: String) -> Option<Vec<u8>> {
+        lock(&self.inner).host.send_clipboard(&text)
+    }
+
+    /// Ultimo testo degli appunti ricevuto dal client, se presente.
+    pub fn take_clipboard(&self) -> Option<String> {
+        lock(&self.inner).host.take_clipboard()
+    }
+
+    /// Il più vecchio comando di controllo remoto ricevuto dal client (es. risveglio o schermo spento).
+    pub fn take_control(&self) -> Option<RemoteControlCommand> {
+        lock(&self.inner).host.take_control().map(RemoteControlCommand::from)
+    }
+
     /// `true` se la sessione è stata chiusa (dal client o da [`PhantomHost::close`]): l'app deve fermare il trasporto.
     pub fn is_closed(&self) -> bool {
         lock(&self.inner).host.is_closed()
@@ -463,6 +621,15 @@ impl PhantomClient {
         Arc::new(PhantomClient { inner: Mutex::new(Client::new(cfg)) })
     }
 
+    /// Crea un client multi-codec (H.264 + HEVC) con token di accoppiamento opzionale (vuoto = nessuno).
+    #[uniffi::constructor]
+    pub fn new_with_auth(settings: SessionSettings, auth_token: Vec<u8>) -> Arc<Self> {
+        let mut cfg: SessionConfig = settings.into();
+        cfg.extra_caps |= caps::H264 | caps::H265;
+        cfg.auth_token = parse_optional_auth_token(&auth_token);
+        Arc::new(PhantomClient { inner: Mutex::new(Client::new(cfg)) })
+    }
+
     /// Elabora un datagramma arrivato dall'host; `now_us` è l'ora locale del client. Restituisce i datagrammi da
     /// rimandare all'host (richieste di ritrasmissione e di keyframe).
     pub fn on_datagram(&self, now_us: u64, data: Vec<u8>) -> Vec<Vec<u8>> {
@@ -485,6 +652,26 @@ impl PhantomClient {
     /// I frame completi arrivati dall'ultima chiamata, in ordine, pronti per il decoder.
     pub fn take_frames(&self) -> Vec<VideoFrame> {
         lock(&self.inner).take_frames().into_iter().map(VideoFrame::from).collect()
+    }
+
+    /// I pacchetti audio arrivati dall'host dall'ultima chiamata, in ordine di arrivo.
+    pub fn take_audio(&self) -> Vec<AudioFrame> {
+        lock(&self.inner).take_audio().into_iter().map(AudioFrame::from).collect()
+    }
+
+    /// Spedisce il testo degli appunti del client all'host.
+    pub fn send_clipboard(&self, text: String) -> Option<Vec<u8>> {
+        lock(&self.inner).send_clipboard(&text)
+    }
+
+    /// Ultimo testo degli appunti ricevuto dall'host, se presente.
+    pub fn take_clipboard(&self) -> Option<String> {
+        lock(&self.inner).take_clipboard()
+    }
+
+    /// Spedisce un comando di controllo remoto all'host (risveglio / spegnimento display fisico).
+    pub fn send_control(&self, command: RemoteControlCommand) -> Option<Vec<u8>> {
+        lock(&self.inner).send_control(command.into())
     }
 
     /// Spedisce un evento di tastiera all'host: `code` è il codice HID, `down` dice premuto o rilasciato. Sono eventi,
@@ -1323,5 +1510,40 @@ mod tests {
         let p2p_id = p2p_endpoint_id_from_secret(p2p_secret).expect("endpoint id P2P");
         assert!(!p2p_id.is_empty());
         assert!(matches!(p2p_endpoint_id_from_secret(vec![1, 2, 3]), Err(QuicTransportError::EmptyCertificate)));
+
+        let token = vec![0x77u8; 16];
+        let auth_host = PhantomHost::new_with_options(default_session_settings(), token.clone(), true);
+        let bad_client = PhantomClient::new_with_auth(default_session_settings(), vec![0x11; 16]);
+        let bad_hello = bad_client.tick(0).remove(0);
+        assert!(!verify_client_hello(default_session_settings().conn_id, token.clone(), bad_hello.clone()));
+        let bad_reply = auth_host.on_datagram(0, bad_hello);
+        assert_eq!(bad_reply.len(), 1);
+        assert!(auth_host.negotiated().is_none());
+
+        let ok_client = PhantomClient::new_with_auth(default_session_settings(), token.clone());
+        let ok_hello = ok_client.tick(0).remove(0);
+        assert!(verify_client_hello(default_session_settings().conn_id, token, ok_hello.clone()));
+        let ack = auth_host.on_datagram(10, ok_hello).remove(0);
+        ok_client.on_datagram(20, ack);
+        assert!(ok_client.negotiated().is_some());
+        let n_caps = ok_client.negotiated().expect("negoziata").caps;
+        assert!(caps_contains(n_caps, Capability::AudioAac));
+        assert!(caps_contains(n_caps, Capability::Clipboard));
+        assert!(caps_contains(n_caps, Capability::ScreenPower));
+
+        let audio_dgram = auth_host.send_audio(AudioCodec::AacLc, 48_000, 2, true, 100, vec![0x11, 0x90]).expect("asc");
+        ok_client.on_datagram(30, audio_dgram);
+        let rx_audio = ok_client.take_audio();
+        assert_eq!(rx_audio.len(), 1);
+        assert!(rx_audio[0].config);
+
+        let clip = ok_client.send_clipboard("hello".to_owned()).expect("clip");
+        auth_host.on_datagram(40, clip);
+        assert_eq!(auth_host.take_clipboard().as_deref(), Some("hello"));
+
+        let ctrl = ok_client.send_control(RemoteControlCommand::ScreenOff).expect("ctrl");
+        auth_host.on_datagram(50, ctrl);
+        assert_eq!(auth_host.take_control(), Some(RemoteControlCommand::ScreenOff));
+        assert!(!build_close_datagram(default_session_settings().conn_id, 2).is_empty());
     }
 }

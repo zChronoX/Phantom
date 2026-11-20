@@ -49,6 +49,7 @@ struct SessionAgreement: Equatable {
         switch reason {
         case 0: return "normale (motivo 0)"
         case 1: return "versione del protocollo non supportata (motivo 1)"
+        case 2: return "token di accoppiamento non valido (motivo 2 · riscansiona il QR)"
         default: return "motivo \(reason)"
         }
     }

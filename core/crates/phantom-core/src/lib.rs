@@ -11,7 +11,8 @@ use std::collections::VecDeque;
 
 use phantom_clock::{ClockSync, Sample};
 use phantom_proto::{
-    caps, close_reason, decode, Codec, Finger, Header, Message, Role, Stats, QUEUE_DELAY_UNKNOWN, VERSION,
+    audio_flags, caps, close_reason, decode, AudioCodec, AudioPacket, Codec, ControlCommand, Finger, Header, Message,
+    Role, Stats, MAX_AUDIO_PAYLOAD, MAX_CLIPBOARD_BYTES, QUEUE_DELAY_UNKNOWN, VERSION,
 };
 use phantom_video::{AssembledFrame, EncodedFrame, Output, ReceiverConfig, VideoReceiver, VideoSender};
 use rate::{RateConfig, RateController};
@@ -28,6 +29,74 @@ const MAX_PENDING_PINGS: usize = 64;
 /// Eventi di tastiera in attesa di essere prelevati dall'host: oltre, si butta il più vecchio (meglio perdere una
 /// pressione vecchia che quella appena fatta).
 const MAX_PENDING_KEYS: usize = 32;
+
+/// Comandi di controllo remoto in attesa di essere prelevati dall'host.
+const MAX_PENDING_CONTROLS: usize = 16;
+
+/// Pacchetti audio in attesa sul client: coda corta per evitare accumulo di latenza.
+const MAX_PENDING_AUDIO: usize = 64;
+
+fn ct_eq_16(a: &[u8; 16], b: &[u8; 16]) -> bool {
+    let mut diff = 0u8;
+    for i in 0..16 {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+fn is_newer_seq(prev: Option<u32>, seq: u32) -> bool {
+    prev.is_none_or(|s| seq.wrapping_sub(s) < (1 << 31) && seq != s)
+}
+
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Verifica un primo datagramma `Hello` del client prima di sostituire una sessione attiva sull'host.
+pub fn verify_client_hello(conn_id: u32, expected_auth_token: Option<[u8; 16]>, bytes: &[u8]) -> bool {
+    let Ok((hdr, msg)) = decode(bytes) else { return false };
+    if hdr.conn_id != conn_id {
+        return false;
+    }
+    let Message::Hello { role: Role::Client, proto_min, proto_max, auth_token, .. } = msg else {
+        return false;
+    };
+    #[allow(clippy::unnecessary_min_or_max)]
+    let proto = proto_max.min(VERSION);
+    if proto < proto_min {
+        return false;
+    }
+    match expected_auth_token {
+        None => true,
+        Some(expected) => auth_token.as_ref().is_some_and(|tok| ct_eq_16(tok, &expected)),
+    }
+}
+
+/// Pacchetto audio ricevuto dal client, pronto per il decoder audio.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AudioSample {
+    /// Numero progressivo del pacchetto audio.
+    pub seq: u32,
+    /// Codec audio.
+    pub codec: AudioCodec,
+    /// Frequenza di campionamento in Hz.
+    pub sample_rate: u32,
+    /// Numero di canali (1 = mono, 2 = stereo).
+    pub channels: u8,
+    /// `true` se contiene `AudioSpecificConfig` invece di un frame audio.
+    pub config: bool,
+    /// Istante di cattura sull'orologio dell'host (µs).
+    pub capture_ts_us: u64,
+    /// Dati codificati.
+    pub data: Vec<u8>,
+}
 
 /// Impostazioni di una sessione.
 #[derive(Clone, Debug)]
@@ -71,6 +140,10 @@ pub struct SessionConfig {
     pub hello_retry_us: u64,
     /// Bit di capacità aggiuntivi annunciati dal client in `Hello` (es. secondo codec decodificabile).
     pub extra_caps: u32,
+    /// Token di accoppiamento condiviso (16 byte): se impostato sull'host, i client senza token uguale vengono rifiutati.
+    pub auth_token: Option<[u8; 16]>,
+    /// `true` se l'host cattura e trasmette audio AAC-LC in tempo reale.
+    pub audio_enabled: bool,
 }
 
 impl Default for SessionConfig {
@@ -94,6 +167,8 @@ impl Default for SessionConfig {
             nonce: [0; 16],
             hello_retry_us: 250_000,
             extra_caps: 0,
+            auth_token: None,
+            audio_enabled: false,
         }
     }
 }
@@ -171,6 +246,12 @@ pub struct Host {
     /// Eventi di tastiera ricevuti e non ancora prelevati, dal più vecchio.
     keys: VecDeque<KeyEvent>,
     last_key_seq: Option<u32>,
+    audio_seq: u32,
+    clip_seq: u32,
+    last_clip_seq: Option<u32>,
+    pending_clipboard: Option<String>,
+    last_ctrl_seq: Option<u32>,
+    controls: VecDeque<ControlCommand>,
     stats: HostStats,
     rate: RateController,
     /// Esito dell'apertura della sessione, se il client ha già mandato `Hello`.
@@ -199,6 +280,12 @@ impl Host {
             touch_fresh: false,
             keys: VecDeque::new(),
             last_key_seq: None,
+            audio_seq: 0,
+            clip_seq: 0,
+            last_clip_seq: None,
+            pending_clipboard: None,
+            last_ctrl_seq: None,
+            controls: VecDeque::new(),
             stats: HostStats::default(),
             rate,
             negotiated: None,
@@ -234,7 +321,15 @@ impl Host {
     /// Le funzioni che l'host dichiara nell'apertura.
     fn caps(&self) -> u32 {
         let parity = if self.cfg.fec_group > 0 { caps::XOR_PARITY } else { 0 };
-        self.cfg.codec.caps_bit() | caps::NACK | caps::KEYFRAME_REQUEST | caps::QUEUE_DELAY | parity
+        let audio = if self.cfg.audio_enabled { caps::AUDIO_AAC } else { 0 };
+        self.cfg.codec.caps_bit()
+            | caps::NACK
+            | caps::KEYFRAME_REQUEST
+            | caps::QUEUE_DELAY
+            | parity
+            | audio
+            | caps::CLIPBOARD
+            | caps::SCREEN_POWER
     }
 
     fn encode(&mut self, m: &Message<'_>) -> Option<Vec<u8>> {
@@ -308,6 +403,53 @@ impl Host {
         self.keys.pop_front()
     }
 
+    /// Spedisce un pacchetto audio codificato al client. Prima dell'apertura della sessione non esce nulla.
+    pub fn send_audio(
+        &mut self,
+        codec: AudioCodec,
+        sample_rate: u32,
+        channels: u8,
+        config: bool,
+        capture_ts_us: u64,
+        data: &[u8],
+    ) -> Option<Vec<u8>> {
+        if self.closed.is_some() || self.negotiated.is_none() || data.len() > MAX_AUDIO_PAYLOAD {
+            return None;
+        }
+        let seq = self.audio_seq;
+        self.audio_seq = self.audio_seq.wrapping_add(1);
+        let flags = if config { audio_flags::CONFIG } else { 0 };
+        let pkt = AudioPacket { audio_seq: seq, codec, channels, flags, sample_rate, capture_ts_us, payload: data };
+        self.encode(&Message::Audio(pkt))
+    }
+
+    /// Spedisce il testo degli appunti dell'host al client (troncato in UTF-8 a [`MAX_CLIPBOARD_BYTES`]).
+    pub fn send_clipboard(&mut self, text: &str) -> Option<Vec<u8>> {
+        if self.closed.is_some() || self.negotiated.is_none() {
+            return None;
+        }
+        let clipped = truncate_utf8(text, MAX_CLIPBOARD_BYTES);
+        let seq = self.clip_seq;
+        self.clip_seq = self.clip_seq.wrapping_add(1);
+        self.encode(&Message::Clipboard { clip_seq: seq, text: clipped })
+    }
+
+    /// Ultimo testo degli appunti ricevuto dal client, se ce n'è uno nuovo.
+    pub fn take_clipboard(&mut self) -> Option<String> {
+        self.pending_clipboard.take()
+    }
+
+    /// Il più vecchio comando di controllo remoto ricevuto dal client (es. risveglio o schermo spento).
+    pub fn take_control(&mut self) -> Option<ControlCommand> {
+        self.controls.pop_front()
+    }
+
+    /// `true` se il token del client non corrisponde a quello configurato sull'host.
+    fn auth_rejected(&self, auth_token: Option<[u8; 16]>) -> bool {
+        let Some(expected) = self.cfg.auth_token else { return false };
+        !auth_token.as_ref().is_some_and(|tok| ct_eq_16(tok, &expected))
+    }
+
     /// Elabora un datagramma ricevuto dal client; `now_us` è l'istante di arrivo sull'orologio dell'host. Restituisce
     /// le risposte da rimandare al client.
     pub fn on_datagram(&mut self, now_us: u64, bytes: &[u8]) -> Vec<Vec<u8>> {
@@ -320,7 +462,7 @@ impl Host {
         }
         let mut out = Vec::new();
         match msg {
-            Message::Hello { role, proto_min, proto_max, caps: peer_caps, nonce } => {
+            Message::Hello { role, proto_min, proto_max, caps: peer_caps, nonce, auth_token } => {
                 // apre solo il client; chi si presenta con il ruolo sbagliato si ignora
                 if role == Role::Client {
                     // la versione più alta che entrambi parliamo; oggi `VERSION` è 0, per questo clippy vede il minimo
@@ -329,6 +471,10 @@ impl Host {
                     let proto = proto_max.min(VERSION);
                     if proto < proto_min {
                         if let Some(b) = self.encode(&Message::Close { reason: close_reason::BAD_PROTOCOL }) {
+                            out.push(b);
+                        }
+                    } else if self.auth_rejected(auth_token) {
+                        if let Some(b) = self.encode(&Message::Close { reason: close_reason::UNAUTHORIZED }) {
                             out.push(b);
                         }
                     } else {
@@ -365,9 +511,7 @@ impl Host {
             }
             Message::Touch { state_seq, t_client_us, fingers } => {
                 // stato completo: conta solo il più recente; uno arrivato in ritardo e fuori ordine si ignora
-                let is_newest =
-                    self.last_touch_seq.is_none_or(|s| state_seq.wrapping_sub(s) < (1 << 31) && state_seq != s);
-                if is_newest {
+                if is_newer_seq(self.last_touch_seq, state_seq) {
                     self.last_touch_seq = Some(state_seq);
                     self.last_touch = Some((state_seq, t_client_us, fingers));
                     self.touch_fresh = true;
@@ -376,14 +520,28 @@ impl Host {
             }
             Message::Key { key_seq, t_client_us, code, down } => {
                 // eventi, non stato: si accodano tutti; duplicati e riordini si scartano come per il tocco
-                let is_new = self.last_key_seq.is_none_or(|s| key_seq.wrapping_sub(s) < (1 << 31) && key_seq != s);
-                if is_new {
+                if is_newer_seq(self.last_key_seq, key_seq) {
                     self.last_key_seq = Some(key_seq);
                     if self.keys.len() == MAX_PENDING_KEYS {
                         self.keys.pop_front();
                     }
                     self.keys.push_back(KeyEvent { seq: key_seq, t_client_us, code, down });
                     self.stats.key_events += 1;
+                }
+            }
+            Message::Clipboard { clip_seq, text } => {
+                if is_newer_seq(self.last_clip_seq, clip_seq) {
+                    self.last_clip_seq = Some(clip_seq);
+                    self.pending_clipboard = Some(text.to_owned());
+                }
+            }
+            Message::Control { ctrl_seq, command } => {
+                if is_newer_seq(self.last_ctrl_seq, ctrl_seq) {
+                    self.last_ctrl_seq = Some(ctrl_seq);
+                    if self.controls.len() == MAX_PENDING_CONTROLS {
+                        self.controls.pop_front();
+                    }
+                    self.controls.push_back(command);
                 }
             }
             _ => {}
@@ -410,6 +568,11 @@ pub struct Client {
     last_pong_us: Option<u64>,
     touch_seq: u32,
     key_seq: u32,
+    clip_seq: u32,
+    last_clip_seq: Option<u32>,
+    pending_clipboard: Option<String>,
+    ctrl_seq: u32,
+    audio: VecDeque<AudioSample>,
     /// Esito dell'apertura della sessione, se l'host ha già risposto.
     negotiated: Option<Negotiated>,
     /// Prossimo `Hello` da mandare (µs), finché l'host non risponde.
@@ -438,6 +601,11 @@ impl Client {
             last_pong_us: None,
             touch_seq: 0,
             key_seq: 0,
+            clip_seq: 0,
+            last_clip_seq: None,
+            pending_clipboard: None,
+            ctrl_seq: 0,
+            audio: VecDeque::new(),
             negotiated: None,
             next_hello_us: 0,
             closed: None,
@@ -479,12 +647,46 @@ impl Client {
             | caps::KEYFRAME_REQUEST
             | caps::QUEUE_DELAY
             | caps::XOR_PARITY
+            | caps::AUDIO_AAC
+            | caps::CLIPBOARD
+            | caps::SCREEN_POWER
     }
 
     /// Frame consegnati dal ricevitore dall'ultima chiamata, nell'ordine di arrivo: chi usa il client per un'app li
     /// preleva a ogni giro (nelle prove restano in `delivered` per l'analisi finale).
     pub fn take_frames(&mut self) -> Vec<Delivered> {
         std::mem::take(&mut self.delivered)
+    }
+
+    /// Pacchetti audio arrivati dall'host dall'ultima chiamata, nell'ordine di ricezione.
+    pub fn take_audio(&mut self) -> Vec<AudioSample> {
+        self.audio.drain(..).collect()
+    }
+
+    /// Ultimo testo degli appunti ricevuto dall'host, se presente.
+    pub fn take_clipboard(&mut self) -> Option<String> {
+        self.pending_clipboard.take()
+    }
+
+    /// Spedisce il testo degli appunti del client all'host (troncato in UTF-8 a [`MAX_CLIPBOARD_BYTES`]).
+    pub fn send_clipboard(&mut self, text: &str) -> Option<Vec<u8>> {
+        if self.closed.is_some() || self.negotiated.is_none() {
+            return None;
+        }
+        let clipped = truncate_utf8(text, MAX_CLIPBOARD_BYTES);
+        let seq = self.clip_seq;
+        self.clip_seq = self.clip_seq.wrapping_add(1);
+        self.encode(&Message::Clipboard { clip_seq: seq, text: clipped })
+    }
+
+    /// Spedisce un comando di controllo remoto all'host (es. risveglio o spegnimento display fisico).
+    pub fn send_control(&mut self, command: ControlCommand) -> Option<Vec<u8>> {
+        if self.closed.is_some() || self.negotiated.is_none() {
+            return None;
+        }
+        let seq = self.ctrl_seq;
+        self.ctrl_seq = self.ctrl_seq.wrapping_add(1);
+        self.encode(&Message::Control { ctrl_seq: seq, command })
     }
 
     /// Statistiche del ricevitore video.
@@ -563,6 +765,26 @@ impl Client {
                     }
                 }
             }
+            Message::Audio(a) => {
+                if self.audio.len() == MAX_PENDING_AUDIO {
+                    self.audio.pop_front();
+                }
+                self.audio.push_back(AudioSample {
+                    seq: a.audio_seq,
+                    codec: a.codec,
+                    sample_rate: a.sample_rate,
+                    channels: a.channels,
+                    config: a.flags & audio_flags::CONFIG != 0,
+                    capture_ts_us: a.capture_ts_us,
+                    data: a.payload.to_vec(),
+                });
+            }
+            Message::Clipboard { clip_seq, text } => {
+                if is_newer_seq(self.last_clip_seq, clip_seq) {
+                    self.last_clip_seq = Some(clip_seq);
+                    self.pending_clipboard = Some(text.to_owned());
+                }
+            }
             _ => {}
         }
         send
@@ -583,6 +805,7 @@ impl Client {
                 proto_max: VERSION,
                 caps: self.caps(),
                 nonce: self.cfg.nonce,
+                auth_token: self.cfg.auth_token,
             };
             if let Some(b) = self.encode(&hello) {
                 send.push(b);
@@ -752,7 +975,7 @@ mod negotiation {
         let cfg = SessionConfig { codec: Codec::H264, nonce: [7; 16], ..SessionConfig::default() };
         let mut client = Client::new(cfg);
         let first = client.tick(0).remove(0);
-        let Some(Message::Hello { role, proto_min, proto_max, caps: c, nonce }) = hello_from(&first) else {
+        let Some(Message::Hello { role, proto_min, proto_max, caps: c, nonce, .. }) = hello_from(&first) else {
             panic!("il primo datagramma deve essere un Hello");
         };
         assert_eq!(role, Role::Client);
@@ -826,10 +1049,16 @@ mod negotiation {
     fn hello_with_host_role_is_ignored() {
         let cfg = SessionConfig::default();
         let mut host = Host::new(cfg.clone());
-        let bogus =
-            Message::Hello { role: Role::Host, proto_min: VERSION, proto_max: VERSION, caps: u32::MAX, nonce: [1; 16] }
-                .encode(Header { conn_id: cfg.conn_id, seq: 0 })
-                .unwrap_or_default();
+        let bogus = Message::Hello {
+            role: Role::Host,
+            proto_min: VERSION,
+            proto_max: VERSION,
+            caps: u32::MAX,
+            nonce: [1; 16],
+            auth_token: None,
+        }
+        .encode(Header { conn_id: cfg.conn_id, seq: 0 })
+        .unwrap_or_default();
         assert!(host.on_datagram(0, &bogus).is_empty(), "nessuna risposta");
         assert_eq!(host.negotiated(), None);
     }
@@ -845,6 +1074,7 @@ mod negotiation {
             proto_max: VERSION + 1,
             caps: 0,
             nonce: [2; 16],
+            auth_token: None,
         }
         .encode(Header { conn_id: cfg.conn_id, seq: 0 })
         .unwrap_or_default();
@@ -932,7 +1162,14 @@ mod gate {
         let hello = datagram(
             &cfg,
             4,
-            &Message::Hello { role: Role::Client, proto_min: VERSION, proto_max: VERSION, caps: 0, nonce: [1; 16] },
+            &Message::Hello {
+                role: Role::Client,
+                proto_min: VERSION,
+                proto_max: VERSION,
+                caps: 0,
+                nonce: [1; 16],
+                auth_token: None,
+            },
         );
         assert_eq!(host.on_datagram(0, &hello).len(), 1, "l'host risponde all'Hello");
         assert_eq!(host.on_datagram(0, &ping).len(), 1, "ora il ping riceve il pong");
@@ -1140,18 +1377,95 @@ mod close {
             proto_max: VERSION + 1,
             caps: 0,
             nonce: [0; 16],
+            auth_token: None,
         }
         .encode(Header { conn_id: cfg.conn_id, seq: 0 })
         .unwrap_or_default();
         assert_eq!(host.on_datagram(0, &future).len(), 1, "una chiusura per versione non comune");
         assert!(!host.is_closed(), "l'host resta aperto per un Hello corretto");
         // e infatti un Hello valido viene accettato
-        let hello =
-            Message::Hello { role: Role::Client, proto_min: VERSION, proto_max: VERSION, caps: 0, nonce: [1; 16] }
-                .encode(Header { conn_id: cfg.conn_id, seq: 1 })
-                .unwrap_or_default();
+        let hello = Message::Hello {
+            role: Role::Client,
+            proto_min: VERSION,
+            proto_max: VERSION,
+            caps: 0,
+            nonce: [1; 16],
+            auth_token: None,
+        }
+        .encode(Header { conn_id: cfg.conn_id, seq: 1 })
+        .unwrap_or_default();
         let ack = host.on_datagram(1_000, &hello);
         assert_eq!(ack.len(), 1, "l'host risponde all'Hello corretto");
         assert!(host.negotiated().is_some());
+    }
+
+    #[test]
+    fn auth_token_rejects_unauthorized_and_accepts_paired_client() {
+        let token = [0x42u8; 16];
+        let mut host = Host::new(SessionConfig { auth_token: Some(token), ..SessionConfig::default() });
+        let mut intruder = Client::new(SessionConfig { auth_token: Some([0x99; 16]), ..SessionConfig::default() });
+        let mut unauthenticated = Client::new(SessionConfig::default());
+
+        let bad_hello = intruder.tick(0).remove(0);
+        assert!(!verify_client_hello(SessionConfig::default().conn_id, Some(token), &bad_hello));
+        let reply = host.on_datagram(0, &bad_hello);
+        assert_eq!(reply.len(), 1);
+        assert!(matches!(decode(&reply[0]), Ok((_, Message::Close { reason: close_reason::UNAUTHORIZED }))));
+        assert!(host.negotiated().is_none());
+        assert!(!host.is_closed(), "un intruso non chiude l'host");
+
+        let no_tok = unauthenticated.tick(0).remove(0);
+        assert!(!verify_client_hello(SessionConfig::default().conn_id, Some(token), &no_tok));
+        let reply2 = host.on_datagram(10, &no_tok);
+        assert!(matches!(decode(&reply2[0]), Ok((_, Message::Close { reason: close_reason::UNAUTHORIZED }))));
+
+        let mut paired = Client::new(SessionConfig { auth_token: Some(token), ..SessionConfig::default() });
+        let ok_hello = paired.tick(0).remove(0);
+        assert!(verify_client_hello(SessionConfig::default().conn_id, Some(token), &ok_hello));
+        let ack = host.on_datagram(20, &ok_hello).remove(0);
+        paired.on_datagram(30, &ack);
+        assert!(host.negotiated().is_some());
+        assert!(paired.negotiated().is_some());
+    }
+
+    #[test]
+    fn audio_clipboard_and_control_work_after_open() {
+        let cfg = SessionConfig { audio_enabled: true, ..SessionConfig::default() };
+        let mut host = Host::new(cfg.clone());
+        let mut client = Client::new(cfg);
+
+        assert!(host.send_audio(AudioCodec::AacLc, 48_000, 2, true, 0, &[0x11, 0x90]).is_none());
+        assert!(client.send_clipboard("prima").is_none());
+        assert!(client.send_control(ControlCommand::ScreenOff).is_none());
+
+        let hello = client.tick(0).remove(0);
+        let ack = host.on_datagram(0, &hello).remove(0);
+        client.on_datagram(1, &ack);
+        assert_ne!(client.negotiated().expect("aperto").caps & caps::AUDIO_AAC, 0);
+
+        let asc = host.send_audio(AudioCodec::AacLc, 48_000, 2, true, 100, &[0x11, 0x90]).expect("asc");
+        let aac = host.send_audio(AudioCodec::AacLc, 48_000, 2, false, 21_433, &[1, 2, 3, 4]).expect("aac");
+        client.on_datagram(2, &asc);
+        client.on_datagram(3, &aac);
+        let rx_audio = client.take_audio();
+        assert_eq!(rx_audio.len(), 2);
+        assert!(rx_audio[0].config && rx_audio[0].data == [0x11, 0x90]);
+        assert!(!rx_audio[1].config && rx_audio[1].data == [1, 2, 3, 4]);
+
+        let c2h = client.send_clipboard("da iPhone").expect("clip c->h");
+        host.on_datagram(4, &c2h);
+        host.on_datagram(5, &c2h); // duplicato ignorato
+        assert_eq!(host.take_clipboard().as_deref(), Some("da iPhone"));
+        assert_eq!(host.take_clipboard(), None);
+
+        let h2c = host.send_clipboard("da Android").expect("clip h->c");
+        client.on_datagram(6, &h2c);
+        assert_eq!(client.take_clipboard().as_deref(), Some("da Android"));
+
+        let ctrl = client.send_control(ControlCommand::ScreenOff).expect("screen off");
+        host.on_datagram(7, &ctrl);
+        host.on_datagram(8, &ctrl); // duplicato ignorato
+        assert_eq!(host.take_control(), Some(ControlCommand::ScreenOff));
+        assert_eq!(host.take_control(), None);
     }
 }

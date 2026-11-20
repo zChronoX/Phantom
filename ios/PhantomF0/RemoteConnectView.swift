@@ -20,20 +20,26 @@ struct RemoteConnectView: View {
     @State private var infoMessage = ""
 
     private enum ActiveRoute: Identifiable {
-        case remote(id: String, endpoints: [RemoteEndpointCandidate], cert: Data, codec: VideoCodec)
+        case remote(id: String, endpoints: [RemoteEndpointCandidate], cert: Data, authToken: Data?, codec: VideoCodec)
         case loopback(fps: Int)
 
         var id: String {
             switch self {
-            case let .remote(id, _, _, _): return "remote-\(id)"
+            case let .remote(id, _, _, _, _): return "remote-\(id)"
             case let .loopback(fps): return "loopback-\(fps)"
             }
         }
 
         var sessionMode: RemoteSessionMode {
             switch self {
-            case let .remote(_, endpoints, cert, codec):
-                return .remote(endpoints: endpoints, certificateDer: cert, codec: codec, autoReconnect: true)
+            case let .remote(_, endpoints, cert, authToken, codec):
+                return .remote(
+                    endpoints: endpoints,
+                    certificateDer: cert,
+                    authToken: authToken,
+                    codec: codec,
+                    autoReconnect: true
+                )
             case let .loopback(fps):
                 return .localQuicLoopback(fps: fps, width: 1080, height: 2400)
             }
@@ -220,9 +226,10 @@ struct RemoteConnectView: View {
                     .foregroundStyle(.secondary)
             }
             if let p2p = device.p2pEndpointId {
-                Label("5G/4G P2P integrato · \(p2p.prefix(12))…", systemImage: "globe")
+                let authLabel = device.authToken != nil ? " · protetto" : " · riscansiona QR per token"
+                Label("5G/4G P2P integrato · \(p2p.prefix(12))…\(authLabel)", systemImage: device.authToken != nil ? "lock.shield" : "globe")
                     .font(.caption.monospaced())
-                    .foregroundStyle(.green)
+                    .foregroundStyle(device.authToken != nil ? .green : .orange)
             }
             if let remote = device.remoteAddress {
                 Label("Remoto manuale: \(remote)", systemImage: "antenna.radiowaves.left.and.right")
@@ -265,7 +272,13 @@ struct RemoteConnectView: View {
         }
         errorMessage = ""
         let codec: VideoCodec = codecRaw == "h264" ? .h264 : .h265
-        activeMode = .remote(id: device.id, endpoints: candidates, cert: device.certificateDer, codec: codec)
+        activeMode = .remote(
+            id: device.id,
+            endpoints: candidates,
+            cert: device.certificateDer,
+            authToken: device.authToken,
+            codec: codec
+        )
     }
 
     private var certificateStatusText: (text: String, valid: Bool)? {
@@ -293,7 +306,7 @@ struct RemoteConnectView: View {
             label: "Manuale",
             timeoutMs: 5_000
         )
-        activeMode = .remote(id: normalized, endpoints: [candidate], cert: cert, codec: codec)
+        activeMode = .remote(id: normalized, endpoints: [candidate], cert: cert, authToken: nil, codec: codec)
     }
 }
 

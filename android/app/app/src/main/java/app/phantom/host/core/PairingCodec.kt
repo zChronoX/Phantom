@@ -9,6 +9,7 @@ data class ParsedPairing(
     val lan: String?,
     val wan: String?,
     val p2pId: String?,
+    val authToken: ByteArray?,
     val certDer: ByteArray,
 )
 
@@ -84,8 +85,9 @@ object PairingCodec {
         wan: String?,
         certDer: ByteArray,
         p2pId: String? = null,
+        authToken: ByteArray? = null,
     ): String {
-        val params = ArrayList<String>(5)
+        val params = ArrayList<String>(6)
         val cleanName = name.trim().ifEmpty { "Android" }
         params.add("name=${urlEncode(cleanName)}")
         val cleanLan = lan?.trim().orEmpty()
@@ -99,6 +101,9 @@ object PairingCodec {
         val cleanWan = wan?.trim().orEmpty()
         if (cleanWan.isNotEmpty()) {
             params.add("wan=${urlEncode(cleanWan)}")
+        }
+        if (authToken != null && authToken.isNotEmpty()) {
+            params.add("tok=${encodeBase64UrlNoPad(authToken)}")
         }
         params.add("cert=${encodeBase64UrlNoPad(certDer)}")
         return "phantom://pair?${params.joinToString("&")}"
@@ -119,11 +124,13 @@ object PairingCodec {
         val certRaw = map["cert"] ?: return null
         val cert = decodeBase64UrlNoPad(certRaw) ?: return null
         if (cert.isEmpty()) return null
+        val tok = map["tok"]?.let { decodeBase64UrlNoPad(it) }?.takeIf { it.isNotEmpty() }
         return ParsedPairing(
             name = map["name"]?.trim().orEmpty().ifEmpty { "Android" },
             lan = map["lan"]?.trim()?.takeIf { it.isNotEmpty() },
             wan = map["wan"]?.trim()?.takeIf { it.isNotEmpty() },
             p2pId = map["p2p"]?.trim()?.takeIf { it.isNotEmpty() },
+            authToken = tok,
             certDer = cert,
         )
     }
