@@ -1,6 +1,6 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-19. Branch `main`, commit `2562dd7` (allineato a `origin/main`) più fix `SIGABRT` in `Drop for P2pEndpoint` (`core/crates/phantom-p2p/src/lib.rs`).
+Ultimo aggiornamento: 2026-11-20. Branch `main`, commit `f851c3a` (allineato a `origin/main`) più fix `panic = "unwind"` per `iroh` su Android e diagnostica P2P/iOS.
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Dove siamo
@@ -316,12 +316,26 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 - Fix crash iOS `SIGABRT` su `2562dd7` (e test `phantom-p2p`):
   - Il crash log su iPhone (`CrashLog`) ha mostrato `tokio::runtime::scheduler::Handle::current` chiamato da `P2pEndpoint::drop`: `tokio::time::timeout(...)` veniva valutato prima di entrare in `self.runtime.block_on(...)`.
-  - Avvolti `Drop for P2pEndpoint` e `network_change` in `self.runtime.block_on(async { ... })` e aggiunto `self.runtime.enter()` in `P2pLink::close` e `Drop for P2pLink`.
+  - Avvolti `Drop for P2pEndpoint` e `network_change` in `self.runtime.block_on(async { ... })` e aggiunto `self.runtime.enter()` in `P2pLink::close` e `Drop for P2pLink` (committato in `f851c3a`).
+
+## Sessione 2026-11-20
+
+- Prova su LDPlayer + iPhone del build `f851c3a`: niente più crash su iPhone, ma errore `ConnectionFailed(detail: "No addressing information available")` sia in Wi-Fi sia in 5G; su Android (LDPlayer Root) il log mostrava `Worker root terminato (exit 0)` nello stesso secondo di `Endpoint QUIC LAN pronto sulla porta 47800` (senza `STOPPED`).
+- Causa individuata: `P2pHostEndpoint.bind` crea il `DnsResolver` predefinito di `iroh`, che su Android tenta di leggere i DNS di sistema via JNI (`ndk_context`) affidandosi a `std::panic::catch_unwind` per passare ai DNS di fallback; `panic = "abort"` in `core/Cargo.toml` impediva l'unwind e abortiva subito `app_process64` (uccidendo sia la LAN sia il P2P prima della registrazione su `dns.iroh.link`).
+- Fix applicato in locale (da committare/pushare):
+  - `core/Cargo.toml`: rimosso `panic = "abort"` in `[profile.release]` (default `unwind`, utile anche per il boundary `catch_unwind` di UniFFI).
+  - `core/crates/phantom-p2p/src/lib.rs` e `core/crates/phantom-ffi/src/lib.rs`: esposto `is_online()` su `P2pEndpoint` / `P2pHostEndpoint`.
+  - `android/app/.../PhantomHostSession.kt`: timeout `online` a 8 s e log esplicito `online` vs `in attesa relay`.
+  - `ios/PhantomF0/RemoteSession.swift`: aggregati gli errori di tutti i candidati tentati (`LAN: ... · P2P: ...`).
 
 ## Prossimo passo
 
-Modifiche locali pronte su `2562dd7` (da committare e pushare dall'utente su `origin/main`):
+Modifiche locali pronte su `f851c3a` (da committare e pushare dall'utente su `origin/main` per rigenerare APK e IPA su GitHub Actions):
+- `core/Cargo.toml`
 - `core/crates/phantom-p2p/src/lib.rs`
+- `core/crates/phantom-ffi/src/lib.rs`
+- `android/app/app/src/main/java/app/phantom/host/stream/PhantomHostSession.kt`
+- `ios/PhantomF0/RemoteSession.swift`
 - `HANDOFF.md`, `PROGRESS.md`
 
-Con la cache `iroh` ormai calda, tutte e 3 le build (`Core · Rust`, `iOS · Phantom F0`, `Android · Phantom Host APK`) saranno rapide e verdi; poi aggiornare APK + IPA da `f0-latest` e provare lo switch Wi-Fi ↔ 5G/4G!
+Nota: Docker non è attivo sul PC locale, quindi build/test/fmt/clippy gireranno sui 3 workflow GitHub Actions al push. Poi aggiornare APK (+ IPA per la diagnostica completa) da `f0-latest` e verificare Wi-Fi + 5G!

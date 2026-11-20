@@ -246,7 +246,7 @@ final class RemoteSession: ObservableObject {
             var connectedLink: QuicConnection?
             var chosenLabel = ""
             var chosenIsLan = false
-            var lastConnectError: Error?
+            var attemptErrors: [String] = []
 
             for candidate in candidates {
                 guard isGenerationActive(gen) else {
@@ -287,13 +287,13 @@ final class RemoteSession: ObservableObject {
                     }
                     break
                 } catch {
-                    lastConnectError = error
+                    attemptErrors.append("\(candidate.label): \(error)")
                 }
             }
 
             guard let conn = connectedLink else {
                 loopback?.stop()
-                let desc = lastConnectError.map { "\($0)" } ?? "timeout"
+                let desc = attemptErrors.isEmpty ? "timeout" : attemptErrors.joined(separator: " · ")
                 handleDisconnect(reason: "Connessione QUIC fallita: \(desc)", orderly: false, gen: gen)
                 return
             }

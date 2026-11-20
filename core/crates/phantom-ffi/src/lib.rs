@@ -811,6 +811,11 @@ impl P2pHostEndpoint {
         self.inner.endpoint_id()
     }
 
+    /// `true` se l'endpoint P2P ha raggiunto il relay online entro `online_timeout_ms`.
+    pub fn is_online(&self) -> bool {
+        self.inner.is_online()
+    }
+
     /// Aspetta una connessione P2P in ingresso entro `timeout_ms` millisecondi.
     pub fn accept(&self, timeout_ms: u64) -> Result<Arc<QuicConnection>, QuicTransportError> {
         let link = ConnectionBackend::P2p(self.inner.accept(Duration::from_millis(timeout_ms))?);

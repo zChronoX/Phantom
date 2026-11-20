@@ -1,7 +1,7 @@
 # Handoff
 
-Scritto: 2026-11-19 da Particle-1 (Kilo); aggiornato dopo la creazione della nuova app host Android (`android/app/`).
-Branch: main - Commit locale: `2562dd7` (allineato a `origin/main`) + fix `Drop for P2pEndpoint` (`tokio::time::timeout` dentro `async {}`)
+Scritto: 2026-11-20; aggiornato dopo il fix `panic = "abort"` per `iroh` su Android.
+Branch: main - Commit locale: `f851c3a` (allineato a `origin/main`) + fix `panic = "unwind"` (`core/Cargo.toml`), `P2pEndpoint::is_online` e diagnostica errori candidati iOS.
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -139,6 +139,7 @@ Otto task della sessione precedente più T9 e T10 chiusi e verificati in Docker
 - Passare `tokio::time::timeout(...)` direttamente a `runtime.block_on(...)` senza `async { ... }`: `timeout()` chiama `Handle::current()` prima che `block_on` entri nel runtime Tokio e va in panico (`SIGABRT` su iOS/Android). Avvolgere sempre in `runtime.block_on(async { tokio::time::timeout(...).await })`.
 - Passare `-Djava.library.path=<libDir>` ad `app_process64`: sovrascrive `/system/lib64` e rompe le librerie JNI di sistema come `Conscrypt`/`NativeCrypto` (usato da `SecureRandom`). Caricare invece `libjnidispatch.so`/`libphantom_ffi.so` via `System.load(path)` + `-Djna.*` e preservare `/system/lib64:/vendor/lib64` in `LD_LIBRARY_PATH`.
 - Usare un campo chiamato `message` nelle varianti di un enum `#[derive(uniffi::Error)]` in Rust: nel binding Kotlin generato da UniFFI collide con `Throwable.message` (`Conflicting declarations: val message: String`). Usare nomi come `detail`.
+- Impostare `panic = "abort"` in `[profile.release]` di `core/Cargo.toml`: rompe sia il `catch_unwind` interno del `DnsResolver` di `iroh` su Android (fallback quando `ndk_context` non è inizializzato, causando `SIGABRT` immediato nel worker root `app_process64`) sia il boundary `catch_unwind` di UniFFI.
 - Mandare video, ping, tocco, tastiera o statistiche prima dell'apertura: il
   core ora le scarta (cancello T10). L'host deve aspettare `negotiated()` e il
   client l'ack; i test di ping e tastiera aprono prima la sessione. Non aggirare
@@ -177,5 +178,8 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- `core/crates/phantom-p2p/src/lib.rs`: spostati `tokio::time::timeout` (in `Drop for P2pEndpoint`) e `self.endpoint.network_change()` dentro blocchi `async { ... }` in `runtime.block_on(...)` e aggiunto `let _guard = self.runtime.enter()` in `P2pLink::close` / `Drop for P2pLink` per evitare il panico `Handle::current()` («there is no reactor running») su iOS/Android/test.
+- `core/Cargo.toml`: rimosso `panic = "abort"` da `[profile.release]` (default `unwind`) per permettere a `iroh` su Android di fare fallback DNS tramite `catch_unwind` senza abortire `app_process64` (e a UniFFI di convertire eventuali panic in eccezioni leggibili).
+- `core/crates/phantom-p2p/src/lib.rs` e `core/crates/phantom-ffi/src/lib.rs`: aggiunto `is_online()` su `P2pEndpoint`/`P2pHostEndpoint` per esporre l'esito di `ep.online()`.
+- `android/app/app/src/main/java/app/phantom/host/stream/PhantomHostSession.kt`: timeout `online` P2P a 8s e log esplicito `online` vs `in attesa relay`.
+- `ios/PhantomF0/RemoteSession.swift`: mostra gli errori di tutti i candidati tentati (`LAN: ... · P2P: ...`) invece del solo ultimo errore.
 - `HANDOFF.md`, `PROGRESS.md`: aggiornati.

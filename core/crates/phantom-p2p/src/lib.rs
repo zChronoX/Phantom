@@ -85,6 +85,7 @@ pub fn endpoint_id_from_secret_key(secret_key: &[u8]) -> Result<String, P2pError
 #[derive(Debug)]
 pub struct P2pEndpoint {
     endpoint: Endpoint,
+    online: bool,
     // Ultimo campo: l'endpoint viene chiuso prima del runtime Tokio.
     runtime: Arc<Runtime>,
 }
@@ -96,7 +97,7 @@ impl P2pEndpoint {
         let sk = SecretKey::from_bytes(&arr);
         let runtime = new_runtime()?;
         let tc = transport_config();
-        let endpoint = runtime.block_on(async {
+        let (endpoint, online) = runtime.block_on(async {
             let ep = Endpoint::builder(presets::N0)
                 .secret_key(sk)
                 .alpns(vec![ALPN.to_vec()])
@@ -104,35 +105,36 @@ impl P2pEndpoint {
                 .bind()
                 .await
                 .map_err(|e| P2pError::Transport(e.to_string()))?;
-            if !wait_online.is_zero() {
-                let _ = tokio::time::timeout(wait_online, ep.online()).await;
-            }
-            Ok::<_, P2pError>(ep)
+            let online = !wait_online.is_zero() && tokio::time::timeout(wait_online, ep.online()).await.is_ok();
+            Ok::<_, P2pError>((ep, online))
         })?;
-        Ok(Self { endpoint, runtime: Arc::new(runtime) })
+        Ok(Self { endpoint, online, runtime: Arc::new(runtime) })
     }
 
     /// Apre un endpoint client P2P pronto per collegarsi tramite `EndpointId` (da 5G/4G o qualsiasi Wi-Fi).
     pub fn bind_client(wait_online: Duration) -> Result<Self, P2pError> {
         let runtime = new_runtime()?;
         let tc = transport_config();
-        let endpoint = runtime.block_on(async {
+        let (endpoint, online) = runtime.block_on(async {
             let ep = Endpoint::builder(presets::N0)
                 .transport_config(tc)
                 .bind()
                 .await
                 .map_err(|e| P2pError::Transport(e.to_string()))?;
-            if !wait_online.is_zero() {
-                let _ = tokio::time::timeout(wait_online, ep.online()).await;
-            }
-            Ok::<_, P2pError>(ep)
+            let online = !wait_online.is_zero() && tokio::time::timeout(wait_online, ep.online()).await.is_ok();
+            Ok::<_, P2pError>((ep, online))
         })?;
-        Ok(Self { endpoint, runtime: Arc::new(runtime) })
+        Ok(Self { endpoint, online, runtime: Arc::new(runtime) })
     }
 
     /// Identificatore pubblico (`EndpointId`) di questo nodo, usato dal client per raggiungerlo ovunque.
     pub fn endpoint_id(&self) -> String {
         self.endpoint.id().to_string()
+    }
+
+    /// `true` se l'endpoint ha completato la registrazione al relay entro `wait_online`.
+    pub fn is_online(&self) -> bool {
+        self.online
     }
 
     /// Aspetta una connessione P2P in ingresso entro `timeout`.
@@ -294,13 +296,13 @@ mod tests {
             .expect("bind minimal host");
         let port = host_ep.bound_sockets().into_iter().find(SocketAddr::is_ipv4).expect("socket ipv4").port();
         let host_addr = EndpointAddr::from(host_ep.id()).with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
-        let host = P2pEndpoint { endpoint: host_ep, runtime: Arc::new(rt_host) };
+        let host = P2pEndpoint { endpoint: host_ep, online: false, runtime: Arc::new(rt_host) };
 
         let rt_client = new_runtime().expect("rt client");
         let client_ep = rt_client
             .block_on(async { Endpoint::builder(presets::Minimal).transport_config(transport_config()).bind().await })
             .expect("bind minimal client");
-        let client = P2pEndpoint { endpoint: client_ep, runtime: Arc::new(rt_client) };
+        let client = P2pEndpoint { endpoint: client_ep, online: false, runtime: Arc::new(rt_client) };
 
         let (tx, rx) = std::sync::mpsc::channel();
         let acceptor = std::thread::spawn(move || {

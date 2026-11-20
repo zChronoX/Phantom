@@ -126,12 +126,13 @@ class PhantomHostSession(
                 p2pAcceptThread = Thread({
                     var p2pEp: P2pHostEndpoint? = null
                     try {
-                        val ep = P2pHostEndpoint.bind(secret, 6_000uL)
+                        val ep = P2pHostEndpoint.bind(secret, 8_000uL)
                         p2pEp = ep
                         activeP2pEndpoint.set(ep)
                         val eid = ep.endpointId()
                         onP2pReady(eid)
-                        onLog("P2P integrato (iroh) pronto · ID ${eid.take(12)}…")
+                        val p2pState = if (ep.isOnline()) "online" else "in attesa relay"
+                        onLog("P2P integrato (iroh) $p2pState · ID ${eid.take(12)}…")
                         while (running.get()) {
                             try {
                                 val conn = ep.accept(400uL)
