@@ -555,10 +555,10 @@ struct RemoteSessionView: View {
                     Text("Loopback · tocchi \(session.metrics.hostTouchReceived) · tasti \(session.metrics.hostKeyReceived)")
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.white.opacity(0.7))
-                } else if !session.metrics.agreementSummary.isEmpty {
-                    Text(session.metrics.agreementSummary)
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.7))
+                } else if session.metrics.connected {
+                    Text(hudDetailLine)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.72))
                         .lineLimit(1)
                 }
             }
@@ -576,6 +576,22 @@ struct RemoteSessionView: View {
         let rtt = m.rttMs.map { String(format: "%.0f ms", $0) } ?? "–"
         let prefix = m.endpointLabel.isEmpty ? "" : "\(m.endpointLabel) · "
         return String(format: "%@%.0f fps · %@", prefix, m.fps, rtt)
+    }
+
+    private var hudDetailLine: String {
+        let m = session.metrics
+        var parts: [String] = []
+        if m.videoWidth > 0 && m.videoHeight > 0 {
+            parts.append("\(m.videoWidth)×\(m.videoHeight)")
+        }
+        if !m.codecName.isEmpty {
+            parts.append(m.codecName)
+        }
+        parts.append(String(format: "%.1f Mbps", m.bitrateMbps))
+        if let q = m.queueDelayMs {
+            parts.append(String(format: "coda %.0f ms", q))
+        }
+        return parts.joined(separator: " · ")
     }
 
     private func quickButton(_ title: String, systemImage: String, action: RemoteQuickAction) -> some View {

@@ -1,7 +1,7 @@
 # Handoff
 
-Scritto: 2026-11-20; aggiornato per la release ufficiale **v1.0.0** (audio Root Android 12+ con `AttributionSource`, pulizia workflow CI/release e documentazione finale).
-Branch: main - Commit locale: basato sull'ultimo push verificato su `origin/main` + rifinitura finale v1.0.0 pronta per commit e tag `v1.0.0`.
+Scritto: 2026-11-20; aggiornato con ottimizzazioni **v1.1.0** per fluidità e qualità video (encoder low-latency, bitrate LAN 12–32 Mbps, keyframe istantanei e telemetria live nell'HUD iOS).
+Branch: main - Commit locale: basato sull'ultimo push su `origin/main` + ottimizzazioni v1.1.0 pronte per commit e release `v1.1.0`.
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -179,7 +179,8 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-- `android/app/app/src/main/java/app/phantom/host/stream/AudioStreamer.kt`: aggiunto `RootAudioContext` (`ContextWrapper` con `AttributionSource` ufficiale API 31+) per abilitare la cattura audio di sistema `REMOTE_SUBMIX` in modalità Root su Android 12+ (es. Redmi Note 11 Pro 5G), mantenendo il fallback sicuro solo-video su Android < 12 (incluso LDPlayer 9 / Android 9).
-- `.github/workflows/ios.yml`, `.github/workflows/android-app.yml`, `.github/workflows/android-f0.yml`: rinominati i workflow in `iOS · Phantom` e `Android · Phantom APK`, artefatti puliti `Phantom.ipa` e `Phantom.apk`, pubblicazione automatica della release ufficiale sui tag `v*` (es. `v1.0.0`) e restrizione di `android-f0.yml` ai soli percorsi legacy (`android/module/**`, `android/probe/**`, `tools/**`).
-- `android/app/app/src/main/java/app/phantom/host/stream/VideoEncoder.kt` + `core/AnnexBFramePrep.kt` + `AnnexBFramePrepTest.kt`: adattamento automatico della risoluzione/FPS/bitrate alle `VideoCapabilities` hardware del SoC (fix `IllegalArgumentException` su Redmi Note 11 Pro 5G / Snapdragon 695 che limita l'encoder a 1920 px sul lato lungo rispetto allo schermo 20:9 `1088×2400`) + fallback progressivo 1920 → 1600 → 1280 e log leggibile del nome dell'eccezione.
-- `android/app/app/src/main/java/app/phantom/host/MainActivity.kt`: richiede anche `RECORD_AUDIO` quando si avvia la modalità Standard su Android 10+ per abilitare l'audio di sistema (`AudioPlaybackCapture`).
+- **Ottimizzazioni qualità & fluidità `v1.1.0`**:
+  - `android/app/app/src/main/java/app/phantom/host/stream/VideoEncoder.kt`: `KEY_I_FRAME_INTERVAL = 10` (elimina i micro-lag dei keyframe ogni 2 s), flag low-latency (`KEY_PRIORITY = 0`, `KEY_MAX_B_FRAMES = 0` su Android 10+, `KEY_LATENCY = 1` su Android 11+ con fallback pulito se il driver li rifiuta), priorità thread `THREAD_PRIORITY_URGENT_DISPLAY` e `dequeueOutputBuffer` a 5 ms.
+  - `android/app/app/src/main/java/app/phantom/host/stream/PhantomHostSession.kt`: profili bitrate differenziati LAN (`12 → 32 Mbps`, min `3 Mbps`) vs P2P 5G (`8 → 20 Mbps`, min `1.5 Mbps`), richiesta keyframe immediata dentro `recvThread` (0 ms di attesa invece di 50 ms), aggiornamento bitrate ogni 250 ms (soglia 5%) e priorità `URGENT_DISPLAY` su `recvThread`.
+  - `ios/PhantomF0/RemoteControlSurface.swift`: riga telemetria live nell'HUD espanso (`risoluzione · codec · Mbps · coda ms`) per monitorare nitidezza e latenza in tempo reale.
+  - `android/app/app/build.gradle.kts`, `ios/project.yml`, `HANDOFF.md`, `PROGRESS.md`: versione aggiornata a `1.1.0`.

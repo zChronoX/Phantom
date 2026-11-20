@@ -1,5 +1,6 @@
 package app.phantom.host.stream
 
+import android.os.Process
 import android.os.SystemClock
 import android.view.Surface
 import app.phantom.host.core.HostFormatHelpers
@@ -321,7 +322,12 @@ class PhantomHostSession(
         val conn = pending.connection
         val transportLabel = pending.transportLabel
         activeConnection.set(conn)
-        val defaults = defaultSessionSettings().copy(minBitrateBps = 1_000_000uL)
+        val isLan = transportLabel == "LAN"
+        val defaults = defaultSessionSettings().copy(
+            startBitrateBps = if (isLan) 12_000_000uL else 8_000_000uL,
+            minBitrateBps = if (isLan) 3_000_000uL else 1_500_000uL,
+            maxBitrateBps = if (isLan) 32_000_000uL else 20_000_000uL,
+        )
         val initialPolicy = thermalProvider()
         if (initialPolicy.shouldStop) {
             conn.close(0u, ByteArray(0))
@@ -382,6 +388,7 @@ class PhantomHostSession(
             val profileRef = AtomicReference("${enc.actualWidth}×${enc.actualHeight} @ ${enc.actualFps} fps (${enc.actualCodec.name})$audioLabel")
             onLog("Client connesso ($transportLabel) · ${profileRef.get()}")
 
+            val encRef = AtomicReference<VideoEncoder?>(enc)
             val clientActive = AtomicBoolean(true)
             val negotiatedOnce = AtomicBoolean(false)
 
@@ -393,6 +400,9 @@ class PhantomHostSession(
                         conn.sendDatagram(reply)
                     } catch (_: Throwable) {
                     }
+                }
+                if (phantomHost.wantsKeyframe(nowUs.toULong())) {
+                    encRef.get()?.requestKeyFrame()
                 }
                 if (!negotiatedOnce.get() && phantomHost.negotiated() != null) {
                     negotiatedOnce.set(true)
@@ -425,6 +435,10 @@ class PhantomHostSession(
 
             // Thread ricezione datagrammi dal client (Hello, ping, NACK, tocco, tastiera, appunti, controllo, Close)
             val recvThread = Thread({
+                try {
+                    Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
+                } catch (_: Throwable) {
+                }
                 while (running.get() && clientActive.get() && !conn.isClosed() && !phantomHost.isClosed()) {
                     try {
                         val dgram = conn.recvDatagram(2048u, 25uL)
@@ -479,7 +493,6 @@ class PhantomHostSession(
                 }
 
                 var appliedBitrate = startBps
-                val encRef = AtomicReference(enc)
                 val reconfigureRequested = AtomicBoolean(false)
                 val pendingSize = AtomicReference(curSrcW to curSrcH)
                 val statsLock = Any()
@@ -487,9 +500,10 @@ class PhantomHostSession(
                 var bytesInWindow = 0L
 
                 val controlThread = Thread({
-                    var lastCheckMs = SystemClock.elapsedRealtime()
-                    var lastRotCheckMs = lastCheckMs
-                    var winStartMs = lastCheckMs
+                    var lastBitrateCheckMs = SystemClock.elapsedRealtime()
+                    var lastStatsMs = lastBitrateCheckMs
+                    var lastRotCheckMs = lastBitrateCheckMs
+                    var winStartMs = lastBitrateCheckMs
                     while (running.get() && clientActive.get() && !conn.isClosed() && !phantomHost.isClosed()) {
                         val nowMs = SystemClock.elapsedRealtime()
                         val policy = thermalProvider()
@@ -517,17 +531,21 @@ class PhantomHostSession(
                             activeEnc?.requestKeyFrame()
                         }
 
-                        if (nowMs - lastCheckMs >= 500L) {
-                            lastCheckMs = nowMs
+                        if (nowMs - lastBitrateCheckMs >= 250L) {
+                            lastBitrateCheckMs = nowMs
                             val desired = ThermalGuard.cappedBitrate(
                                 phantomHost.targetBitrateBps().toLong(),
                                 policy,
                                 defaults.minBitrateBps.toLong(),
                             )
-                            if (appliedBitrate > 0 && abs(desired - appliedBitrate) * 100 > appliedBitrate * 8) {
+                            if (appliedBitrate > 0 && abs(desired - appliedBitrate) * 100 > appliedBitrate * 5) {
                                 activeEnc?.setBitrate(desired.toInt())
                                 appliedBitrate = desired
                             }
+                        }
+
+                        if (nowMs - lastStatsMs >= 500L) {
+                            lastStatsMs = nowMs
                             val elapsedS = ((nowMs - winStartMs).coerceAtLeast(1L)) / 1000.0
                             val fCount: Int
                             val bCount: Long
@@ -550,7 +568,7 @@ class PhantomHostSession(
                             )
                             winStartMs = nowMs
                         }
-                        Thread.sleep(50)
+                        Thread.sleep(25)
                     }
                 }, "phantom-host-ctrl")
                 controlThread.start()
@@ -574,7 +592,7 @@ class PhantomHostSession(
                         )
                         currentEncoder = enc
                         encRef.set(enc)
-                        profileRef.set("${enc.actualWidth}×${enc.actualHeight} @ ${enc.actualFps} fps (${enc.actualCodec.name})")
+                        profileRef.set("${enc.actualWidth}×${enc.actualHeight} @ ${enc.actualFps} fps (${enc.actualCodec.name})$audioLabel")
                         onLog("Rotazione display rilevata · ${profileRef.get()}")
                     }
                     firstPass = false

@@ -3,7 +3,9 @@ package app.phantom.host.stream
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.os.Build
 import android.os.Bundle
+import android.os.Process
 import android.os.SystemClock
 import android.view.Surface
 import app.phantom.host.core.CodecConfigCache
@@ -12,8 +14,8 @@ import uniffi.phantom_ffi.VideoCodec
 
 /**
  * Encoder hardware `MediaCodec` a superficie con adattamento automatico alle `VideoCapabilities`
- * reali del SoC (es. limite lato lungo 1920 px su Snapdragon 695) e fallback progressivo
- * (120 → 60 → 30 fps, HEVC → H.264, downscale risoluzione) per la sicurezza dell'hardware.
+ * reali del SoC (es. limite lato lungo 1920 px su Snapdragon 695), parametri a bassa latenza
+ * (priorità realtime, zero B-frame, I-frame distanziati) e fallback progressivo per la sicurezza.
  */
 class VideoEncoder private constructor(
     private val codec: MediaCodec,
@@ -49,11 +51,15 @@ class VideoEncoder private constructor(
         isActive: () -> Boolean,
         onFrame: (data: ByteArray, isKeyFrame: Boolean, captureTsUs: Long) -> Unit,
     ) {
+        try {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
+        } catch (_: Throwable) {
+        }
         val info = MediaCodec.BufferInfo()
         configCache.reset()
         while (isActive()) {
             val outIndex = try {
-                codec.dequeueOutputBuffer(info, 10_000L)
+                codec.dequeueOutputBuffer(info, 5_000L)
             } catch (_: Throwable) {
                 break
             }
@@ -104,10 +110,15 @@ class VideoEncoder private constructor(
     }
 
     companion object {
+        // I-frame periodici lunghi (10 s, stile scrcpy): Phantom usa già FEC XOR + NACK + keyframe
+        // on-demand, evitando i micro-lag e gli sprechi di banda dei keyframe ogni 2 secondi.
+        private const val KEYFRAME_INTERVAL_SEC = 10
+
         private data class Attempt(
             val codec: VideoCodec,
             val fps: Int,
             val setVbr: Boolean,
+            val lowLatencyHints: Boolean,
             val maxLongSideOverride: Int? = null,
         )
 
@@ -119,19 +130,22 @@ class VideoEncoder private constructor(
             initialBitrateBps: Int,
             onLog: (String) -> Unit,
         ): VideoEncoder {
-            val attempts = ArrayList<Attempt>(6)
+            val attempts = ArrayList<Attempt>(8)
             val firstCodec = if (preferHevc) VideoCodec.H265 else VideoCodec.H264
-            attempts.add(Attempt(firstCodec, requestedFps, setVbr = true))
+            attempts.add(Attempt(firstCodec, requestedFps, setVbr = true, lowLatencyHints = true))
             if (requestedFps > 60) {
-                attempts.add(Attempt(firstCodec, 60, setVbr = true))
+                attempts.add(Attempt(firstCodec, 60, setVbr = true, lowLatencyHints = true))
             }
+            // Se il driver rifiuta i flag low-latency su HEVC/H264, ritenta pulito con lo stesso codec
+            attempts.add(Attempt(firstCodec, minOf(requestedFps, 60), setVbr = true, lowLatencyHints = false))
             if (preferHevc) {
-                attempts.add(Attempt(VideoCodec.H264, minOf(requestedFps, 60), setVbr = true))
+                attempts.add(Attempt(VideoCodec.H264, minOf(requestedFps, 60), setVbr = true, lowLatencyHints = true))
+                attempts.add(Attempt(VideoCodec.H264, minOf(requestedFps, 60), setVbr = true, lowLatencyHints = false))
             }
-            // Fallback compatibile con encoder limitati (es. Qualcomm 1080p max o emulatori)
-            attempts.add(Attempt(VideoCodec.H264, 60, setVbr = false, maxLongSideOverride = 1920))
-            attempts.add(Attempt(VideoCodec.H264, 30, setVbr = false, maxLongSideOverride = 1600))
-            attempts.add(Attempt(VideoCodec.H264, 30, setVbr = false, maxLongSideOverride = 1280))
+            // Fallback compatibili con encoder limitati (es. Qualcomm 1080p max o emulatori)
+            attempts.add(Attempt(VideoCodec.H264, 60, setVbr = false, lowLatencyHints = false, maxLongSideOverride = 1920))
+            attempts.add(Attempt(VideoCodec.H264, 30, setVbr = false, lowLatencyHints = false, maxLongSideOverride = 1600))
+            attempts.add(Attempt(VideoCodec.H264, 30, setVbr = false, lowLatencyHints = false, maxLongSideOverride = 1280))
 
             var lastError: Throwable? = null
             for (attempt in attempts) {
@@ -143,6 +157,7 @@ class VideoEncoder private constructor(
                         codecType = attempt.codec,
                         bitrateBps = initialBitrateBps,
                         setVbr = attempt.setVbr,
+                        lowLatencyHints = attempt.lowLatencyHints,
                         maxLongSideOverride = attempt.maxLongSideOverride,
                         onLog = onLog,
                     )
@@ -162,6 +177,7 @@ class VideoEncoder private constructor(
             codecType: VideoCodec,
             bitrateBps: Int,
             setVbr: Boolean,
+            lowLatencyHints: Boolean,
             maxLongSideOverride: Int?,
             onLog: (String) -> Unit,
         ): VideoEncoder {
@@ -200,10 +216,19 @@ class VideoEncoder private constructor(
                     setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                     setInteger(MediaFormat.KEY_BIT_RATE, clampedBitrate)
                     setInteger(MediaFormat.KEY_FRAME_RATE, actualFps)
-                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEYFRAME_INTERVAL_SEC)
                     setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
                     if (setVbr) {
                         setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+                    }
+                    if (lowLatencyHints) {
+                        setInteger(MediaFormat.KEY_PRIORITY, 0) // 0 = realtime
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            setInteger(MediaFormat.KEY_LATENCY, 1)
+                        }
                     }
                 }
 

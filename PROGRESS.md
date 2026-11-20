@@ -353,7 +353,13 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
   - Alla prima prova sul Redmi reale (schermo `1080×2400`, LAN + P2P `iroh` + QR/auth tutti subito verdi), `MediaCodec.configure` rifiutava `1088×2400` con `IllegalArgumentException` su tutti i tentativi perché l'encoder hardware Qualcomm SM6375 limita il lato lungo a 1920 px.
   - Aggiunti `HostFormatHelpers.fitWithinBounds` (con test JVM) e adattamento automatico a `MediaCodecInfo.VideoCapabilities` (risoluzione, macroblocchi, FPS e bitrate) + fallback progressivo 1920/1600/1280 in `VideoEncoder.kt`, più richiesta automatica di `RECORD_AUDIO` in modalità Standard su Android 10+ per l'audio di sistema.
 
+- **Verifica reale su Redmi Note 11 Pro 5G (Standard senza root)**: streaming video + **audio AAC-LC in tempo reale** confermati sull'hardware reale!
+- **Ottimizzazioni fluidità & nitidezza `v1.1.0` (locale, pronte per commit + release `v1.1.0`)**:
+  - `VideoEncoder.kt`: `KEY_I_FRAME_INTERVAL = 10`, flag realtime (`KEY_PRIORITY = 0`, `KEY_MAX_B_FRAMES = 0`, `KEY_LATENCY = 1` con fallback), `THREAD_PRIORITY_URGENT_DISPLAY` e polling output a 5 ms.
+  - `PhantomHostSession.kt`: bitrate LAN alzato (`12–32 Mbps`, min `3 Mbps`) e P2P 5G (`8–20 Mbps`, min `1.5 Mbps`), keyframe on-demand immediato su `recvThread` (0 ms di ritardo), adattamento bitrate ogni 250 ms (soglia 5%) e priorità `URGENT_DISPLAY`.
+  - `RemoteControlSurface.swift`: telemetria live nell'HUD espanso (`risoluzione · codec · Mbps · coda ms`); versioni bumpate a `1.1.0` su iOS e Android.
+
 ## Prossimo passo
 
-1. Committare, pushare su `origin/main` e creare/pushare il tag `v1.0.0` per pubblicare la release ufficiale GitHub con `Phantom.ipa` e `Phantom.apk`.
-2. Quando il Redmi Note 11 Pro 5G sarà pronto (Standard o Root), testare HEVC 1080p·120 fps, audio AAC-LC di sistema, `Schermo Off` fisico e Doze in 5G reale.
+1. Committare, pushare su `origin/main` e creare il tag `v1.1.0` per testare sul Redmi la nuova fluidità, nitidezza e i valori live di risoluzione/codec/Mbps nell'HUD espanso su iPhone.
+2. Quando il Redmi Note 11 Pro 5G avrà il root, verificare multi-touch/tastiera, audio Root Android 12+ (`RootAudioContext`), `Schermo Off` fisico e Doze in 5G reale.
