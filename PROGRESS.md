@@ -349,6 +349,10 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
   - `AudioStreamer.kt`: aggiunto `RootAudioContext` (`AttributionSource` ufficiale Android 12+ / API 31+) per la cattura audio di sistema `REMOTE_SUBMIX` in modalità Root su Android 12+ (Redmi Note 11 Pro 5G), mantenendo solo-video sicuro su Android < 12 (LDPlayer 9 / Android 9).
   - Workflow CI/Release: `iOS · Phantom` (`Phantom.ipa`) e `Android · Phantom APK` (`Phantom.apk`) pubblicano automaticamente le release ufficiali sui tag `v*`; ristretto `android-f0.yml` ai soli percorsi legacy (`android/module/**`, `android/probe/**`, `tools/**`); aggiornato `README.md`.
 
+- **Fix encoder Snapdragon 695 (Redmi Note 11 Pro 5G reale, modalità Standard)**:
+  - Alla prima prova sul Redmi reale (schermo `1080×2400`, LAN + P2P `iroh` + QR/auth tutti subito verdi), `MediaCodec.configure` rifiutava `1088×2400` con `IllegalArgumentException` su tutti i tentativi perché l'encoder hardware Qualcomm SM6375 limita il lato lungo a 1920 px.
+  - Aggiunti `HostFormatHelpers.fitWithinBounds` (con test JVM) e adattamento automatico a `MediaCodecInfo.VideoCapabilities` (risoluzione, macroblocchi, FPS e bitrate) + fallback progressivo 1920/1600/1280 in `VideoEncoder.kt`, più richiesta automatica di `RECORD_AUDIO` in modalità Standard su Android 10+ per l'audio di sistema.
+
 ## Prossimo passo
 
 1. Committare, pushare su `origin/main` e creare/pushare il tag `v1.0.0` per pubblicare la release ufficiale GitHub con `Phantom.ipa` e `Phantom.apk`.

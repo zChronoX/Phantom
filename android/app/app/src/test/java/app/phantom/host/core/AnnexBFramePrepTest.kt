@@ -32,6 +32,10 @@ class AnnexBFramePrepTest {
         assertEquals(1088 to 2400, HostFormatHelpers.scaledDimensions(1080, 2400, 1080))
         assertEquals(720 to 1600, HostFormatHelpers.scaledDimensions(1080, 2400, 720))
         assertEquals(1600 to 720, HostFormatHelpers.scaledDimensions(2400, 1080, 720))
+        // Snapdragon 695 / encoder limitati a 1920 sul lato lungo (display 20:9 = 1088×2400)
+        assertEquals(864 to 1920, HostFormatHelpers.fitWithinBounds(1088, 2400, 1920, 1920))
+        assertEquals(1920 to 864, HostFormatHelpers.fitWithinBounds(2400, 1088, 1920, 1920))
+        assertEquals(1088 to 1920, HostFormatHelpers.fitWithinBounds(1088, 1920, 1920, 1920))
         assertEquals("00ff10", HostFormatHelpers.toHex(byteArrayOf(0x00, 0xFF.toByte(), 0x10)))
     }
 

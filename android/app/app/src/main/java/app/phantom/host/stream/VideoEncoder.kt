@@ -7,11 +7,13 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.view.Surface
 import app.phantom.host.core.CodecConfigCache
+import app.phantom.host.core.HostFormatHelpers
 import uniffi.phantom_ffi.VideoCodec
 
 /**
- * Encoder hardware `MediaCodec` a superficie con parametri neutri e fallback automatico
- * (120 → 60 fps, HEVC → H.264) per la sicurezza dell'hardware.
+ * Encoder hardware `MediaCodec` a superficie con adattamento automatico alle `VideoCapabilities`
+ * reali del SoC (es. limite lato lungo 1920 px su Snapdragon 695) e fallback progressivo
+ * (120 → 60 → 30 fps, HEVC → H.264, downscale risoluzione) per la sicurezza dell'hardware.
  */
 class VideoEncoder private constructor(
     private val codec: MediaCodec,
@@ -102,7 +104,12 @@ class VideoEncoder private constructor(
     }
 
     companion object {
-        private data class Attempt(val codec: VideoCodec, val fps: Int, val setVbr: Boolean)
+        private data class Attempt(
+            val codec: VideoCodec,
+            val fps: Int,
+            val setVbr: Boolean,
+            val maxLongSideOverride: Int? = null,
+        )
 
         fun create(
             width: Int,
@@ -112,7 +119,7 @@ class VideoEncoder private constructor(
             initialBitrateBps: Int,
             onLog: (String) -> Unit,
         ): VideoEncoder {
-            val attempts = ArrayList<Attempt>(4)
+            val attempts = ArrayList<Attempt>(6)
             val firstCodec = if (preferHevc) VideoCodec.H265 else VideoCodec.H264
             attempts.add(Attempt(firstCodec, requestedFps, setVbr = true))
             if (requestedFps > 60) {
@@ -121,48 +128,85 @@ class VideoEncoder private constructor(
             if (preferHevc) {
                 attempts.add(Attempt(VideoCodec.H264, minOf(requestedFps, 60), setVbr = true))
             }
-            // Fallback finale ultra-compatibile (utile per emulatori come LDPlayer o encoder limitati)
-            attempts.add(Attempt(VideoCodec.H264, 30, setVbr = false))
+            // Fallback compatibile con encoder limitati (es. Qualcomm 1080p max o emulatori)
+            attempts.add(Attempt(VideoCodec.H264, 60, setVbr = false, maxLongSideOverride = 1920))
+            attempts.add(Attempt(VideoCodec.H264, 30, setVbr = false, maxLongSideOverride = 1600))
+            attempts.add(Attempt(VideoCodec.H264, 30, setVbr = false, maxLongSideOverride = 1280))
 
             var lastError: Throwable? = null
             for (attempt in attempts) {
                 try {
-                    return openConfigured(width, height, attempt.fps, attempt.codec, initialBitrateBps, attempt.setVbr)
+                    return openConfigured(
+                        reqWidth = width,
+                        reqHeight = height,
+                        reqFps = attempt.fps,
+                        codecType = attempt.codec,
+                        bitrateBps = initialBitrateBps,
+                        setVbr = attempt.setVbr,
+                        maxLongSideOverride = attempt.maxLongSideOverride,
+                        onLog = onLog,
+                    )
                 } catch (t: Throwable) {
                     lastError = t
-                    onLog("Fallback encoder dopo rifiuto ${attempt.codec.name}@${attempt.fps}fps: ${t.message}")
+                    val detail = t.message?.takeIf { it.isNotBlank() } ?: t.javaClass.simpleName
+                    onLog("Fallback encoder dopo rifiuto ${attempt.codec.name}@${attempt.fps}fps: $detail")
                 }
             }
-            throw IllegalStateException("Impossibile avviare MediaCodec: ${lastError?.message}", lastError)
+            throw IllegalStateException("Impossibile avviare MediaCodec: ${lastError?.javaClass?.simpleName}: ${lastError?.message}", lastError)
         }
 
         private fun openConfigured(
-            width: Int,
-            height: Int,
-            fps: Int,
+            reqWidth: Int,
+            reqHeight: Int,
+            reqFps: Int,
             codecType: VideoCodec,
             bitrateBps: Int,
             setVbr: Boolean,
+            maxLongSideOverride: Int?,
+            onLog: (String) -> Unit,
         ): VideoEncoder {
             val mime = if (codecType == VideoCodec.H265) {
                 MediaFormat.MIMETYPE_VIDEO_HEVC
             } else {
                 MediaFormat.MIMETYPE_VIDEO_AVC
             }
-            val format = MediaFormat.createVideoFormat(mime, width, height).apply {
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                setInteger(MediaFormat.KEY_BIT_RATE, bitrateBps.coerceAtLeast(500_000))
-                setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-                setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
-                if (setVbr) {
-                    setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
-                }
-            }
 
             val mc = MediaCodec.createEncoderByType(mime)
             var surface: Surface? = null
             try {
+                var baseW = reqWidth
+                var baseH = reqHeight
+                if (maxLongSideOverride != null && maxOf(baseW, baseH) > maxLongSideOverride) {
+                    val (fw, fh) = HostFormatHelpers.fitWithinBounds(baseW, baseH, maxLongSideOverride, maxLongSideOverride)
+                    baseW = fw
+                    baseH = fh
+                }
+
+                val videoCaps = try {
+                    mc.codecInfo.getCapabilitiesForType(mime).videoCapabilities
+                } catch (_: Throwable) {
+                    null
+                }
+
+                val (actualW, actualH) = fitSizeToCapabilities(baseW, baseH, videoCaps)
+                if (actualW != reqWidth || actualH != reqHeight) {
+                    onLog("Risoluzione adattata all'encoder ${codecType.name}: ${reqWidth}×${reqHeight} → ${actualW}×${actualH}")
+                }
+
+                val actualFps = clampFpsToCapabilities(actualW, actualH, reqFps, videoCaps)
+                val clampedBitrate = clampBitrateToCapabilities(bitrateBps, videoCaps)
+
+                val format = MediaFormat.createVideoFormat(mime, actualW, actualH).apply {
+                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                    setInteger(MediaFormat.KEY_BIT_RATE, clampedBitrate)
+                    setInteger(MediaFormat.KEY_FRAME_RATE, actualFps)
+                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+                    setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
+                    if (setVbr) {
+                        setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+                    }
+                }
+
                 mc.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 surface = mc.createInputSurface()
                 mc.start()
@@ -170,9 +214,9 @@ class VideoEncoder private constructor(
                     codec = mc,
                     inputSurface = surface,
                     actualCodec = codecType,
-                    actualFps = fps,
-                    actualWidth = width,
-                    actualHeight = height,
+                    actualFps = actualFps,
+                    actualWidth = actualW,
+                    actualHeight = actualH,
                 )
             } catch (t: Throwable) {
                 try {
@@ -184,6 +228,60 @@ class VideoEncoder private constructor(
                 } catch (_: Throwable) {
                 }
                 throw t
+            }
+        }
+
+        private fun fitSizeToCapabilities(
+            width: Int,
+            height: Int,
+            caps: MediaCodecInfo.VideoCapabilities?,
+        ): Pair<Int, Int> {
+            if (caps == null) {
+                return HostFormatHelpers.align16(width) to HostFormatHelpers.align16(height)
+            }
+            val align = maxOf(16, caps.widthAlignment, caps.heightAlignment)
+            val maxW = caps.supportedWidths.upper
+            val maxH = caps.supportedHeights.upper
+            var (w, h) = HostFormatHelpers.fitWithinBounds(width, height, maxW, maxH, align)
+
+            // Alcuni encoder (es. Qualcomm Snapdragon 695) limitano i macroblocchi totali (W×H)
+            // oltre ai singoli lati: scala progressivamente finché `isSizeSupported` è vero.
+            var steps = 0
+            while (!caps.isSizeSupported(w, h) && minOf(w, h) > 320 && steps < 10) {
+                w = HostFormatHelpers.alignDown((w * 0.9).toInt(), align).coerceAtLeast(caps.supportedWidths.lower)
+                h = HostFormatHelpers.alignDown((h * 0.9).toInt(), align).coerceAtLeast(caps.supportedHeights.lower)
+                steps++
+            }
+            return w to h
+        }
+
+        private fun clampFpsToCapabilities(
+            width: Int,
+            height: Int,
+            requestedFps: Int,
+            caps: MediaCodecInfo.VideoCapabilities?,
+        ): Int {
+            if (caps == null) return requestedFps
+            return try {
+                val range = caps.getSupportedFrameRatesFor(width, height)
+                val maxSupported = range.upper.toInt().coerceAtLeast(15)
+                requestedFps.coerceAtMost(maxSupported).coerceAtLeast(15)
+            } catch (_: Throwable) {
+                requestedFps
+            }
+        }
+
+        private fun clampBitrateToCapabilities(
+            bitrateBps: Int,
+            caps: MediaCodecInfo.VideoCapabilities?,
+        ): Int {
+            val safe = bitrateBps.coerceAtLeast(500_000)
+            if (caps == null) return safe
+            return try {
+                val range = caps.bitrateRange
+                safe.coerceIn(range.lower.coerceAtLeast(500_000), range.upper.coerceAtLeast(500_000))
+            } catch (_: Throwable) {
+                safe
             }
         }
     }

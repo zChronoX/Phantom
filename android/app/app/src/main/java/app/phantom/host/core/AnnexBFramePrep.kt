@@ -47,6 +47,30 @@ object HostFormatHelpers {
         return (((clamped + 8) / 16) * 16).coerceAtLeast(16)
     }
 
+    fun alignDown(value: Int, alignment: Int = 16): Int {
+        val step = alignment.coerceAtLeast(2)
+        return ((value / step) * step).coerceAtLeast(step)
+    }
+
+    fun fitWithinBounds(
+        width: Int,
+        height: Int,
+        maxWidth: Int,
+        maxHeight: Int,
+        alignment: Int = 16,
+    ): Pair<Int, Int> {
+        val step = alignment.coerceAtLeast(2)
+        val capW = alignDown(maxWidth.coerceAtLeast(step), step)
+        val capH = alignDown(maxHeight.coerceAtLeast(step), step)
+        if (width <= 0 || height <= 0) {
+            return capW.coerceAtMost(1088) to capH.coerceAtMost(1920)
+        }
+        val scale = minOf(1.0, capW.toDouble() / width.toDouble(), capH.toDouble() / height.toDouble())
+        val w = alignDown((width * scale).toInt(), step).coerceAtMost(capW)
+        val h = alignDown((height * scale).toInt(), step).coerceAtMost(capH)
+        return w to h
+    }
+
     fun scaledDimensions(srcW: Int, srcH: Int, maxShortSide: Int): Pair<Int, Int> {
         if (srcW <= 0 || srcH <= 0 || maxShortSide <= 0) {
             return 1080 to 2400
