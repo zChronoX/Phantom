@@ -9,6 +9,6 @@ ios="$(tr -d '\r' < "$root/ios/project.yml" | sed -n 's/.*MARKETING_VERSION: "\(
 status=0
 [ "$android" = "$version" ] || { echo "::error::versionName Android $android diverso dal tag $tag"; status=1; }
 [ "$ios" = "$version" ] || { echo "::error::MARKETING_VERSION iOS $ios diverso dal tag $tag"; status=1; }
-"$root/tools/release/changelog-section.sh" "$version" "$root/CHANGELOG.md" > /dev/null || { echo "::error::manca la sezione [$version] in CHANGELOG.md"; status=1; }
+bash "$root/tools/release/changelog-section.sh" "$version" "$root/CHANGELOG.md" > /dev/null || { echo "::error::manca la sezione [$version] in CHANGELOG.md"; status=1; }
 [ "$status" -eq 0 ] && echo "Versione $version coerente (Android, iOS, CHANGELOG)"
 exit "$status"

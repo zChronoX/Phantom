@@ -446,6 +446,9 @@ pub struct HostReport {
     pub keyframes: u32,
     /// Stato termico: 0 normale, 1 tiepido, 2 caldo, 3 critico.
     pub thermal_level: u8,
+    /// Frame saltati alla sorgente perché la coda di invio era troppo piena (cumulativo). Campo aggiunto in coda:
+    /// un rapporto senza vale 0.
+    pub frames_skipped: u32,
 }
 
 /// Pacchetto audio codificato a bassa latenza.
@@ -746,6 +749,7 @@ impl Message<'_> {
                 put_u32(out, r.send_errors);
                 put_u32(out, r.keyframes);
                 out.push(r.thermal_level);
+                put_u32(out, r.frames_skipped);
             }
         }
         if out.len() - start > MAX_DATAGRAM {
@@ -949,8 +953,13 @@ pub fn decode(buf: &[u8]) -> Result<(Header, Message<'_>), DecodeError> {
             send_errors: r.u32()?,
             keyframes: r.u32()?,
             thermal_level: r.u8()?,
+            // campi aggiunti dopo la prima versione: assenti = 0; eventuali campi futuri si ignorano
+            frames_skipped: if r.done() { 0 } else { r.u32()? },
         }),
     };
+    if matches!(msg, Message::HostReport(_)) && !r.done() {
+        let _ = r.rest();
+    }
     // Dopo un messaggio a lunghezza fissa non devono restare byte (tranne il video, che ha già letto il suo payload).
     if !r.done() {
         let _ = r.rest();
@@ -981,6 +990,26 @@ mod tests {
         let (h2, m2) = decode(&bytes).expect("decodifica");
         assert_eq!(h2, hdr);
         assert_eq!(&m2, m);
+    }
+
+    /// Il rapporto dell'host resta leggibile tra versioni diverse: senza il campo aggiunto vale 0, con campi futuri
+    /// in più si ignorano.
+    #[test]
+    fn host_report_is_forward_and_backward_compatible() {
+        let hdr = Header { conn_id: 1, seq: 2 };
+        let full = HostReport { encoder_fps_x10: 600, frames_skipped: 9, ..HostReport::default() };
+        let bytes = Message::HostReport(full).encode(hdr).expect("codifica");
+        let old = &bytes[..bytes.len() - 4];
+        match decode(old).expect("rapporto della 1.3.0") {
+            (_, Message::HostReport(r)) => assert_eq!((r.encoder_fps_x10, r.frames_skipped), (600, 0)),
+            other => panic!("atteso HostReport, arrivato {other:?}"),
+        }
+        let mut newer = bytes.clone();
+        newer.extend_from_slice(&[1, 2, 3]);
+        match decode(&newer).expect("rapporto di una versione futura") {
+            (_, Message::HostReport(r)) => assert_eq!(r.frames_skipped, 9),
+            other => panic!("atteso HostReport, arrivato {other:?}"),
+        }
     }
 
     #[test]
@@ -1103,6 +1132,7 @@ mod tests {
             send_errors: 1,
             keyframes: 7,
             thermal_level: 1,
+            frames_skipped: 42,
         }));
     }
 

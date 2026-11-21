@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use phantom_core::jitter::{AudioJitter, JitterConfig};
+use phantom_core::pacing::{FrameDecision, SourceDropper};
 use phantom_core::phantom_proto::{
     caps, AudioCodec as ProtoAudioCodec, Codec, ControlCommand as ProtoControlCommand, Finger, Header,
     HostReport as ProtoHostReport, Message, HEADER_LEN, MAX_DATAGRAM, MAX_FINGERS, MAX_VIDEO_PAYLOAD, VIDEO_HEADER_LEN,
@@ -468,6 +469,10 @@ pub struct FrameSendReport {
     pub queue_overflows: u32,
     /// Datagrammi rifiutati dal trasporto (connessione chiusa, troppo grandi, datagrammi non supportati).
     pub send_errors: u32,
+    /// Il frame non è stato spedito: coda di invio troppo piena, o si aspetta il keyframe dopo uno svuotamento.
+    pub skipped: bool,
+    /// L'encoder deve produrre un keyframe adesso (`requestSyncFrame`).
+    pub request_keyframe: bool,
 }
 
 /// Contatori dell'host.
@@ -520,6 +525,8 @@ pub struct HostReportInfo {
     pub keyframes: u32,
     /// Stato termico: 0 normale, 1 tiepido, 2 caldo, 3 critico.
     pub thermal_level: u8,
+    /// Frame saltati alla sorgente perché la coda di invio era troppo piena (cumulativo).
+    pub frames_skipped: u32,
 }
 
 impl From<HostReportInfo> for ProtoHostReport {
@@ -536,6 +543,7 @@ impl From<HostReportInfo> for ProtoHostReport {
             send_errors: r.send_errors,
             keyframes: r.keyframes,
             thermal_level: r.thermal_level,
+            frames_skipped: r.frames_skipped,
         }
     }
 }
@@ -554,6 +562,7 @@ impl From<ProtoHostReport> for HostReportInfo {
             send_errors: r.send_errors,
             keyframes: r.keyframes,
             thermal_level: r.thermal_level,
+            frames_skipped: r.frames_skipped,
         }
     }
 }
@@ -590,6 +599,7 @@ pub struct ClientCounters {
 struct HostInner {
     host: Host,
     next_frame_id: u32,
+    dropper: SourceDropper,
 }
 
 /// Lato host (Android): riceve ping, ritrasmissioni, richieste di keyframe e tocco dal client; spedisce video.
@@ -603,7 +613,13 @@ impl PhantomHost {
     /// Crea l'host di una sessione.
     #[uniffi::constructor]
     pub fn new(settings: SessionSettings) -> Arc<Self> {
-        Arc::new(PhantomHost { inner: Mutex::new(HostInner { host: Host::new(settings.into()), next_frame_id: 0 }) })
+        Arc::new(PhantomHost {
+            inner: Mutex::new(HostInner {
+                host: Host::new(settings.into()),
+                next_frame_id: 0,
+                dropper: SourceDropper::new(),
+            }),
+        })
     }
 
     /// Crea l'host con token di accoppiamento opzionale (vuoto = disabilitato) e flag audio.
@@ -612,7 +628,9 @@ impl PhantomHost {
         let mut cfg: SessionConfig = settings.into();
         cfg.auth_token = parse_optional_auth_token(&auth_token);
         cfg.audio_enabled = audio_enabled;
-        Arc::new(PhantomHost { inner: Mutex::new(HostInner { host: Host::new(cfg), next_frame_id: 0 }) })
+        Arc::new(PhantomHost {
+            inner: Mutex::new(HostInner { host: Host::new(cfg), next_frame_id: 0, dropper: SourceDropper::new() }),
+        })
     }
 
     /// Elabora un datagramma arrivato dal client; `now_us` è l'ora locale dell'host. Restituisce i datagrammi da
@@ -639,9 +657,11 @@ impl PhantomHost {
     /// Frammenta un frame codificato e lo spedisce direttamente su `connection`, in una sola chiamata dall'app.
     ///
     /// Equivale a [`PhantomHost::send_frame`] più un `send_datagram` per ogni frammento, ma senza far passare ogni
-    /// pacchetto attraverso JNA/Swift (a 1080p sono migliaia di chiamate e copie al secondo). Se la coda di invio
-    /// di QUIC è piena e spedire scarta datagrammi più vecchi, il frame precedente arriverà rotto: l'host chiede
-    /// subito un keyframe (con la solita distanza minima) invece di aspettare che se ne accorga il client.
+    /// pacchetto attraverso JNA/Swift (a 1080p sono migliaia di chiamate e copie al secondo).
+    ///
+    /// Se la coda di invio del trasporto contiene già più di ~250 ms di video il frame **non viene spedito**
+    /// (`skipped`): la coda si svuota, poi si chiede un solo keyframe (`request_keyframe`) e si riparte da quello.
+    /// Vedi `phantom_core::pacing`.
     pub fn send_frame_via(
         &self,
         connection: Arc<QuicConnection>,
@@ -649,8 +669,30 @@ impl PhantomHost {
         capture_ts_us: u64,
         data: Vec<u8>,
     ) -> FrameSendReport {
+        let mut report = FrameSendReport {
+            datagrams: 0,
+            bytes: 0,
+            queue_overflows: 0,
+            send_errors: 0,
+            skipped: false,
+            request_keyframe: false,
+        };
+        let queued = SEND_BUFFER_BYTES.saturating_sub(connection.send_buffer_space());
+        {
+            let mut g = lock(&self.inner);
+            let target = g.host.target_bitrate_bps();
+            let limit = g.dropper.limit_bytes(target, SEND_BUFFER_BYTES * 4 / 5);
+            let outcome = g.dropper.decide(queued, limit, key);
+            if outcome.request_keyframe {
+                g.host.request_keyframe();
+            }
+            if outcome.decision == FrameDecision::Skip {
+                report.skipped = true;
+                report.request_keyframe = g.host.wants_keyframe(capture_ts_us);
+                return report;
+            }
+        }
         let datagrams = self.send_frame(key, capture_ts_us, data);
-        let mut report = FrameSendReport { datagrams: 0, bytes: 0, queue_overflows: 0, send_errors: 0 };
         for d in &datagrams {
             report.datagrams += 1;
             report.bytes += d.len() as u64;
@@ -662,10 +704,21 @@ impl PhantomHost {
                 report.send_errors += 1;
             }
         }
-        if report.queue_overflows > 0 || report.send_errors > 0 {
-            lock(&self.inner).host.request_keyframe();
+        let mut g = lock(&self.inner);
+        if key {
+            g.dropper.on_keyframe_sent(report.bytes as usize);
         }
+        if report.queue_overflows > 0 {
+            // il frame precedente arriverà rotto: si svuota e si riparte da un keyframe (non uno per pacchetto)
+            g.dropper.on_queue_overflow();
+        }
+        report.request_keyframe = g.host.wants_keyframe(capture_ts_us);
         report
+    }
+
+    /// Frame saltati finora dallo scarto alla sorgente (coda di invio troppo piena).
+    pub fn frames_skipped(&self) -> u64 {
+        lock(&self.inner).dropper.skipped()
     }
 
     /// Chiede un keyframe dal lato host (vale la distanza minima tra keyframe): lo si legge poi da

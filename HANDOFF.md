@@ -185,39 +185,20 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-**v1.3.0** (la v1.2.1 audio è nel commit `b948eda`, taggata `v1.2.1`). Scelte dell'utente: controllo senza root con
-**Shizuku + Accessibilità** come ripiego; legacy **archiviata su branch** `archive/legacy-f0`.
+**v1.3.1** (la v1.3.0 è nel commit `ddf5c78`). Dalla telemetria del Redmi in Shizuku:
+- video a **488×1088**: l'encoder dichiara limiti «orizzontali» (1920×1088) e il codice li applicava alla lettera a uno
+  schermo verticale. Ora `VideoEncoder.fitSizeToCapabilities` ragiona per lato lungo/corto e accetta la misura
+  ruotata (`isSizeSupported(w,h) || isSizeSupported(h,w)`, fps interrogati sulla misura ruotata); in fondo ai tentativi
+  c'è un ripiego `strictOrientation` con i limiti presi alla lettera, se l'encoder rifiutasse le misure ruotate.
+- **tempesta di keyframe** in P2P (481 keyframe, RTT 1355 ms, coda host 489 KB): ogni pacchetto buttato chiedeva un
+  keyframe. Nuovo `phantom_core::pacing::SourceDropper` (4 test): oltre ~250 ms di coda il frame si salta, a coda
+  svuotata (≤ ¼ della soglia) un solo keyframe; un pacchetto buttato avvia lo svuotamento invece del keyframe.
+  `FrameSendReport.skipped/request_keyframe`, `PhantomHost.frames_skipped`, `HostReport.frames_skipped` (campo in coda,
+  decodifica tollerante: assente = 0, campi futuri ignorati; 1 test).
+- **bitrate** a 33 Mbit/s per 488×1088: tetto `HostFormatHelpers.maxUsefulBitrate` (0,15 bpp HEVC, 0,22 H.264).
+  P2P: avvio 6 Mbit/s, minimo 0,6 (era 1,5).
+- HUD iOS: «saltati». `check-version.sh` chiama `changelog-section.sh` con `bash` (su Windows i file perdono il bit
+  di esecuzione e la CI dei tag sarebbe fallita). Versione `1.3.1`, sezione in `CHANGELOG.md`.
 
-- **Telemetria**: nuovo messaggio `HostReport` (kind 15, cap `HOST_REPORT`) host → client ogni secondo: fps e kbps
-  reali dell'encoder, obiettivo, risoluzione, tempo di codifica, coda di invio, pacchetti scartati/errori, keyframe
-  (conteggiati dal core), stato termico. FFI `HostReportInfo`, `PhantomHost.host_report`, `PhantomClient.host_report`,
-  `HostCounters.keyframes_sent`. iOS: HUD espanso con 4 righe (video, latenza p50/p95 + codifica + RTT + coda, rete,
-  audio + termico), contatori audio dal buffer anti-jitter e frame scartati dal decoder.
-- **Tasti di sistema**: `ControlCommand` 4–12 (Back, Home, Recents, Notifications, QuickSettings, Power, VolumeUp,
-  VolumeDown, Screenshot), cap `SYSTEM_KEYS`; il worker Root/Shizuku li esegue con keycode o `cmd statusbar`; in
-  Standard tramite Accessibilità (volume con `AudioManager`). iOS: pulsanti Notifiche/Screenshot/Blocca e uso dei
-  comandi quando l'host li supporta (altrimenti le vecchie sequenze HID).
-- **Shizuku**: `CaptureMode.SHIZUKU`, `ShizukuLauncher` (stato, permesso, `newProcess` per riflessione),
-  `HostForegroundService.startPrivilegedMode` comune a Root e Shizuku; con Shizuku l'identità passa su stdin
-  (`IDENTITY|...`, `RootHostMain.IDENTITY_STDIN`) perché l'utente `shell` non legge i file privati. Manifest:
-  `ShizukuProvider`. UI: segmento Root/Shizuku/Standard + riga di stato con azione (concedi/apri Shizuku).
-- **Accessibilità**: `PhantomAccessibilityService` + `GestureTracker` (gesti completi al rilascio, pinch a 2 dita,
-  campionamento) + testo nel campo con il fuoco; riga di stato nella UI che apre le impostazioni.
-- **Qualità adattiva**: `AdaptiveQuality` (bit per pixel; giù sotto 0,035 per 3 s, su sopra 0,08 per 8 s; gradini
-  profilo → 720p60 → 540p30), riconfigurazione con lo stesso percorso della rotazione. **Intra-refresh** opzionale
-  (interruttore, `KEY_INTRA_REFRESH_PERIOD` = fps, ripiego automatico; passato al worker con `-Dphantom.intraRefresh`).
-- **Audio**: `JitterPoll.playback_rate` (±0,5%, proporzionale allo scarto medio) applicato con `synchronizer.rate` e
-  `audioTimePitchAlgorithm = .timeDomain`; soglia di eccesso portata a 200 ms per 3 s.
-- **Release**: `CHANGELOG.md`, `tools/release/changelog-section.sh` e `check-version.sh` usati dalle due pipeline
-  (controllo del tag all'inizio, note dal changelog), `tools/release/create-keystore.ps1` (Docker), esportazione log
-  dall'app (Diagnostica → Esporta log; log interno portato a 300 righe).
-- **Pulizia**: `rust-version` 1.91 (allineato al job MSRV della CI) e fix `is_multiple_of` suggeriti da clippy,
-  `MainActivity` con `ActionRow` riusato per Doze/Shizuku/Accessibilità, `tools/archive-legacy.ps1` (branch + `git rm`
-  di modulo Magisk, probe, strumenti scrcpy, workflow F0, doc F0), README con tabella delle modalità e processo di
-  release. I banchi di prova F0 dell'app iOS restano (Diagnostica): toglierli richiede di compilare Swift.
-- Versione `1.3.0` su Android e iOS.
-
-Verifiche (container Linux, Rust 1.97): `cargo test --workspace --release` → 22 blocchi ok; `fmt`, `clippy -D
-warnings` e `cargo doc -D warnings` puliti; binding Kotlin/Swift rigenerati; **tutta** l'app Kotlin compilata con
-`kotlinc 2.0.21` contro `android.jar` API 34 + JNA + stub di Shizuku e ZXing; 28 test JVM ok con stub JUnit.
-Non verificati: Gradle/APK, Swift (CI macOS), prove sul telefono.
+Verifiche: `cargo test --workspace --release` 22 blocchi ok, `fmt`/`clippy`/`doc` puliti, app Kotlin compilata con
+`kotlinc`, 29 test JVM ok. Non verificati: Gradle, Swift, telefono.

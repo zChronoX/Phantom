@@ -658,6 +658,10 @@ struct RemoteSessionView: View {
             if h.queueOverflows > 0 || h.sendErrors > 0 {
                 net.append("scartati \(h.queueOverflows + h.sendErrors)")
             }
+            if h.framesSkipped > 0 {
+                // frame non spediti per svuotare la coda: la rete non reggeva il bitrate
+                net.append("saltati \(h.framesSkipped)")
+            }
             net.append("keyframe \(h.keyframes)")
         } else {
             net.append("richieste keyframe \(m.keyframeRequests)")

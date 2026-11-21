@@ -334,8 +334,10 @@ class PhantomHostSession(
         activeConnection.set(conn)
         val isLan = transportLabel == "LAN"
         val defaults = defaultSessionSettings().copy(
-            startBitrateBps = if (isLan) 12_000_000uL else 8_000_000uL,
-            minBitrateBps = if (isLan) 3_000_000uL else 1_500_000uL,
+            startBitrateBps = if (isLan) 12_000_000uL else 6_000_000uL,
+            // In P2P (5G, relay) la banda può essere molto bassa: meglio un'immagine più piccola e fluida
+            // (la qualità adattiva scende a 720p/540p) che una coda di secondi.
+            minBitrateBps = if (isLan) 3_000_000uL else 600_000uL,
             maxBitrateBps = if (isLan) 32_000_000uL else 20_000_000uL,
         )
         val initialPolicy = thermalProvider()
@@ -413,6 +415,7 @@ class PhantomHostSession(
             // Contatori dei problemi di rete: prima ogni errore di invio finiva in un `catch {}` vuoto.
             val sendErrors = AtomicLong(0)
             val queueOverflows = AtomicLong(0)
+            val framesSkipped = AtomicLong(0)
 
             fun sendCounted(dgram: ByteArray) {
                 try {
@@ -575,11 +578,16 @@ class PhantomHostSession(
 
                         if (nowMs - lastBitrateCheckMs >= 250L) {
                             lastBitrateCheckMs = nowMs
+                            // Oltre ~0,15 bit per pixel l'HEVC non migliora più a vista: bit in più servono solo a riempire
+                            // il Wi-Fi (a 488×1088 si arrivava a 33 Mbit/s, sei volte il necessario).
+                            val usefulMax = activeEnc?.let {
+                                HostFormatHelpers.maxUsefulBitrate(it.actualWidth, it.actualHeight, it.actualFps, it.actualCodec == uniffi.phantom_ffi.VideoCodec.H265)
+                            } ?: Long.MAX_VALUE
                             val desired = ThermalGuard.cappedBitrate(
                                 phantomHost.targetBitrateBps().toLong(),
                                 policy,
                                 defaults.minBitrateBps.toLong(),
-                            )
+                            ).coerceAtMost(usefulMax).coerceAtLeast(defaults.minBitrateBps.toLong())
                             if (appliedBitrate > 0 && abs(desired - appliedBitrate) * 100 > appliedBitrate * 5) {
                                 activeEnc?.setBitrate(desired.toInt())
                                 appliedBitrate = desired
@@ -661,6 +669,7 @@ class PhantomHostSession(
                                 sendErrors = sendErrors.get().coerceIn(0L, UInt.MAX_VALUE.toLong()).toUInt(),
                                 keyframes = 0u,
                                 thermalLevel = thermal.toUByte(),
+                                framesSkipped = framesSkipped.get().coerceIn(0L, UInt.MAX_VALUE.toLong()).toUInt(),
                             )
                             phantomHost.hostReport(info)?.let { sendCounted(it) }
                         }
@@ -744,15 +753,18 @@ class PhantomHostSession(
                             }
                         }
                         // Frammentazione e invio in una sola chiamata Rust: niente più un passaggio JNA per pacchetto.
+                        // Se la coda di invio è troppo piena il core salta il frame (si svuota e riparte da un solo
+                        // keyframe) invece di accumulare secondi di ritardo.
                         val report = phantomHost.sendFrameVia(conn, isKey, captureTsUs.toULong(), frameBytes)
+                        if (report.skipped) {
+                            framesSkipped.incrementAndGet()
+                        }
                         if (report.queueOverflows > 0u || report.sendErrors > 0u) {
                             queueOverflows.addAndGet(report.queueOverflows.toLong())
                             sendErrors.addAndGet(report.sendErrors.toLong())
-                            // Il core ha già chiesto un keyframe (il frame precedente arriverà rotto): lo si
-                            // passa subito all'encoder invece di aspettare il giro del thread di controllo.
-                            if (phantomHost.wantsKeyframe((SystemClock.elapsedRealtimeNanos() / 1_000L).toULong())) {
-                                encRef.get()?.requestKeyFrame()
-                            }
+                        }
+                        if (report.requestKeyframe) {
+                            encRef.get()?.requestKeyFrame()
                         }
                     }
 

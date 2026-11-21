@@ -61,6 +61,18 @@ class AnnexBFramePrepTest {
     }
 
     @Test
+    fun usefulBitrateScalesWithPixels() {
+        // 864×1920 a 60 fps in HEVC: ~15 Mbit/s bastano
+        assertEquals(14_929_920L, HostFormatHelpers.maxUsefulBitrate(864, 1920, 60, hevc = true))
+        // 488×1088: ~4,8 Mbit/s (prima si arrivava a 33)
+        assertTrue(HostFormatHelpers.maxUsefulBitrate(488, 1088, 60, hevc = true) < 5_000_000L)
+        // H.264 ha bisogno di più bit
+        assertTrue(HostFormatHelpers.maxUsefulBitrate(864, 1920, 60, hevc = false) > 20_000_000L)
+        // mai sotto 1 Mbit/s
+        assertEquals(1_000_000L, HostFormatHelpers.maxUsefulBitrate(100, 100, 30, hevc = true))
+    }
+
+    @Test
     fun realisticFpsFollowsDeclaredPerformance() {
         // SoC che dichiara solo 60 fps a questa risoluzione: 120 → 60
         assertEquals(60, HostFormatHelpers.realisticFps(120) { fps -> fps <= 60 })

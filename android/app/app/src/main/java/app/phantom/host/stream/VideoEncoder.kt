@@ -125,6 +125,8 @@ class VideoEncoder private constructor(
             val lowLatencyHints: Boolean,
             val maxLongSideOverride: Int? = null,
             val intraRefresh: Boolean = false,
+            /** Limiti dell'encoder presi alla lettera (orizzontali): ultima spiaggia se la misura ruotata è rifiutata. */
+            val strictOrientation: Boolean = false,
         )
 
         fun create(
@@ -156,6 +158,11 @@ class VideoEncoder private constructor(
             attempts.add(Attempt(VideoCodec.H264, 60, setVbr = false, lowLatencyHints = false, maxLongSideOverride = 1920))
             attempts.add(Attempt(VideoCodec.H264, 30, setVbr = false, lowLatencyHints = false, maxLongSideOverride = 1600))
             attempts.add(Attempt(VideoCodec.H264, 30, setVbr = false, lowLatencyHints = false, maxLongSideOverride = 1280))
+            // Ultima spiaggia: i limiti dichiarati presi alla lettera (risoluzione più bassa ma sicuramente accettata)
+            attempts.add(Attempt(firstCodec, minOf(requestedFps, 60), setVbr = true, lowLatencyHints = false, strictOrientation = true))
+            if (preferHevc) {
+                attempts.add(Attempt(VideoCodec.H264, minOf(requestedFps, 60), setVbr = true, lowLatencyHints = false, strictOrientation = true))
+            }
 
             var lastError: Throwable? = null
             for (attempt in attempts) {
@@ -170,6 +177,7 @@ class VideoEncoder private constructor(
                         lowLatencyHints = attempt.lowLatencyHints,
                         maxLongSideOverride = attempt.maxLongSideOverride,
                         intraRefresh = attempt.intraRefresh,
+                        strictOrientation = attempt.strictOrientation,
                         onLog = onLog,
                     )
                 } catch (t: Throwable) {
@@ -191,6 +199,7 @@ class VideoEncoder private constructor(
             lowLatencyHints: Boolean,
             maxLongSideOverride: Int?,
             intraRefresh: Boolean,
+            strictOrientation: Boolean,
             onLog: (String) -> Unit,
         ): VideoEncoder {
             val mime = if (codecType == VideoCodec.H265) {
@@ -208,7 +217,7 @@ class VideoEncoder private constructor(
                     null
                 }
 
-                val (actualW, actualH) = fitSizeToCapabilities(reqWidth, reqHeight, videoCaps, maxLongSideOverride)
+                val (actualW, actualH) = fitSizeToCapabilities(reqWidth, reqHeight, videoCaps, maxLongSideOverride, strictOrientation)
                 if (actualW != reqWidth || actualH != reqHeight) {
                     onLog("Risoluzione adattata all'encoder ${codecType.name}: ${reqWidth}×${reqHeight} → ${actualW}×${actualH}")
                 }
@@ -273,29 +282,44 @@ class VideoEncoder private constructor(
             height: Int,
             caps: MediaCodecInfo.VideoCapabilities?,
             maxLongSideOverride: Int?,
+            strictOrientation: Boolean = false,
         ): Pair<Int, Int> {
-            var maxW = Int.MAX_VALUE
-            var maxH = Int.MAX_VALUE
-            if (maxLongSideOverride != null) {
-                maxW = maxLongSideOverride
-                maxH = maxLongSideOverride
-            }
+            // I limiti dell'encoder sono dichiarati «in orizzontale» (es. 1920×1088 sullo Snapdragon 695): applicarli
+            // così a uno schermo verticale (1080×2400) limitava l'altezza a 1088 e dava un video di 488×1088.
+            // Si ragiona invece per lato lungo / lato corto, come fa scrcpy, e si accetta anche la misura ruotata.
+            var maxLong = maxLongSideOverride ?: Int.MAX_VALUE
+            var maxShort = maxLongSideOverride ?: Int.MAX_VALUE
             if (caps == null) {
-                return HostFormatHelpers.fitEncoderSize(width, height, maxW, maxH, alignment = 16)
+                val (w, h) = orient(width, height, maxLong, maxShort)
+                return HostFormatHelpers.fitEncoderSize(width, height, w, h, alignment = 16)
             }
-            // Allineamento a 8 (come scrcpy) salvo richieste più severe del codec: 1080×2400 resta 1080×2400
-            // invece di diventare 1088×2400 stirato.
             val align = maxOf(8, caps.widthAlignment, caps.heightAlignment)
-            maxW = minOf(maxW, caps.supportedWidths.upper)
-            maxH = minOf(maxH, caps.supportedHeights.upper)
+            val upperW = caps.supportedWidths.upper
+            val upperH = caps.supportedHeights.upper
+            if (strictOrientation) {
+                return HostFormatHelpers.fitEncoderSize(
+                    width,
+                    height,
+                    minOf(maxLong, upperW),
+                    minOf(maxLong, upperH),
+                    align,
+                ) { w, h -> safeSupported(caps, w, h) }
+            }
+            maxLong = minOf(maxLong, maxOf(upperW, upperH))
+            maxShort = minOf(maxShort, minOf(upperW, upperH))
+            val (maxW, maxH) = orient(width, height, maxLong, maxShort)
             return HostFormatHelpers.fitEncoderSize(width, height, maxW, maxH, align) { w, h ->
                 try {
-                    caps.isSizeSupported(w, h)
+                    caps.isSizeSupported(w, h) || caps.isSizeSupported(h, w)
                 } catch (_: Throwable) {
                     true
                 }
             }
         }
+
+        /** Limiti (larghezza, altezza) per una sorgente orientata come `width`×`height`. */
+        private fun orient(width: Int, height: Int, maxLong: Int, maxShort: Int): Pair<Int, Int> =
+            if (height > width) maxShort to maxLong else maxLong to maxShort
 
         private fun clampFpsToCapabilities(
             width: Int,
@@ -304,13 +328,24 @@ class VideoEncoder private constructor(
             caps: MediaCodecInfo.VideoCapabilities?,
         ): Int {
             if (caps == null) return requestedFps
+            // Le frequenze dichiarate valgono per le misure «in orizzontale»: per uno schermo verticale si interroga
+            // la misura ruotata, altrimenti la chiamata fallisce e si perde l'informazione.
+            val rotated = !safeSupported(caps, width, height) && safeSupported(caps, height, width)
+            val qw = if (rotated) height else width
+            val qh = if (rotated) width else height
             val declaredMax = try {
-                caps.getSupportedFrameRatesFor(width, height).upper.toInt().coerceAtLeast(15)
+                caps.getSupportedFrameRatesFor(qw, qh).upper.toInt().coerceAtLeast(15)
             } catch (_: Throwable) {
                 requestedFps
             }
             val capped = requestedFps.coerceAtMost(declaredMax).coerceAtLeast(15)
-            return HostFormatHelpers.realisticFps(capped) { fps -> coversPerformance(caps, width, height, fps) }
+            return HostFormatHelpers.realisticFps(capped) { fps -> coversPerformance(caps, qw, qh, fps) }
+        }
+
+        private fun safeSupported(caps: MediaCodecInfo.VideoCapabilities, w: Int, h: Int): Boolean = try {
+            caps.isSizeSupported(w, h)
+        } catch (_: Throwable) {
+            false
         }
 
         /**

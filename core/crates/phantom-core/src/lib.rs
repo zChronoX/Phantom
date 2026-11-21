@@ -6,6 +6,7 @@
 //! prove girano veloci e identiche su ogni piattaforma.
 
 pub mod jitter;
+pub mod pacing;
 pub mod rate;
 
 use std::collections::VecDeque;

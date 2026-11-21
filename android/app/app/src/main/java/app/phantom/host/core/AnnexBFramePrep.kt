@@ -161,6 +161,16 @@ object HostFormatHelpers {
         return nowElapsedUs - ageUs
     }
 
+    /**
+     * Bitrate oltre il quale la qualità non migliora più a vista: ~0,15 bit per pixel in HEVC, ~0,22 in H.264.
+     * Serve a non mandare 30 Mbit/s per un'immagine piccola, che riempiono il Wi-Fi senza alcun vantaggio.
+     */
+    fun maxUsefulBitrate(width: Int, height: Int, fps: Int, hevc: Boolean): Long {
+        val bpp = if (hevc) 0.15 else 0.22
+        val pixelsPerSecond = width.toLong() * height.toLong() * fps.coerceAtLeast(1)
+        return (pixelsPerSecond * bpp).toLong().coerceAtLeast(1_000_000L)
+    }
+
     fun toHex(bytes: ByteArray): String {
         val sb = StringBuilder(bytes.size * 2)
         for (b in bytes) {
