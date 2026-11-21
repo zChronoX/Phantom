@@ -38,6 +38,29 @@
                 android:value="Controllo remoto locale a bassa latenza via QUIC" />
         </service>
 
+        <!-- Controllo di ripiego in modalità Standard: gesti e tasti di sistema dall'iPhone -->
+        <service
+            android:name=".PhantomAccessibilityService"
+            android:exported="true"
+            android:label="@string/accessibility_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/phantom_accessibility" />
+        </service>
+
+        <!-- Shizuku: permette di avviare il worker con i permessi di ADB, senza root -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
         <service
             android:name=".PhantomTileService"
             android:exported="true"

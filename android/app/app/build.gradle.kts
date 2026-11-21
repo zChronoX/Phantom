@@ -12,7 +12,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = System.getenv("BUILD_NUMBER")?.toIntOrNull() ?: 1
-        versionName = "1.2.1"
+        versionName = "1.3.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -76,5 +76,8 @@ android {
 dependencies {
     implementation("net.java.dev.jna:jna:5.15.0@aar")
     implementation("com.google.zxing:core:3.5.3")
+    // Modalità Shizuku (controllo completo senza root). Versione bloccata: `newProcess` sparisce con l'API 14.
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
     testImplementation("junit:junit:4.13.2")
 }

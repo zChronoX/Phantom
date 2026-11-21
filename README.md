@@ -2,11 +2,27 @@
 
 Controllo remoto nativo di un telefono Android da iPhone: bassa latenza in rete locale (QUIC) e accesso 5G/4G ovunque senza VPN (`iroh` P2P), fino a 120 fps, con design monocromatico Liquid Glass Light/Dark.
 
-## Download rapido (v1.0.0)
+## Download rapido
 
-Dalla pagina **Releases** di GitHub:
+Dalla pagina **Releases** di GitHub (note di ogni versione in [CHANGELOG.md](CHANGELOG.md)):
 - **iPhone**: scarica `Phantom.ipa` e firmalo con Sideloadly (o AltStore/SideStore).
-- **Android**: scarica `Phantom.apk` (`arm64-v8a` + `x86_64`), avvia l'host in modalità **Root** (consigliata) o **Standard** (`MediaProjection`) e tocca **Collega iPhone · QR**.
+- **Android**: scarica `Phantom.apk` (`arm64-v8a` + `x86_64`), scegli la modalità e tocca **Collega iPhone · QR**.
+
+## Modalità dell'host Android
+
+| Modalità | Serve | Video e audio | Controllo dall'iPhone |
+| --- | --- | --- | --- |
+| **Root** | `su` (Magisk/KernelSU) | sì (audio Android 12+) | completo: multi-touch, tastiera, tasti di sistema, schermo spento |
+| **Shizuku** | app [Shizuku](https://shizuku.rikka.app/) avviata con il Debug wireless (Android 11+), nessun root | sì (audio Android 12+) | completo, come Root |
+| **Standard** | niente (permesso di cattura schermo) | sì (audio Android 10+) | con l'**Accessibilità** di Phantom attiva: tap, swipe, pinch, tasti di sistema e testo (i gesti partono quando si alza il dito); senza, solo visione |
+
+## Release
+
+1. Aggiornare la versione in `android/app/app/build.gradle.kts` (`versionName`), `ios/project.yml`
+   (`MARKETING_VERSION`) e aggiungere la sezione in `CHANGELOG.md`.
+2. Commit e push su `main`; quando la CI è verde: `git tag -a vX.Y.Z -m "..."` e `git push origin vX.Y.Z`.
+3. La CI controlla che tag e versioni coincidano, pubblica `Phantom.apk` e `Phantom.ipa` e usa la sezione del
+   changelog come note. Per firmare l'APK sempre con la stessa chiave: `tools/release/create-keystore.ps1` (una volta).
 
 ## Funzionalità principali
 
@@ -18,16 +34,17 @@ Dalla pagina **Releases** di GitHub:
 
 ```
 android/
-  app/        app host Android Kotlin leggera (Root on-demand + MediaProjection)
-  probe/      archivio fase 0: sonda C statica
-  module/     archivio fase 0: modulo SukiSU/KernelSU/Magisk con WebUI
+  app/        app host Android Kotlin leggera (Root, Shizuku, Standard + Accessibilità)
 core/         core Rust condiviso: protocollo, video, audio, QUIC LAN, P2P iroh, binding UniFFI
 ios/          app client iPhone Swift/SwiftUI (VideoToolbox + AVSampleBufferAudioRenderer)
-tools/        client di test per PC e utilità di build/preflight
+tools/        preflight, archivio legacy e script di release (tools/release/)
 docs/adr/     decisioni architetturali (ADR-001 … ADR-011)
 docs/design-system.md  identità visiva, logo e design system Liquid Glass (iOS + Android)
 dist/         pacchetti generati (non versionati)
 ```
+
+La parte legacy della Fase 0 (modulo Magisk, sonda C, strumenti scrcpy) è archiviata sul branch
+`archive/legacy-f0` (`tools/archive-legacy.ps1`).
 
 ## Dispositivi di riferimento
 

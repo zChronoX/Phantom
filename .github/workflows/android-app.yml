@@ -28,6 +28,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Su un tag la versione deve coincidere con Android, iOS e CHANGELOG.md: meglio fallire subito che pubblicare
+      # una release con il numero sbagliato.
+      - name: Controllo versione del tag
+        if: github.ref_type == 'tag'
+        run: bash tools/release/check-version.sh "${GITHUB_REF_NAME}"
+
       - name: Toolchain Rust e bersagli Android (arm64 + x86_64)
         run: |
           rustup show
@@ -117,9 +123,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF_NAME}"
+          bash tools/release/changelog-section.sh "$TAG" > "$RUNNER_TEMP/notes.md"
+          {
+            echo
+            echo "---"
+            echo "**Download:** \`Phantom.apk\` (Android, arm64-v8a + x86_64) e \`Phantom.ipa\` (iPhone, da firmare con Sideloadly)."
+          } >> "$RUNNER_TEMP/notes.md"
+          # Le due pipeline (Android e iOS) arrivano qui in parallelo: chi arriva prima crea la release, l'altra carica
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
             --title "Phantom $TAG" \
-            --notes "Release ufficiale di **Phantom $TAG**: controllo remoto Android → iPhone in LAN (QUIC) e 5G/4G (P2P integrato iroh senza VPN), UI monocromatica Liquid Glass Light/Dark, sicurezza con token 128-bit e QR 1-tap. Scarica \`Phantom.ipa\` (da firmare con Sideloadly) e \`Phantom.apk\` (arm64-v8a + x86_64)." \
+            --notes-file "$RUNNER_TEMP/notes.md" \
             || true
           gh release upload "$TAG" dist/Phantom.apk --clobber
 

@@ -3,11 +3,15 @@ package app.phantom.host.stream
 import android.os.Process
 import android.os.SystemClock
 import android.view.Surface
+import app.phantom.host.core.AdaptiveQuality
 import app.phantom.host.core.HostFormatHelpers
+import app.phantom.host.core.QualityStep
 import app.phantom.host.core.ThermalGuard
+import app.phantom.host.core.ThermalLevel
 import app.phantom.host.core.ThermalPolicy
 import uniffi.phantom_ffi.AudioCodec
 import uniffi.phantom_ffi.Capability
+import uniffi.phantom_ffi.HostReportInfo
 import uniffi.phantom_ffi.KeyInput
 import uniffi.phantom_ffi.P2pHostEndpoint
 import uniffi.phantom_ffi.PhantomHost
@@ -81,6 +85,11 @@ class PhantomHostSession(
     private val activeConnection = AtomicReference<QuicConnection?>(null)
     private val activeHost = AtomicReference<PhantomHost?>(null)
     private val activeP2pEndpoint = AtomicReference<P2pHostEndpoint?>(null)
+
+    private fun longOverShort(w: Int, h: Int): Double {
+        val short = minOf(w, h)
+        return if (short > 0) maxOf(w, h).toDouble() / short else 2.0
+    }
 
     private fun randomNonce16(): ByteArray {
         val out = ByteArray(16)
@@ -354,6 +363,12 @@ class PhantomHostSession(
 
             var (curSrcW, curSrcH) = sourceSizeProvider()
             onSourceSizeChanged(curSrcW, curSrcH)
+            // Qualità adattiva: si parte dal profilo scelto e si scende a 720p/540p se la rete concede pochi bit
+            val quality = AdaptiveQuality(
+                QualityStep(config.profile.maxShortSide, config.profile.fps),
+                aspect = longOverShort(curSrcW, curSrcH),
+            )
+            val currentStep = AtomicReference(quality.current)
             val (initEncW, initEncH) = HostFormatHelpers.scaledDimensions(curSrcW, curSrcH, config.profile.maxShortSide)
 
             var enc = VideoEncoder.create(
@@ -362,9 +377,11 @@ class PhantomHostSession(
                 requestedFps = config.profile.fps,
                 preferHevc = config.preferHevc,
                 initialBitrateBps = startBps.toInt(),
+                intraRefresh = config.intraRefresh,
                 onLog = onLog,
             )
             currentEncoder = enc
+            synchronized(quality) { quality.fpsCap = enc.actualFps }
 
             val maxDgram = conn.maxDatagramSize() ?: 1162u
             val nonce = randomNonce16()
@@ -513,6 +530,11 @@ class PhantomHostSession(
                 val statsLock = Any()
                 var framesInWindow = 0
                 var bytesInWindow = 0L
+                // Finestra del rapporto per la telemetria dell'iPhone (protetta da `statsLock`)
+                var reportFrames = 0
+                var reportBytes = 0L
+                var encodeLatencySumUs = 0L
+                var encodeLatencyCount = 0
 
                 val controlThread = Thread({
                     var lastBitrateCheckMs = SystemClock.elapsedRealtime()
@@ -520,6 +542,7 @@ class PhantomHostSession(
                     var lastRotCheckMs = lastBitrateCheckMs
                     var winStartMs = lastBitrateCheckMs
                     var lastNetLogMs = lastBitrateCheckMs
+                    var lastReportMs = lastBitrateCheckMs
                     var loggedOverflows = 0L
                     var loggedErrors = 0L
                     while (running.get() && clientActive.get() && !conn.isClosed() && !phantomHost.isClosed()) {
@@ -538,6 +561,7 @@ class PhantomHostSession(
                             val prev = pendingSize.get()
                             if (newW > 0 && newH > 0 && (newW != prev.first || newH != prev.second)) {
                                 pendingSize.set(newW to newH)
+                                synchronized(quality) { quality.setAspect(longOverShort(newW, newH)) }
                                 onSourceSizeChanged(newW, newH)
                                 reconfigureRequested.set(true)
                             }
@@ -559,6 +583,15 @@ class PhantomHostSession(
                             if (appliedBitrate > 0 && abs(desired - appliedBitrate) * 100 > appliedBitrate * 5) {
                                 activeEnc?.setBitrate(desired.toInt())
                                 appliedBitrate = desired
+                            }
+                            val step = synchronized(quality) { quality.update(nowMs, desired) }
+                            if (step != null) {
+                                currentStep.set(step)
+                                onLog(
+                                    "Qualità adattata alla rete: ${step.maxShortSide}p · ${step.fps} fps " +
+                                        "(bitrate obiettivo ${desired / 1_000_000} Mbps)",
+                                )
+                                reconfigureRequested.set(true)
                             }
                         }
 
@@ -585,6 +618,51 @@ class PhantomHostSession(
                                 ),
                             )
                             winStartMs = nowMs
+                        }
+
+                        // Rapporto per l'HUD dell'iPhone: fps e bitrate reali dell'encoder, tempo di codifica, coda di
+                        // invio, pacchetti scartati, keyframe e stato termico.
+                        if (nowMs - lastReportMs >= 1_000L) {
+                            val elapsedS = ((nowMs - lastReportMs).coerceAtLeast(1L)) / 1000.0
+                            lastReportMs = nowMs
+                            val rFrames: Int
+                            val rBytes: Long
+                            val latAvgUs: Long
+                            synchronized(statsLock) {
+                                rFrames = reportFrames
+                                rBytes = reportBytes
+                                latAvgUs = if (encodeLatencyCount > 0) encodeLatencySumUs / encodeLatencyCount else 0L
+                                reportFrames = 0
+                                reportBytes = 0L
+                                encodeLatencySumUs = 0L
+                                encodeLatencyCount = 0
+                            }
+                            val e = encRef.get()
+                            val queued = try {
+                                conn.queuedSendBytes().toLong()
+                            } catch (_: Throwable) {
+                                0L
+                            }
+                            val thermal = when (policy.level) {
+                                ThermalLevel.NORMAL -> 0
+                                ThermalLevel.WARM -> 1
+                                ThermalLevel.HOT -> 2
+                                ThermalLevel.CRITICAL -> 3
+                            }
+                            val info = HostReportInfo(
+                                encoderFps = rFrames / elapsedS,
+                                encodedKbps = (rBytes * 8 / 1000 / elapsedS).toLong().coerceIn(0L, UInt.MAX_VALUE.toLong()).toUInt(),
+                                targetKbps = (appliedBitrate / 1000).coerceIn(0L, UInt.MAX_VALUE.toLong()).toUInt(),
+                                width = (e?.actualWidth ?: 0).coerceIn(0, 65_535).toUShort(),
+                                height = (e?.actualHeight ?: 0).coerceIn(0, 65_535).toUShort(),
+                                encodeLatencyUs = latAvgUs.coerceIn(0L, UInt.MAX_VALUE.toLong()).toUInt(),
+                                sendQueueBytes = queued.coerceIn(0L, UInt.MAX_VALUE.toLong()).toUInt(),
+                                queueOverflows = queueOverflows.get().coerceIn(0L, UInt.MAX_VALUE.toLong()).toUInt(),
+                                sendErrors = sendErrors.get().coerceIn(0L, UInt.MAX_VALUE.toLong()).toUInt(),
+                                keyframes = 0u,
+                                thermalLevel = thermal.toUByte(),
+                            )
+                            phantomHost.hostReport(info)?.let { sendCounted(it) }
                         }
 
                         if (nowMs - lastNetLogMs >= 5_000L) {
@@ -615,22 +693,28 @@ class PhantomHostSession(
                 while (running.get() && clientActive.get() && !conn.isClosed() && !phantomHost.isClosed()) {
                     if (!firstPass) {
                         val (newW, newH) = pendingSize.get()
+                        val rotated = newW != curSrcW || newH != curSrcH
                         curSrcW = newW
                         curSrcH = newH
-                        val (encW, encH) = HostFormatHelpers.scaledDimensions(curSrcW, curSrcH, config.profile.maxShortSide)
+                        val step = currentStep.get()
+                        val (encW, encH) = HostFormatHelpers.scaledDimensions(curSrcW, curSrcH, step.maxShortSide)
                         val preferHevcNow = enc.actualCodec == uniffi.phantom_ffi.VideoCodec.H265
                         enc = VideoEncoder.create(
                             width = encW,
                             height = encH,
-                            requestedFps = config.profile.fps,
+                            requestedFps = step.fps,
                             preferHevc = preferHevcNow,
                             initialBitrateBps = appliedBitrate.toInt(),
+                            intraRefresh = config.intraRefresh,
                             onLog = onLog,
                         )
                         currentEncoder = enc
                         encRef.set(enc)
+                        synchronized(quality) {
+                            if (quality.index == 0) quality.fpsCap = enc.actualFps
+                        }
                         profileRef.set("${enc.actualWidth}×${enc.actualHeight} @ ${enc.actualFps} fps (${enc.actualCodec.name})$audioLabel")
-                        onLog("Rotazione display rilevata · ${profileRef.get()}")
+                        onLog((if (rotated) "Rotazione display rilevata · " else "Encoder riconfigurato · ") + profileRef.get())
                     }
                     firstPass = false
                     reconfigureRequested.set(false)
@@ -651,6 +735,13 @@ class PhantomHostSession(
                         synchronized(statsLock) {
                             framesInWindow++
                             bytesInWindow += frameBytes.size
+                            reportFrames++
+                            reportBytes += frameBytes.size
+                            val encodeUs = SystemClock.elapsedRealtimeNanos() / 1_000L - captureTsUs
+                            if (encodeUs in 0L..2_000_000L) {
+                                encodeLatencySumUs += encodeUs
+                                encodeLatencyCount++
+                            }
                         }
                         // Frammentazione e invio in una sola chiamata Rust: niente più un passaggio JNA per pacchetto.
                         val report = phantomHost.sendFrameVia(conn, isKey, captureTsUs.toULong(), frameBytes)

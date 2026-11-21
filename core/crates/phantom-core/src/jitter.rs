@@ -45,6 +45,10 @@ pub struct JitterConfig {
     pub discontinuity_us: u64,
     /// Pacchetti tenuti al massimo in memoria.
     pub max_pending: usize,
+    /// Scostamento massimo della velocità di riproduzione per correggere la deriva (0,005 = ±0,5%).
+    pub max_rate_offset: f64,
+    /// In quanti secondi si vorrebbe riassorbire lo scarto tra audio in coda e ritardo voluto.
+    pub rate_correction_s: f64,
 }
 
 impl JitterConfig {
@@ -59,10 +63,12 @@ impl JitterConfig {
             skip_margin_us: 12_000,
             late_threshold: 3,
             late_window_us: 3_000_000,
-            excess_us: 140_000,
-            excess_hold_us: 1_500_000,
+            excess_us: 200_000,
+            excess_hold_us: 3_000_000,
             discontinuity_us: 3_000_000,
             max_pending: 256,
+            max_rate_offset: 0.005,
+            rate_correction_s: 4.0,
         }
     }
 
@@ -85,13 +91,22 @@ pub struct ReadyAudio {
 }
 
 /// Risposta di [`AudioJitter::poll`].
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct JitterPoll {
     /// Se presente, l'app deve svuotare il riproduttore e portare il suo orologio a questa posizione (campioni)
     /// prima di accodare `frames`.
     pub resync_playhead: Option<i64>,
     /// Pacchetti da accodare, in ordine.
     pub frames: Vec<ReadyAudio>,
+    /// Velocità di riproduzione consigliata (1,0 = normale, al massimo ±0,5%): corregge piano la differenza tra
+    /// l'orologio audio di Android e quello dell'iPhone, senza i salti di una risincronizzazione.
+    pub playback_rate: f64,
+}
+
+impl Default for JitterPoll {
+    fn default() -> Self {
+        JitterPoll { resync_playhead: None, frames: Vec::new(), playback_rate: 1.0 }
+    }
 }
 
 /// Contatori.
@@ -124,6 +139,9 @@ pub struct AudioJitter {
     excess_since: Option<u64>,
     delay_us: u64,
     needs_resync: bool,
+    /// Media mobile dell'audio in coda (campioni), per la correzione di velocità.
+    buffered_avg: Option<f64>,
+    rate: f64,
     stats: JitterStats,
 }
 
@@ -141,6 +159,8 @@ impl AudioJitter {
             excess_since: None,
             delay_us: cfg.initial_delay_us,
             needs_resync: true,
+            buffered_avg: None,
+            rate: 1.0,
             stats: JitterStats { delay_us: cfg.initial_delay_us, ..JitterStats::default() },
         }
     }
@@ -169,6 +189,20 @@ impl AudioJitter {
         self.recently_skipped.clear();
         self.excess_since = None;
         self.needs_resync = true;
+    }
+
+    /// Aggiorna la velocità consigliata: proporzionale allo scarto tra audio in coda (media mobile) e ritardo voluto,
+    /// limitata a `max_rate_offset` e arrotondata a passi di 0,05% per non cambiarla di continuo.
+    fn update_rate(&mut self, buffered: i64, target: i64) {
+        let avg = match self.buffered_avg {
+            Some(a) => a * 0.98 + buffered as f64 * 0.02,
+            None => buffered as f64,
+        };
+        self.buffered_avg = Some(avg);
+        let error = avg - target as f64;
+        let offset = (error / (f64::from(self.cfg.sample_rate) * self.cfg.rate_correction_s))
+            .clamp(-self.cfg.max_rate_offset, self.cfg.max_rate_offset);
+        self.rate = 1.0 + (offset / 0.0005).round() * 0.0005;
     }
 
     /// Un pacchetto audio (non di configurazione) arrivato dall'host. `now_us` è l'orologio locale.
@@ -264,12 +298,18 @@ impl AudioJitter {
             self.next = Some(start_index);
             self.excess_since = None;
             self.needs_resync = false;
+            self.buffered_avg = None;
+            self.rate = 1.0;
             self.stats.resyncs += 1;
             out.resync_playhead = Some(start_playhead);
             playhead = Some(start_playhead);
         }
 
         let p = playhead.unwrap_or(0);
+        if out.resync_playhead.is_none() {
+            self.update_rate(newest_end - p, self.cfg.us_to_samples(self.delay_us));
+        }
+        out.playback_rate = self.rate;
         let margin = self.cfg.us_to_samples(self.cfg.skip_margin_us);
         let Some(mut next) = self.next else { return out };
         while next <= highest {
@@ -574,5 +614,55 @@ mod tests {
         assert_eq!(poll.resync_playhead, Some(aligned(pts(10) - cfg.us_to_samples(cfg.initial_delay_us))));
         assert!(!poll.frames.is_empty());
         assert_eq!(j.stats().resyncs, 2);
+    }
+
+    /// Orologi di Android e iPhone diversi dello 0,3%: in 90 s sarebbero 270 ms di audio in più in coda (una
+    /// risincronizzazione con salto udibile). Con la velocità consigliata il riproduttore li riassorbe piano.
+    #[test]
+    fn clock_drift_is_absorbed_by_playback_rate() {
+        let cfg = JitterConfig::aac(SR);
+        let period_us = 1024.0 * 1_000_000.0 / f64::from(SR);
+        let host_faster = 1.003;
+        let mut j = AudioJitter::new(cfg);
+        let frames = (90.0 * 1_000_000.0 / period_us) as i64;
+        let mut anchor: Option<(u64, f64)> = None; // (istante locale, posizione in campioni)
+        let mut next_packet = 0i64;
+        let mut now = 0u64;
+        let mut max_rate: f64 = 1.0;
+        let mut last_buffered = 0.0;
+        while next_packet < frames {
+            // i pacchetti arrivano secondo l'orologio dell'host, che corre più veloce
+            while next_packet < frames && (next_packet as f64 * period_us / host_faster) as u64 <= now {
+                j.push(now, ts(next_packet), vec![0]);
+                next_packet += 1;
+            }
+            let playhead = anchor.map(|(_, p0)| p0 as i64);
+            let poll = j.poll(now, playhead);
+            if let Some(p) = poll.resync_playhead {
+                anchor = Some((now, p as f64));
+            }
+            let rate = poll.playback_rate;
+            max_rate = max_rate.max(rate);
+            if let Some(h) = j.highest {
+                if let Some((_, p)) = anchor {
+                    last_buffered = (pts(h + 1) as f64 - p) / f64::from(SR) * 1_000.0;
+                }
+            }
+            // il riproduttore avanza di 5 ms alla velocità consigliata
+            if let Some((t0, p)) = anchor {
+                anchor = Some((t0, p + 5_000.0 * f64::from(SR) / 1_000_000.0 * rate));
+            }
+            now += 5_000;
+        }
+        let st = j.stats();
+        assert_eq!(st.resyncs, 1, "solo l'avvio: {st:?}");
+        assert!(max_rate > 1.0015, "il riproduttore ha accelerato: {max_rate}");
+        assert!(max_rate <= 1.0 + cfg.max_rate_offset + 1e-9);
+        let target_ms = cfg.initial_delay_us as f64 / 1_000.0;
+        assert!(
+            (last_buffered - target_ms).abs() < 60.0,
+            "coda finale {last_buffered:.0} ms, voluta {target_ms:.0} ms"
+        );
+        assert!(st.skipped <= 2, "{st:?}");
     }
 }

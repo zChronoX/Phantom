@@ -38,6 +38,7 @@ import android.widget.TextView
 import android.widget.Toast
 import app.phantom.host.core.HostFormatHelpers
 import app.phantom.host.core.PairingCodec
+import app.phantom.host.root.ShizukuLauncher
 import app.phantom.host.stream.CaptureMode
 import app.phantom.host.stream.StreamProfile
 import com.google.zxing.BarcodeFormat
@@ -69,13 +70,15 @@ class MainActivity : Activity() {
 
     // Config card
     private lateinit var modeRootBtn: TextView
+    private lateinit var modeShizukuBtn: TextView
     private lateinit var modeStandardBtn: TextView
+    private lateinit var controlRow: ActionRow
     private lateinit var prof1080_120Btn: TextView
     private lateinit var prof1080_60Btn: TextView
     private lateinit var prof720_60Btn: TextView
     private lateinit var hevcSwitch: Switch
-    private lateinit var dozeStatusView: TextView
-    private lateinit var dozeActionButton: TextView
+    private lateinit var intraSwitch: Switch
+    private lateinit var dozeRow: ActionRow
 
     // Diagnostics card (chiusa di default)
     private lateinit var diagChevron: TextView
@@ -98,6 +101,7 @@ class MainActivity : Activity() {
     private var selectedMode = CaptureMode.ROOT
     private var selectedProfile = StreamProfile.P1080_120
     private var preferHevc = true
+    private var intraRefresh = false
     private var customRemoteHost = ""
     private var diagnosticsExpanded = false
     private var lastQrUri = ""
@@ -120,6 +124,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         refreshDozeRow()
+        refreshControlRow()
     }
 
     override fun onDestroy() {
@@ -163,6 +168,7 @@ class MainActivity : Activity() {
                     putExtra(HostForegroundService.EXTRA_PORT, 47800)
                     putExtra(HostForegroundService.EXTRA_PROFILE, selectedProfile.name)
                     putExtra(HostForegroundService.EXTRA_HEVC, preferHevc)
+                    putExtra(HostForegroundService.EXTRA_INTRA_REFRESH, intraRefresh)
                     putExtra(HostForegroundService.EXTRA_RESULT_CODE, resultCode)
                     putExtra(HostForegroundService.EXTRA_RESULT_DATA, data)
                 }
@@ -306,6 +312,13 @@ class MainActivity : Activity() {
                 refreshConfigSegments(controlsEnabled = true)
             }
         }
+        modeShizukuBtn = segmentOption("Shizuku") {
+            if (!HostStateStore.snapshot().running) {
+                selectedMode = CaptureMode.SHIZUKU
+                savePreferences()
+                refreshConfigSegments(controlsEnabled = true)
+            }
+        }
         modeStandardBtn = segmentOption("Standard") {
             if (!HostStateStore.snapshot().running) {
                 selectedMode = CaptureMode.MEDIA_PROJECTION
@@ -314,8 +327,13 @@ class MainActivity : Activity() {
             }
         }
         modeTrack.addView(modeRootBtn)
+        modeTrack.addView(modeShizukuBtn)
         modeTrack.addView(modeStandardBtn)
-        cfgCard.addView(modeTrack, marginBottom(px(16)))
+        cfgCard.addView(modeTrack, marginBottom(px(8)))
+
+        // Stato del controllo per la modalità scelta: Shizuku (permesso) o Standard (Accessibilità)
+        controlRow = actionRow("Controllo dall'iPhone", "") { onControlRowAction() }
+        cfgCard.addView(controlRow.row, marginBottom(px(16)))
 
         cfgCard.addView(sectionLabel("PROFILO VIDEO"))
         val profileTrack = segmentedTrack()
@@ -365,47 +383,51 @@ class MainActivity : Activity() {
         hevcRow.addView(hevcSwitch)
         cfgCard.addView(hevcRow)
 
-        cfgCard.addView(divider())
-
-        // Riga Doze / risparmio batteria
-        val dozeRow = LinearLayout(this).apply {
+        // Intra-refresh (sperimentale)
+        val intraRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, px(12), 0, 0)
         }
-        val dozeTextCol = LinearLayout(this).apply {
+        val intraTextCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginEnd = px(12)
             }
         }
-        dozeTextCol.addView(
+        intraTextCol.addView(
             TextView(this).apply {
-                text = "Raggiungibile a schermo spento"
-                textSize = 14f
+                text = "Intra-refresh (sperimentale)"
+                textSize = 15f
                 typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
                 setTextColor(theme.textPrimary)
             },
         )
-        dozeStatusView = TextView(this).apply {
-            text = "Escludi da Doze per 5G continuo"
-            textSize = 12f
-            setTextColor(theme.textSecondary)
+        intraTextCol.addView(
+            TextView(this).apply {
+                text = "Meno scatti dai keyframe; se l'encoder non lo supporta si disattiva da solo"
+                textSize = 12f
+                setTextColor(theme.textSecondary)
+            },
+        )
+        intraSwitch = Switch(this).apply {
+            isChecked = intraRefresh
+            setOnCheckedChangeListener { _, checked ->
+                intraRefresh = checked
+                savePreferences()
+            }
         }
-        dozeTextCol.addView(dozeStatusView)
+        intraRow.addView(intraTextCol)
+        intraRow.addView(intraSwitch)
+        cfgCard.addView(intraRow)
 
-        dozeActionButton = TextView(this).apply {
-            text = "Escludi"
-            textSize = 13f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(theme.textPrimary)
-            setPadding(px(14), px(8), px(14), px(8))
-            background = theme.capsuleDrawable(theme.elevated, theme.hairline, dp)
-            setOnClickListener { requestBatteryOptimizationExemption() }
+        cfgCard.addView(divider())
+
+        // Riga Doze / risparmio batteria
+        dozeRow = actionRow("Raggiungibile a schermo spento", "Escludi da Doze per 5G continuo") {
+            requestBatteryOptimizationExemption()
         }
-        dozeRow.addView(dozeTextCol)
-        dozeRow.addView(dozeActionButton)
-        cfgCard.addView(dozeRow)
+        cfgCard.addView(dozeRow.row)
 
         root.addView(cfgCard, marginBottom(px(16)))
 
@@ -498,6 +520,12 @@ class MainActivity : Activity() {
             setPadding(px(12), px(10), px(12), px(10))
         }
         diagBody.addView(logsText)
+        diagBody.addView(
+            smallPillAction("Esporta log") { exportLogs() },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = px(10)
+            },
+        )
 
         diagCard.addView(diagBody)
         root.addView(diagCard)
@@ -511,6 +539,35 @@ class MainActivity : Activity() {
             addView(root)
         }
         setContentView(scroll)
+    }
+
+    /** Condivide il log completo con dati di dispositivo e configurazione, da allegare a una segnalazione. */
+    private fun exportLogs() {
+        val s = HostStateStore.snapshot()
+        val version = try {
+            packageManager.getPackageInfo(packageName, 0).versionName
+        } catch (_: Throwable) {
+            "?"
+        }
+        val header = buildString {
+            appendLine("Phantom $version · ${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+            appendLine("SoC: ${if (Build.VERSION.SDK_INT >= 31) Build.SOC_MODEL else Build.HARDWARE} · ABI: ${Build.SUPPORTED_ABIS.joinToString()}")
+            appendLine("Modalità: $selectedMode · profilo: ${selectedProfile.label} · HEVC: $preferHevc · intra-refresh: $intraRefresh")
+            appendLine("Shizuku: ${ShizukuLauncher.status().label} · Accessibilità: ${PhantomAccessibilityService.isEnabled(this@MainActivity)}")
+            appendLine("Stato: ${s.statusText} · ${s.thermalLabel}")
+            appendLine("----")
+        }
+        val text = header + s.logs.joinToString("\n")
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "Log Phantom $version")
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        try {
+            startActivity(Intent.createChooser(send, "Esporta log"))
+        } catch (_: Throwable) {
+            copyToClipboard("Log", text)
+        }
     }
 
     private fun selectProfile(profile: StreamProfile) {
@@ -726,8 +783,26 @@ class MainActivity : Activity() {
                     putExtra(HostForegroundService.EXTRA_PORT, 47800)
                     putExtra(HostForegroundService.EXTRA_PROFILE, selectedProfile.name)
                     putExtra(HostForegroundService.EXTRA_HEVC, preferHevc)
+                    putExtra(HostForegroundService.EXTRA_INTRA_REFRESH, intraRefresh)
                 }
                 startForegroundService(intent)
+            }
+            CaptureMode.SHIZUKU -> when (ShizukuLauncher.status()) {
+                ShizukuLauncher.Status.READY -> startShizukuHost()
+                ShizukuLauncher.Status.NO_PERMISSION -> ShizukuLauncher.requestPermission { granted ->
+                    runOnUiThread {
+                        refreshControlRow()
+                        if (granted) {
+                            startShizukuHost()
+                        } else {
+                            Toast.makeText(this, "Permesso Shizuku negato", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+                ShizukuLauncher.Status.TOO_OLD, ShizukuLauncher.Status.NOT_RUNNING -> {
+                    Toast.makeText(this, ShizukuLauncher.status().label, Toast.LENGTH_LONG).show()
+                    openShizukuApp()
+                }
             }
             CaptureMode.MEDIA_PROJECTION -> {
                 val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -737,23 +812,148 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun startShizukuHost() {
+        val intent = Intent(this, HostForegroundService::class.java).apply {
+            action = HostForegroundService.ACTION_START_SHIZUKU
+            putExtra(HostForegroundService.EXTRA_PORT, 47800)
+            putExtra(HostForegroundService.EXTRA_PROFILE, selectedProfile.name)
+            putExtra(HostForegroundService.EXTRA_HEVC, preferHevc)
+            putExtra(HostForegroundService.EXTRA_INTRA_REFRESH, intraRefresh)
+        }
+        startForegroundService(intent)
+    }
+
     private fun refreshDozeRow() {
-        if (!::dozeStatusView.isInitialized) return
+        if (!::dozeRow.isInitialized) return
         val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
         val exempt = pm?.isIgnoringBatteryOptimizations(packageName) == true
         if (exempt) {
-            dozeStatusView.text = "Escluso dal risparmio batteria"
-            dozeStatusView.setTextColor(theme.liveGreen)
-            dozeActionButton.text = "Attivo"
-            dozeActionButton.setTextColor(theme.liveGreen)
-            dozeActionButton.isEnabled = false
+            dozeRow.set("Escluso dal risparmio batteria", theme.liveGreen, "Attivo", enabled = false)
         } else {
-            dozeStatusView.text = "Escludi da Doze per 5G continuo"
-            dozeStatusView.setTextColor(theme.textSecondary)
-            dozeActionButton.text = "Escludi"
-            dozeActionButton.setTextColor(theme.textPrimary)
-            dozeActionButton.isEnabled = true
+            dozeRow.set("Escludi da Doze per 5G continuo", theme.textSecondary, "Escludi", enabled = true)
         }
+    }
+
+    /** Riga di stato del controllo: permesso Shizuku in modalità Shizuku, Accessibilità in modalità Standard. */
+    private fun refreshControlRow() {
+        if (!::controlRow.isInitialized) return
+        when (selectedMode) {
+            CaptureMode.ROOT -> controlRow.row.visibility = View.GONE
+            CaptureMode.SHIZUKU -> {
+                controlRow.row.visibility = View.VISIBLE
+                controlRow.title.text = "Shizuku"
+                when (ShizukuLauncher.status()) {
+                    ShizukuLauncher.Status.READY ->
+                        controlRow.set("Pronto: tocco, tastiera, audio e schermo spento", theme.liveGreen, "Pronto", enabled = false)
+                    ShizukuLauncher.Status.NO_PERMISSION ->
+                        controlRow.set("Concedi a Phantom il permesso in Shizuku", theme.warnAmber, "Concedi", enabled = true)
+                    ShizukuLauncher.Status.TOO_OLD ->
+                        controlRow.set("Aggiorna Shizuku (serve la versione 11+)", theme.warnAmber, "Apri", enabled = true)
+                    ShizukuLauncher.Status.NOT_RUNNING ->
+                        controlRow.set("Avvia Shizuku con il Debug wireless", theme.warnAmber, "Apri", enabled = true)
+                }
+            }
+            CaptureMode.MEDIA_PROJECTION -> {
+                controlRow.row.visibility = View.VISIBLE
+                controlRow.title.text = "Controllo con Accessibilità"
+                if (PhantomAccessibilityService.isEnabled(this)) {
+                    controlRow.set("Attivo: tap, swipe, tasti di sistema, testo", theme.liveGreen, "Attivo", enabled = false)
+                } else {
+                    controlRow.set("Senza: solo visione dall'iPhone", theme.textSecondary, "Attiva", enabled = true)
+                }
+            }
+        }
+    }
+
+    private fun onControlRowAction() {
+        when (selectedMode) {
+            CaptureMode.ROOT -> {}
+            CaptureMode.SHIZUKU -> when (ShizukuLauncher.status()) {
+                ShizukuLauncher.Status.NO_PERMISSION -> ShizukuLauncher.requestPermission { granted ->
+                    runOnUiThread {
+                        refreshControlRow()
+                        if (!granted) Toast.makeText(this, "Permesso Shizuku negato", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                ShizukuLauncher.Status.READY -> {}
+                else -> openShizukuApp()
+            }
+            CaptureMode.MEDIA_PROJECTION -> {
+                Toast.makeText(this, "Attiva «Phantom · controllo remoto» in Accessibilità", Toast.LENGTH_LONG).show()
+                try {
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                } catch (_: Throwable) {
+                }
+            }
+        }
+    }
+
+    private fun openShizukuApp() {
+        val launch = packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)
+        if (launch != null) {
+            startActivity(launch)
+        } else {
+            Toast.makeText(this, "Installa Shizuku (Play Store o GitHub) e avvialo con il Debug wireless", Toast.LENGTH_LONG).show()
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://shizuku.rikka.app/download/")))
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    /** Riga con titolo, stato colorato e pulsante a capsula (Doze, Shizuku, Accessibilità). */
+    private inner class ActionRow(
+        val row: LinearLayout,
+        val title: TextView,
+        val status: TextView,
+        val button: TextView,
+    ) {
+        fun set(statusText: String, statusColor: Int, buttonText: String, enabled: Boolean) {
+            status.text = statusText
+            status.setTextColor(statusColor)
+            button.text = buttonText
+            button.setTextColor(if (enabled) theme.textPrimary else theme.liveGreen)
+            button.isEnabled = enabled
+        }
+    }
+
+    private fun actionRow(titleText: String, statusText: String, onClick: () -> Unit): ActionRow {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, px(12), 0, 0)
+        }
+        val textCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = px(12)
+            }
+        }
+        val title = TextView(this).apply {
+            text = titleText
+            textSize = 14f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(theme.textPrimary)
+        }
+        val status = TextView(this).apply {
+            text = statusText
+            textSize = 12f
+            setTextColor(theme.textSecondary)
+        }
+        textCol.addView(title)
+        textCol.addView(status)
+        val button = TextView(this).apply {
+            text = ""
+            textSize = 13f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(theme.textPrimary)
+            setPadding(px(14), px(8), px(14), px(8))
+            background = theme.capsuleDrawable(theme.elevated, theme.hairline, dp)
+            setOnClickListener { onClick() }
+        }
+        row.addView(textCol)
+        row.addView(button)
+        return ActionRow(row, title, status, button)
     }
 
     @android.annotation.SuppressLint("BatteryLife")
@@ -825,7 +1025,11 @@ class MainActivity : Activity() {
                 "$lan$p2p"
             }
             else -> {
-                val modeName = if (selectedMode == CaptureMode.ROOT) "Root" else "Standard"
+                val modeName = when (selectedMode) {
+                    CaptureMode.ROOT -> "Root"
+                    CaptureMode.SHIZUKU -> "Shizuku"
+                    CaptureMode.MEDIA_PROJECTION -> "Standard"
+                }
                 "Modalità $modeName · ${selectedProfile.label}"
             }
         }
@@ -848,6 +1052,7 @@ class MainActivity : Activity() {
         val controlsEnabled = !s.running
         refreshConfigSegments(controlsEnabled)
         hevcSwitch.isEnabled = controlsEnabled
+        intraSwitch.isEnabled = controlsEnabled
 
         // Diagnostica
         addrText.text = if (s.ipAddress.isNotBlank()) {
@@ -882,7 +1087,9 @@ class MainActivity : Activity() {
 
     private fun refreshConfigSegments(controlsEnabled: Boolean) {
         styleSegment(modeRootBtn, selectedMode == CaptureMode.ROOT, controlsEnabled)
+        styleSegment(modeShizukuBtn, selectedMode == CaptureMode.SHIZUKU, controlsEnabled)
         styleSegment(modeStandardBtn, selectedMode == CaptureMode.MEDIA_PROJECTION, controlsEnabled)
+        refreshControlRow()
         styleSegment(prof1080_120Btn, selectedProfile == StreamProfile.P1080_120, controlsEnabled)
         styleSegment(prof1080_60Btn, selectedProfile == StreamProfile.P1080_60, controlsEnabled)
         styleSegment(prof720_60Btn, selectedProfile == StreamProfile.P720_60, controlsEnabled)
@@ -958,6 +1165,7 @@ class MainActivity : Activity() {
         val profName = p.getString(KEY_PROFILE, StreamProfile.P1080_120.name)
         selectedProfile = StreamProfile.entries.firstOrNull { it.name == profName } ?: StreamProfile.P1080_120
         preferHevc = p.getBoolean(KEY_HEVC, true)
+        intraRefresh = p.getBoolean(KEY_INTRA_REFRESH, false)
         customRemoteHost = p.getString(KEY_REMOTE_HOST, "").orEmpty().trim()
     }
 
@@ -966,6 +1174,7 @@ class MainActivity : Activity() {
             .putString(KEY_MODE, selectedMode.name)
             .putString(KEY_PROFILE, selectedProfile.name)
             .putBoolean(KEY_HEVC, preferHevc)
+            .putBoolean(KEY_INTRA_REFRESH, intraRefresh)
             .putString(KEY_REMOTE_HOST, customRemoteHost)
             .apply()
     }
@@ -1063,8 +1272,10 @@ class MainActivity : Activity() {
     companion object {
         internal const val PREFS_NAME = "phantom_host_prefs"
         internal const val KEY_MODE = "mode"
+        private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
         internal const val KEY_PROFILE = "profile"
         internal const val KEY_HEVC = "hevc"
+        internal const val KEY_INTRA_REFRESH = "intra_refresh"
         internal const val KEY_REMOTE_HOST = "remote_host"
 
         private const val REQ_MEDIA_PROJECTION = 1001

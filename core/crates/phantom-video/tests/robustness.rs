@@ -268,7 +268,7 @@ proptest! {
             while next_frame < lens.len() && now >= next_frame as u64 * frame_us {
                 let data = pattern(next_frame as u32, lens[next_frame]);
                 originals.push(data.clone());
-                let key = next_frame % 5 == 0;
+                let key = next_frame.is_multiple_of(5);
                 let f = EncodedFrame { frame_id: next_frame as u32, codec: Codec::H265, key, config: key, capture_ts_us: now, data: &data };
                 schedule(&mut inflight, now, 1_000, tx.send_frame(&f));
                 next_frame += 1;

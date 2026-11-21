@@ -67,7 +67,7 @@ object HostStateStore {
     fun addLog(message: String) {
         val line = "${timeFmt.format(Date())} · $message"
         update { cur ->
-            val updated = (cur.logs + line).takeLast(60)
+            val updated = (cur.logs + line).takeLast(300)
             cur.copy(logs = updated)
         }
     }

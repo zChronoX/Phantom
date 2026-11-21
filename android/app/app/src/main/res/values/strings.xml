@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_label">Phantom · controllo remoto</string>
+    <string name="accessibility_description">Permette all\'iPhone collegato con Phantom di toccare, scorrere, usare Indietro/Home/Recenti/Notifiche e scrivere nei campi di testo quando Phantom è in modalità Standard (senza root né Shizuku). Phantom non legge e non salva il contenuto dello schermo.</string>
+</resources>

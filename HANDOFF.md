@@ -1,7 +1,8 @@
 # Handoff
 
-Scritto: 2026-11-20; aggiornato con le correzioni audio **v1.2.1** (buffer anti-jitter nel core, cattura Android robusta, ridondanza dei pacchetti).
-Branch: main - base `9425593` (v1.2.0, pushato dall'utente) + modifiche v1.2.1 non committate (vedi «Uncommitted changes»).
+Scritto: 2026-11-20; aggiornato con la **v1.3.0** (telemetria, Shizuku, Accessibilità, tasti di sistema, qualità adattiva, deriva audio, release seria, pulizia).
+Branch: main - base `b948eda` (v1.2.1, pushata e taggata dall'utente) + modifiche v1.3.0 non committate (vedi «Uncommitted changes»).
+Cartella sul PC: `C:\Users\Giovanni\Documents\Progetti personali\Phantom\Phantom` (spostata dall'utente).
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
 
 ## Goal
@@ -84,14 +85,13 @@ Otto task della sessione precedente più T9 e T10 chiusi e verificati in Docker
 
 ## Next steps (in order)
 
-1. Preflight, commit e push della v1.2.1; aspettare la CI verde (`core`, `Android · Phantom APK`, `iOS · Phantom`).
-2. Prova sul Redmi (modalità Standard) con musica o un video: l'audio deve essere continuo, con circa 80–110 ms di
-   ritardo rispetto al video. Se gracchia ancora, guardare `JitterAudioCounters` (da esporre nell'HUD) per capire se
-   sono pacchetti persi (`skipped`), in ritardo (`late`) o risincronizzazioni (`resyncs`).
-3. Esito della prova v1.2.0 riferito dall'utente: video quasi sincronizzato nel 70–80% dei casi, audio spesso muto o
-   gracchiante (motivo della v1.2.1).
-4. Fase «progetto completo»: controllo senza root (Shizuku/ADB wireless), adattamento di risoluzione e fps, tasti di
-   sistema nell'app iOS, telemetria estesa (anche audio), release seria.
+1. Preflight, commit e push della v1.3.0; CI verde (`core`, `Android · Phantom APK`, `iOS · Phantom`). Punti mai
+   compilati qui: Gradle (dipendenza Shizuku `dev.rikka.shizuku:api/provider:13.1.5`, risorse XML) e Swift.
+2. (Una volta) `tools/release/create-keystore.ps1` e i 4 secret GitHub; poi disinstallare l'APK attuale.
+3. Prove sul Redmi, nell'ordine: Standard senza Accessibilità (solo visione), Standard con Accessibilità (tap, swipe,
+   pinch, Indietro/Home/Recenti/Notifiche, testo), Shizuku (tocco multi-dito, tastiera, schermo spento, audio),
+   HUD espanso iOS (4 righe di telemetria), qualità adattiva (log «Qualità adattata alla rete»), intra-refresh.
+4. Se tutto ok: tag `v1.3.0` (la CI controlla versioni e changelog), poi `tools/archive-legacy.ps1`.
 
 ## Decisions and constraints from the user
 
@@ -185,31 +185,39 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-**v1.2.1 — audio muto o gracchiante sul Redmi (la v1.2.0 è nel commit `9425593`).**
+**v1.3.0** (la v1.2.1 audio è nel commit `b948eda`, taggata `v1.2.1`). Scelte dell'utente: controllo senza root con
+**Shizuku + Accessibilità** come ripiego; legacy **archiviata su branch** `archive/legacy-f0`.
 
-Cause trovate:
-- iPhone: ogni pacchetto suonato appena arrivato, orologio avviato senza margine, linea del tempo costruita contando i
-  pacchetti ricevuti (una perdita la accorciava), flush e ripartenza a ogni scarto > 150 ms, e decodifica tentata
-  senza `AudioSpecificConfig` (se il primo pacchetto di configurazione si perdeva il renderer falliva per secondi).
-- Android: thread audio a priorità normale contro l'encoder video a `URGENT_DISPLAY` (l'`AudioRecord` perdeva
-  campioni), PCM buttato se l'encoder non dava un buffer entro 10 ms, istanti di cattura presi dall'ora di ritorno di
-  `read()` (ballavano di millisecondi), nessuna protezione dalle perdite.
+- **Telemetria**: nuovo messaggio `HostReport` (kind 15, cap `HOST_REPORT`) host → client ogni secondo: fps e kbps
+  reali dell'encoder, obiettivo, risoluzione, tempo di codifica, coda di invio, pacchetti scartati/errori, keyframe
+  (conteggiati dal core), stato termico. FFI `HostReportInfo`, `PhantomHost.host_report`, `PhantomClient.host_report`,
+  `HostCounters.keyframes_sent`. iOS: HUD espanso con 4 righe (video, latenza p50/p95 + codifica + RTT + coda, rete,
+  audio + termico), contatori audio dal buffer anti-jitter e frame scartati dal decoder.
+- **Tasti di sistema**: `ControlCommand` 4–12 (Back, Home, Recents, Notifications, QuickSettings, Power, VolumeUp,
+  VolumeDown, Screenshot), cap `SYSTEM_KEYS`; il worker Root/Shizuku li esegue con keycode o `cmd statusbar`; in
+  Standard tramite Accessibilità (volume con `AudioManager`). iOS: pulsanti Notifiche/Screenshot/Blocca e uso dei
+  comandi quando l'host li supporta (altrimenti le vecchie sequenze HID).
+- **Shizuku**: `CaptureMode.SHIZUKU`, `ShizukuLauncher` (stato, permesso, `newProcess` per riflessione),
+  `HostForegroundService.startPrivilegedMode` comune a Root e Shizuku; con Shizuku l'identità passa su stdin
+  (`IDENTITY|...`, `RootHostMain.IDENTITY_STDIN`) perché l'utente `shell` non legge i file privati. Manifest:
+  `ShizukuProvider`. UI: segmento Root/Shizuku/Standard + riga di stato con azione (concedi/apri Shizuku).
+- **Accessibilità**: `PhantomAccessibilityService` + `GestureTracker` (gesti completi al rilascio, pinch a 2 dita,
+  campionamento) + testo nel campo con il fuoco; riga di stato nella UI che apre le impostazioni.
+- **Qualità adattiva**: `AdaptiveQuality` (bit per pixel; giù sotto 0,035 per 3 s, su sopra 0,08 per 8 s; gradini
+  profilo → 720p60 → 540p30), riconfigurazione con lo stesso percorso della rotazione. **Intra-refresh** opzionale
+  (interruttore, `KEY_INTRA_REFRESH_PERIOD` = fps, ripiego automatico; passato al worker con `-Dphantom.intraRefresh`).
+- **Audio**: `JitterPoll.playback_rate` (±0,5%, proporzionale allo scarto medio) applicato con `synchronizer.rate` e
+  `audioTimePitchAlgorithm = .timeDomain`; soglia di eccesso portata a 200 ms per 3 s.
+- **Release**: `CHANGELOG.md`, `tools/release/changelog-section.sh` e `check-version.sh` usati dalle due pipeline
+  (controllo del tag all'inizio, note dal changelog), `tools/release/create-keystore.ps1` (Docker), esportazione log
+  dall'app (Diagnostica → Esporta log; log interno portato a 300 righe).
+- **Pulizia**: `rust-version` 1.91 (allineato al job MSRV della CI) e fix `is_multiple_of` suggeriti da clippy,
+  `MainActivity` con `ActionRow` riusato per Doze/Shizuku/Accessibilità, `tools/archive-legacy.ps1` (branch + `git rm`
+  di modulo Magisk, probe, strumenti scrcpy, workflow F0, doc F0), README con tabella delle modalità e processo di
+  release. I banchi di prova F0 dell'app iOS restano (Diagnostica): toglierli richiede di compilare Swift.
+- Versione `1.3.0` su Android e iOS.
 
-Modifiche:
-- Core: nuovo modulo `phantom_core::jitter` (`AudioJitter`): indice di ogni pacchetto dall'istante di cattura,
-  riordino, doppioni, attesa dei mancanti fino a 12 ms dalla loro ora, ritardo iniziale 80 ms che cresce di 30 ms
-  (fino a 240) dopo 3 ritardatari in 3 s, ritorno al ritardo giusto se il buffer resta gonfio 1,5 s, ripartenza dopo
-  uno stallo della cattura. 10 test, compresa una simulazione di 30 s con ritardi fino a 70 ms e 5% di perdite.
-- FFI: `AudioJitterBuffer` (`push`, `poll`, `reset`, `counters`) con `JitterAudioPoll`, `JitterAudioFrame`,
-  `JitterAudioCounters` (+1 test).
-- Android: `AudioStreamer` a `THREAD_PRIORITY_URGENT_AUDIO`, buffer `AudioRecord` di 250 ms, blocchi interi da 1024
-  campioni, nessun PCM perso verso l'encoder, istanti da `AudioSampleClock` (conteggio campioni, nuovo file + 2 test
-  JVM), `AudioSpecificConfig` ripetuto con i primi 3 pacchetti e poi ogni secondo. `PhantomHostSession`: ogni pacchetto
-  audio spedito due volte (la seconda insieme al successivo).
-- iOS: `AudioPlayer.swift` riscritto sopra `AudioJitterBuffer` (timer di 10 ms, attesa dell'`AudioSpecificConfig`,
-  pts dalla linea del tempo del buffer, `counters()` per la telemetria futura).
-- Versione `1.2.1` su Android e iOS.
-
-Verifiche (container Linux, Rust 1.97): `cargo test --workspace --release` → 22 blocchi ok; `fmt`/`clippy -D warnings`
-puliti; binding Kotlin e Swift rigenerati; app Kotlin compilata con `kotlinc` (salvo `MainActivity`/ZXing); 19 test JVM
-ok con stub JUnit. Non verificati: compilazione Swift (CI macOS), build Gradle, prova sul telefono.
+Verifiche (container Linux, Rust 1.97): `cargo test --workspace --release` → 22 blocchi ok; `fmt`, `clippy -D
+warnings` e `cargo doc -D warnings` puliti; binding Kotlin/Swift rigenerati; **tutta** l'app Kotlin compilata con
+`kotlinc 2.0.21` contro `android.jar` API 34 + JNA + stub di Shizuku e ZXing; 28 test JVM ok con stub JUnit.
+Non verificati: Gradle/APK, Swift (CI macOS), prove sul telefono.

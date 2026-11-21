@@ -36,12 +36,15 @@ import android.view.WindowManager
 import app.phantom.host.core.HostFormatHelpers
 import app.phantom.host.core.PairingCodec
 import app.phantom.host.core.ThermalGuard
+import app.phantom.host.root.RootHostMain
+import app.phantom.host.root.ShizukuLauncher
 import app.phantom.host.stream.AudioStreamer
 import app.phantom.host.stream.CaptureMode
 import app.phantom.host.stream.HostRunConfig
 import app.phantom.host.stream.PhantomHostSession
 import app.phantom.host.stream.StreamProfile
 import app.phantom.host.stream.SurfaceCaptureFactory
+import uniffi.phantom_ffi.RemoteControlCommand
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.InputStreamReader
@@ -109,7 +112,13 @@ class HostForegroundService : Service() {
                 val cfg = readConfig(intent, CaptureMode.ROOT)
                 stopAllWork()
                 beginForeground(useProjectionType = false)
-                startRootMode(cfg)
+                startPrivilegedMode(cfg, viaShizuku = false)
+            }
+            ACTION_START_SHIZUKU -> {
+                val cfg = readConfig(intent, CaptureMode.SHIZUKU)
+                stopAllWork()
+                beginForeground(useProjectionType = false)
+                startPrivilegedMode(cfg, viaShizuku = true)
             }
             ACTION_START_PROJECTION -> {
                 val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
@@ -147,7 +156,8 @@ class HostForegroundService : Service() {
         val profileName = intent.getStringExtra(EXTRA_PROFILE) ?: StreamProfile.P1080_120.name
         val profile = StreamProfile.entries.firstOrNull { it.name == profileName } ?: StreamProfile.P1080_120
         val preferHevc = intent.getBooleanExtra(EXTRA_HEVC, true)
-        return HostRunConfig(port = port, profile = profile, preferHevc = preferHevc, mode = mode)
+        val intraRefresh = intent.getBooleanExtra(EXTRA_INTRA_REFRESH, false)
+        return HostRunConfig(port = port, profile = profile, preferHevc = preferHevc, mode = mode, intraRefresh = intraRefresh)
     }
 
     private fun beginForeground(useProjectionType: Boolean) {
@@ -168,7 +178,13 @@ class HostForegroundService : Service() {
         requestTileRefresh()
     }
 
-    private fun startRootMode(config: HostRunConfig) {
+    /**
+     * Avvia il worker privilegiato (`RootHostMain` in `app_process`): con `su` in modalità Root, con Shizuku (utente
+     * `shell`) in modalità Shizuku. Il worker è lo stesso; con Shizuku l'identità passa da stdin perché l'utente
+     * `shell` non può leggere i file privati dell'app.
+     */
+    private fun startPrivilegedMode(config: HostRunConfig, viaShizuku: Boolean) {
+        val modeLabel = if (viaShizuku) "Shizuku" else "Root"
         val ifaces = collectActiveIpv4Interfaces()
         val ip = HostFormatHelpers.selectPreferredLanIpv4(ifaces)
         val vpnIp = HostFormatHelpers.selectPreferredVpnIpv4(ifaces)
@@ -185,10 +201,10 @@ class HostForegroundService : Service() {
                 running = true,
                 starting = true,
                 connected = false,
-                mode = CaptureMode.ROOT,
+                mode = if (viaShizuku) CaptureMode.SHIZUKU else CaptureMode.ROOT,
                 profile = config.profile,
                 preferHevc = config.preferHevc,
-                statusText = "Richiesta privilegi root…",
+                statusText = if (viaShizuku) "Avvio tramite Shizuku…" else "Richiesta privilegi root…",
                 ipAddress = ip,
                 vpnIpAddress = vpnIp,
                 port = config.port,
@@ -202,7 +218,7 @@ class HostForegroundService : Service() {
         }
         registerNetworkMonitor()
         registerClipboardMonitor()
-        HostStateStore.addLog("Avvio Root · ${config.profile.label}")
+        HostStateStore.addLog("Avvio $modeLabel · ${config.profile.label}")
 
         val thread = Thread({
             var proc: Process? = null
@@ -213,10 +229,15 @@ class HostForegroundService : Service() {
                 if (ifacesSummary.isNotBlank()) {
                     HostStateStore.addLog("Interfacce IPv4: $ifacesSummary")
                 }
-                val certPathArg = identity?.certFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
-                val keyPathArg = identity?.keyFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
-                val p2pPathArg = identity?.p2pSecretFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
-                val authPathArg = identity?.authTokenFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
+                val identityArgs = if (viaShizuku) {
+                    " ${RootHostMain.IDENTITY_STDIN}"
+                } else {
+                    val certPathArg = identity?.certFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
+                    val keyPathArg = identity?.keyFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
+                    val p2pPathArg = identity?.p2pSecretFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
+                    val authPathArg = identity?.authTokenFile?.absolutePath?.let { " ${shellQuote(it)}" }.orEmpty()
+                    "$certPathArg$keyPathArg$p2pPathArg$authPathArg"
+                }
 
                 val cmd = "export CLASSPATH=${shellQuote(apkPath)} LD_LIBRARY_PATH=${shellQuote(libDir)}:/system/lib64:/vendor/lib64; " +
                     "APP_PROC=/system/bin/app_process64; [ -x \"\$APP_PROC\" ] || APP_PROC=app_process; " +
@@ -224,15 +245,31 @@ class HostForegroundService : Service() {
                     "-Djna.library.path=${shellQuote(libDir)} " +
                     "-Djna.boot.library.path=${shellQuote(libDir)} " +
                     "-Djna.nounpack=true " +
+                    "-Dphantom.intraRefresh=${config.intraRefresh} " +
                     "/system/bin --nice-name=phantom-host app.phantom.host.root.RootHostMain " +
-                    "${config.port} ${config.profile.name} ${config.preferHevc} ${shellQuote(libDir)}$certPathArg$keyPathArg$p2pPathArg$authPathArg"
+                    "${config.port} ${config.profile.name} ${config.preferHevc} ${shellQuote(libDir)}$identityArgs 2>&1"
 
-                val pb = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true)
-                proc = pb.start()
+                proc = if (viaShizuku) {
+                    val st = ShizukuLauncher.status()
+                    if (st != ShizukuLauncher.Status.READY) {
+                        throw IllegalStateException(st.label)
+                    }
+                    ShizukuLauncher.startProcess(cmd)
+                } else {
+                    ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
+                }
                 rootProcess = proc
                 val writer = BufferedWriter(OutputStreamWriter(proc.outputStream))
                 synchronized(rootStdinLock) {
                     rootStdin = writer
+                }
+                if (viaShizuku) {
+                    fun b64(bytes: ByteArray?): String =
+                        bytes?.takeIf { it.isNotEmpty() }?.let { PairingCodec.encodeBase64UrlNoPad(it) }.orEmpty()
+                    sendRootCommand(
+                        "IDENTITY|${b64(identity?.certDer)}|${b64(identity?.keyDer)}|" +
+                            "${b64(identity?.p2pSecretKey)}|${b64(identity?.authToken)}",
+                    )
                 }
                 val temp = batteryTempTenths?.toString() ?: "none"
                 val status = readAndroidThermalStatus()
@@ -245,10 +282,10 @@ class HostForegroundService : Service() {
                 }
                 val code = proc.waitFor()
                 if (HostStateStore.snapshot().running) {
-                    HostStateStore.addLog("Worker root terminato (exit $code)")
+                    HostStateStore.addLog("Worker $modeLabel terminato (exit $code)")
                 }
             } catch (t: Throwable) {
-                HostStateStore.addLog("Errore avvio root: ${t.message}")
+                HostStateStore.addLog("Errore avvio $modeLabel: ${t.message}")
             } finally {
                 unregisterMdns()
                 synchronized(rootStdinLock) {
@@ -440,8 +477,18 @@ class HostForegroundService : Service() {
                     null
                 }
             },
-            onTouch = {},
-            onKey = {},
+            // Senza root il controllo passa dal servizio di Accessibilità, se l'utente l'ha attivato
+            onTouch = { PhantomAccessibilityService.instance?.handleTouch(it) },
+            onKey = { PhantomAccessibilityService.instance?.handleKey(it) },
+            onControlCommand = { cmd -> handleProjectionControl(cmd) },
+            onClientConnected = {
+                if (PhantomAccessibilityService.instance == null) {
+                    HostStateStore.addLog("Solo visione: attiva l'Accessibilità di Phantom (o usa Shizuku) per comandare il telefono dall'iPhone")
+                } else {
+                    HostStateStore.addLog("Controllo via Accessibilità attivo (tap, swipe, tasti di sistema, testo)")
+                }
+            },
+            onClientDisconnected = { PhantomAccessibilityService.instance?.reset() },
             onClipboardFromClient = { text -> applyRemoteClipboard(text) },
             onReady = { boundPort, certHex ->
                 val addr = formatAddr(ip, boundPort)
@@ -738,6 +785,22 @@ class HostForegroundService : Service() {
         }
     }
 
+    /** Comandi di controllo in modalità Standard: volume col sistema, il resto tramite Accessibilità. */
+    private fun handleProjectionControl(cmd: RemoteControlCommand) {
+        when (cmd) {
+            RemoteControlCommand.VOLUME_UP, RemoteControlCommand.VOLUME_DOWN ->
+                mainHandler.post { PhantomAccessibilityService.adjustVolume(this, cmd == RemoteControlCommand.VOLUME_UP) }
+            RemoteControlCommand.WAKE_SCREEN, RemoteControlCommand.SCREEN_OFF, RemoteControlCommand.SCREEN_ON ->
+                HostStateStore.addLog("Comando schermo non disponibile in modalità Standard (serve Root o Shizuku)")
+            else -> {
+                val handled = PhantomAccessibilityService.instance?.handleControl(cmd) ?: false
+                if (!handled) {
+                    HostStateStore.addLog("Tasto $cmd non eseguito: attiva l'Accessibilità di Phantom")
+                }
+            }
+        }
+    }
+
     private fun sendRootCommand(command: String) {
         synchronized(rootStdinLock) {
             val writer = rootStdin ?: return
@@ -878,11 +941,13 @@ class HostForegroundService : Service() {
     companion object {
         const val ACTION_START_ROOT = "app.phantom.host.START_ROOT"
         const val ACTION_START_PROJECTION = "app.phantom.host.START_PROJECTION"
+        const val ACTION_START_SHIZUKU = "app.phantom.host.START_SHIZUKU"
         const val ACTION_STOP = "app.phantom.host.STOP"
 
         const val EXTRA_PORT = "port"
         const val EXTRA_PROFILE = "profile"
         const val EXTRA_HEVC = "hevc"
+        const val EXTRA_INTRA_REFRESH = "intra_refresh"
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
 

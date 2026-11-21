@@ -49,12 +49,15 @@ class PhantomTileService : TileService() {
         val profile = StreamProfile.entries.firstOrNull { it.name == profName } ?: StreamProfile.P1080_120
         val preferHevc = prefs.getBoolean(MainActivity.KEY_HEVC, true)
 
-        if (mode == CaptureMode.ROOT) {
+        val shizukuReady = mode == CaptureMode.SHIZUKU &&
+            app.phantom.host.root.ShizukuLauncher.status() == app.phantom.host.root.ShizukuLauncher.Status.READY
+        if (mode == CaptureMode.ROOT || shizukuReady) {
             val intent = Intent(this, HostForegroundService::class.java).apply {
-                action = HostForegroundService.ACTION_START_ROOT
+                action = if (shizukuReady) HostForegroundService.ACTION_START_SHIZUKU else HostForegroundService.ACTION_START_ROOT
                 putExtra(HostForegroundService.EXTRA_PORT, 47800)
                 putExtra(HostForegroundService.EXTRA_PROFILE, profile.name)
                 putExtra(HostForegroundService.EXTRA_HEVC, preferHevc)
+                putExtra(HostForegroundService.EXTRA_INTRA_REFRESH, prefs.getBoolean(MainActivity.KEY_INTRA_REFRESH, false))
             }
             startForegroundService(intent)
         } else {

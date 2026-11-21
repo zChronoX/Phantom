@@ -21,8 +21,13 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.system.exitProcess
 
 /**
- * Worker eseguibile tramite `su` + `app_process64` on-demand.
- * Comunica con `HostForegroundService` via stdout/stdin a righe (`READY|...`, `STATS|...`, `STOP`).
+ * Worker eseguibile tramite `app_process64` on-demand, avviato con `su` (modalità Root) oppure con Shizuku come utente
+ * `shell` (modalità Shizuku). Comunica con `HostForegroundService` via stdout/stdin a righe (`READY|...`, `STATS|...`,
+ * `STOP`).
+ *
+ * Con Shizuku l'utente `shell` non può leggere i file privati dell'app: l'identità (certificato, chiave, segreto P2P,
+ * token) arriva allora come prima riga su stdin (`IDENTITY|...`, base64url) e l'argomento dei percorsi vale
+ * [IDENTITY_STDIN].
  */
 object RootHostMain {
     @JvmStatic
@@ -55,17 +60,35 @@ object RootHostMain {
         val keyPath = args.getOrNull(5)
         val p2pSecretPath = args.getOrNull(6)
         val authTokenPath = args.getOrNull(7)
+        val stdin = BufferedReader(InputStreamReader(System.`in`))
 
         preloadNativeLibs(libDir)
-        val identity = HostIdentityStore.loadFromPaths(certPath, keyPath)
-        val p2pSecret = HostIdentityStore.loadP2pSecretFromPath(p2pSecretPath)
-        val authToken = HostIdentityStore.loadAuthTokenFromPath(authTokenPath)
+        val identity: Pair<ByteArray, ByteArray>?
+        val p2pSecret: ByteArray?
+        val authToken: ByteArray?
+        if (certPath == IDENTITY_STDIN) {
+            val parts = (stdin.readLine() ?: "").split('|')
+            fun field(i: Int): ByteArray? = parts.getOrNull(i)?.takeIf { it.isNotEmpty() }?.let {
+                PairingCodec.decodeBase64UrlNoPad(it)
+            }?.takeIf { it.isNotEmpty() }
+            val cert = if (parts.firstOrNull() == "IDENTITY") field(1) else null
+            val key = if (parts.firstOrNull() == "IDENTITY") field(2) else null
+            identity = if (cert != null && key != null) cert to key else null
+            p2pSecret = field(3)?.takeIf { it.size == 32 }
+            authToken = field(4)?.takeIf { it.size == 16 }
+        } else {
+            identity = HostIdentityStore.loadFromPaths(certPath, keyPath)
+            p2pSecret = HostIdentityStore.loadP2pSecretFromPath(p2pSecretPath)
+            authToken = HostIdentityStore.loadAuthTokenFromPath(authTokenPath)
+        }
+        emit("LOG|Worker avviato come uid ${android.os.Process.myUid()}${if (android.os.Process.myUid() == 0) " (root)" else " (shell/Shizuku)"}")
 
         val config = HostRunConfig(
             port = port,
             profile = profile,
             preferHevc = preferHevc,
             mode = CaptureMode.ROOT,
+            intraRefresh = System.getProperty("phantom.intraRefresh") == "true",
         )
 
         val (srcW, srcH) = RootDisplayCapture.readPrimaryDisplaySize()
@@ -107,6 +130,15 @@ object RootHostMain {
                         val ok = RootDisplayPower.setPhysicalDisplayPower(true)
                         emit("LOG|Schermo fisico host riacceso (ok=$ok)")
                     }
+                    RemoteControlCommand.BACK -> injector.injectKeyCode(KeyEvent.KEYCODE_BACK)
+                    RemoteControlCommand.HOME -> injector.injectKeyCode(KeyEvent.KEYCODE_HOME)
+                    RemoteControlCommand.RECENTS -> injector.injectKeyCode(KeyEvent.KEYCODE_APP_SWITCH)
+                    RemoteControlCommand.NOTIFICATIONS -> runShell("cmd statusbar expand-notifications")
+                    RemoteControlCommand.QUICK_SETTINGS -> runShell("cmd statusbar expand-settings")
+                    RemoteControlCommand.POWER -> injector.injectKeyCode(KeyEvent.KEYCODE_POWER)
+                    RemoteControlCommand.VOLUME_UP -> injector.injectKeyCode(KeyEvent.KEYCODE_VOLUME_UP)
+                    RemoteControlCommand.VOLUME_DOWN -> injector.injectKeyCode(KeyEvent.KEYCODE_VOLUME_DOWN)
+                    RemoteControlCommand.SCREENSHOT -> injector.injectKeyCode(KeyEvent.KEYCODE_SYSRQ)
                 }
             },
             onClientConnected = {
@@ -135,7 +167,7 @@ object RootHostMain {
 
         val stdinThread = Thread({
             try {
-                val reader = BufferedReader(InputStreamReader(System.`in`))
+                val reader = stdin
                 while (true) {
                     val line = reader.readLine() ?: break
                     when {
@@ -174,6 +206,25 @@ object RootHostMain {
             RootDisplayPower.restoreIfTurnedOff()
         }
         emit("STOPPED")
+    }
+
+    /** Argomento al posto dei percorsi dell'identità: l'identità arriva come prima riga su stdin. */
+    const val IDENTITY_STDIN = "--identity-stdin"
+
+    /** Comando di sistema eseguito con i permessi del worker (root o shell), senza attendere l'esito. */
+    private fun runShell(command: String) {
+        Thread({
+            try {
+                val p = ProcessBuilder("sh", "-c", command).redirectErrorStream(true).start()
+                p.inputStream.readBytes()
+                p.waitFor()
+            } catch (t: Throwable) {
+                emit("LOG|Comando fallito ($command): ${t.javaClass.simpleName}")
+            }
+        }, "phantom-shell-cmd").apply {
+            isDaemon = true
+            start()
+        }
     }
 
     private fun preloadNativeLibs(libDir: String) {

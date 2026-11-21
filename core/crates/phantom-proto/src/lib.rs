@@ -77,6 +77,8 @@ pub enum Kind {
     Clipboard = 13,
     /// Comando di controllo remoto del dispositivo host (client → host).
     Control = 14,
+    /// Rapporto periodico dell'host su encoder e coda di invio (host → client).
+    HostReport = 15,
 }
 
 impl Kind {
@@ -96,6 +98,7 @@ impl Kind {
             12 => Kind::Audio,
             13 => Kind::Clipboard,
             14 => Kind::Control,
+            15 => Kind::HostReport,
             _ => return None,
         })
     }
@@ -196,6 +199,45 @@ pub enum ControlCommand {
     ScreenOff = 2,
     /// Riaccende il display fisico dell'host.
     ScreenOn = 3,
+    /// Tasto Indietro.
+    Back = 4,
+    /// Tasto Home.
+    Home = 5,
+    /// App recenti.
+    Recents = 6,
+    /// Apre la tendina delle notifiche.
+    Notifications = 7,
+    /// Apre le impostazioni rapide.
+    QuickSettings = 8,
+    /// Tasto di accensione (blocca o risveglia lo schermo).
+    Power = 9,
+    /// Volume su.
+    VolumeUp = 10,
+    /// Volume giù.
+    VolumeDown = 11,
+    /// Screenshot.
+    Screenshot = 12,
+}
+
+impl ControlCommand {
+    /// Comando dal suo valore sul filo.
+    pub fn from_u8(v: u8) -> Option<Self> {
+        Some(match v {
+            1 => ControlCommand::WakeScreen,
+            2 => ControlCommand::ScreenOff,
+            3 => ControlCommand::ScreenOn,
+            4 => ControlCommand::Back,
+            5 => ControlCommand::Home,
+            6 => ControlCommand::Recents,
+            7 => ControlCommand::Notifications,
+            8 => ControlCommand::QuickSettings,
+            9 => ControlCommand::Power,
+            10 => ControlCommand::VolumeUp,
+            11 => ControlCommand::VolumeDown,
+            12 => ControlCommand::Screenshot,
+            _ => return None,
+        })
+    }
 }
 
 /// Funzioni annunciate nell'apertura della sessione (`Hello`/`HelloAck`): un bit per funzione.
@@ -220,6 +262,10 @@ pub mod caps {
     pub const CLIPBOARD: u32 = 1 << 7;
     /// Controllo risveglio e spegnimento display fisico (`Message::Control`).
     pub const SCREEN_POWER: u32 = 1 << 8;
+    /// Rapporto periodico dell'host per la telemetria (`Message::HostReport`).
+    pub const HOST_REPORT: u32 = 1 << 9;
+    /// Tasti di sistema come comandi di controllo (Indietro, Home, Recenti, Notifiche, Power, Volume, Screenshot).
+    pub const SYSTEM_KEYS: u32 = 1 << 10;
 }
 
 /// Motivi del messaggio [`Message::Close`].
@@ -369,6 +415,37 @@ pub enum Message<'a> {
         /// Comando richiesto.
         command: ControlCommand,
     },
+    /// Rapporto periodico dell'host per la telemetria (host → client).
+    HostReport(HostReport),
+}
+
+/// Rapporto periodico dell'host (circa una volta al secondo): cosa sta facendo davvero l'encoder e com'è la coda di
+/// invio. Serve alla telemetria dell'app: senza, l'iPhone vede solo quello che riceve e non può distinguere un
+/// encoder lento da una rete lenta.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HostReport {
+    /// Frame al secondo prodotti dall'encoder, per dieci (604 = 60,4 fps).
+    pub encoder_fps_x10: u16,
+    /// Bitrate reale in uscita dall'encoder (kbit/s).
+    pub encoded_kbps: u32,
+    /// Bitrate chiesto all'encoder dal controllo (kbit/s).
+    pub target_kbps: u32,
+    /// Larghezza codificata (pixel).
+    pub width: u16,
+    /// Altezza codificata (pixel).
+    pub height: u16,
+    /// Tempo medio dalla cattura all'uscita dall'encoder (µs).
+    pub encode_latency_us: u32,
+    /// Byte in coda di invio nel trasporto.
+    pub send_queue_bytes: u32,
+    /// Datagrammi scartati dal trasporto per coda piena (cumulativo).
+    pub queue_overflows: u32,
+    /// Invii rifiutati dal trasporto (cumulativo).
+    pub send_errors: u32,
+    /// Keyframe spediti (cumulativo).
+    pub keyframes: u32,
+    /// Stato termico: 0 normale, 1 tiepido, 2 caldo, 3 critico.
+    pub thermal_level: u8,
 }
 
 /// Pacchetto audio codificato a bassa latenza.
@@ -540,6 +617,7 @@ impl Message<'_> {
             Message::Audio(_) => Kind::Audio,
             Message::Clipboard { .. } => Kind::Clipboard,
             Message::Control { .. } => Kind::Control,
+            Message::HostReport(_) => Kind::HostReport,
         }
     }
 
@@ -655,6 +733,19 @@ impl Message<'_> {
             Message::Control { ctrl_seq, command } => {
                 put_u32(out, *ctrl_seq);
                 out.push(*command as u8);
+            }
+            Message::HostReport(r) => {
+                put_u16(out, r.encoder_fps_x10);
+                put_u32(out, r.encoded_kbps);
+                put_u32(out, r.target_kbps);
+                put_u16(out, r.width);
+                put_u16(out, r.height);
+                put_u32(out, r.encode_latency_us);
+                put_u32(out, r.send_queue_bytes);
+                put_u32(out, r.queue_overflows);
+                put_u32(out, r.send_errors);
+                put_u32(out, r.keyframes);
+                out.push(r.thermal_level);
             }
         }
         if out.len() - start > MAX_DATAGRAM {
@@ -843,14 +934,22 @@ pub fn decode(buf: &[u8]) -> Result<(Header, Message<'_>), DecodeError> {
         }
         Kind::Control => {
             let ctrl_seq = r.u32()?;
-            let command = match r.u8()? {
-                1 => ControlCommand::WakeScreen,
-                2 => ControlCommand::ScreenOff,
-                3 => ControlCommand::ScreenOn,
-                _ => return Err(DecodeError::BadField("control command")),
-            };
+            let command = ControlCommand::from_u8(r.u8()?).ok_or(DecodeError::BadField("control command"))?;
             Message::Control { ctrl_seq, command }
         }
+        Kind::HostReport => Message::HostReport(HostReport {
+            encoder_fps_x10: r.u16()?,
+            encoded_kbps: r.u32()?,
+            target_kbps: r.u32()?,
+            width: r.u16()?,
+            height: r.u16()?,
+            encode_latency_us: r.u32()?,
+            send_queue_bytes: r.u32()?,
+            queue_overflows: r.u32()?,
+            send_errors: r.u32()?,
+            keyframes: r.u32()?,
+            thermal_level: r.u8()?,
+        }),
     };
     // Dopo un messaggio a lunghezza fissa non devono restare byte (tranne il video, che ha già letto il suo payload).
     if !r.done() {
@@ -986,6 +1085,25 @@ mod tests {
         roundtrip(&Message::Control { ctrl_seq: 3, command: ControlCommand::ScreenOff });
         roundtrip(&Message::Control { ctrl_seq: 4, command: ControlCommand::WakeScreen });
         roundtrip(&Message::Control { ctrl_seq: 5, command: ControlCommand::ScreenOn });
+        for v in 1..=12u8 {
+            let command = ControlCommand::from_u8(v).expect("comando noto");
+            assert_eq!(command as u8, v);
+            roundtrip(&Message::Control { ctrl_seq: u32::from(v), command });
+        }
+        assert!(ControlCommand::from_u8(0).is_none() && ControlCommand::from_u8(13).is_none());
+        roundtrip(&Message::HostReport(HostReport {
+            encoder_fps_x10: 604,
+            encoded_kbps: 14_250,
+            target_kbps: 16_000,
+            width: 1080,
+            height: 2400,
+            encode_latency_us: 9_500,
+            send_queue_bytes: 12_288,
+            queue_overflows: 3,
+            send_errors: 1,
+            keyframes: 7,
+            thermal_level: 1,
+        }));
     }
 
     #[test]

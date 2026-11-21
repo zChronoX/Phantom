@@ -35,6 +35,19 @@ struct RemoteSessionMetrics: Equatable {
     var framesLost: UInt64 = 0
     var hostTouchReceived: UInt64 = 0
     var hostKeyReceived: UInt64 = 0
+
+    // Telemetria estesa (HUD espanso)
+    /// Latenza dalla cattura sull'host alla consegna al decoder (ms), mediana e 95° percentile della finestra.
+    var latencyP50Ms: Double?
+    var latencyP95Ms: Double?
+    /// Richieste di keyframe spedite dal client (cumulativo).
+    var keyframeRequests: UInt64 = 0
+    /// Frame scartati o non decodificati dal renderer iOS (cumulativo).
+    var decoderDrops: UInt64 = 0
+    /// Ultimo rapporto dell'host: `nil` se l'host è una versione che non lo manda.
+    var host: HostReportInfo?
+    /// Buffer anti-jitter dell'audio: `nil` finché l'audio non parte.
+    var audio: JitterAudioCounters?
 }
 
 /// Coordina `QuicConnection` + `PhantomClient` (e, in loopback, l'host locale) per il controllo remoto a bassa latenza.
@@ -46,6 +59,8 @@ final class RemoteSession: ObservableObject {
     @Published private(set) var audioMuted = false
     @Published private(set) var hostScreenOff = false
     @Published private(set) var toastText: String?
+    /// L'host esegue i tasti di sistema come comandi (Android 1.3+): funzionano anche in Shizuku e Accessibilità.
+    @Published private(set) var systemKeysSupported = false
 
     var onSample: ((CMSampleBuffer, Bool) -> Void)?
 
@@ -75,12 +90,15 @@ final class RemoteSession: ObservableObject {
     private let sampleLock = NSLock()
     private let sampleBuilder = AnnexBSampleBuilder()
     private var touchDispatch = TouchDispatchState()
+    private var decoderDrops: UInt64 = 0
+    private var latestAudioCounters: JitterAudioCounters?
     private var lastReportedVideoSize = VideoDimensions.zero
 
     // Finestra metrica lato client (protetta da `sampleLock`)
     private var windowStart = CACurrentMediaTime()
     private var framesInWindow = 0
     private var bytesInWindow = 0
+    private var latenciesInWindowMs: [Double] = []
 
     private static func nowUs() -> UInt64 {
         DispatchTime.now().uptimeNanoseconds / 1_000
@@ -101,6 +119,8 @@ final class RemoteSession: ObservableObject {
             waitingForReconnect = false
             pathObserver = observer
             touchDispatch.reset()
+            decoderDrops = 0
+            latestAudioCounters = nil
             return generation
         }
         observer.onNetworkChanged = { [weak self] isCellularOnly, isSatisfied in
@@ -130,6 +150,7 @@ final class RemoteSession: ObservableObject {
         windowStart = CACurrentMediaTime()
         framesInWindow = 0
         bytesInWindow = 0
+        latenciesInWindowMs.removeAll()
         sampleLock.unlock()
     }
 
@@ -196,6 +217,28 @@ final class RemoteSession: ObservableObject {
         }
     }
 
+    /// Tasti rapidi dell'HUD: comandi di sistema se l'host li conosce, altrimenti la vecchia sequenza HID.
+    func sendQuickAction(_ action: RemoteQuickAction) {
+        if systemKeysSupported {
+            let command: RemoteControlCommand
+            switch action {
+            case .back: command = .back
+            case .home: command = .home
+            case .recents: command = .recents
+            case .volumeUp: command = .volumeUp
+            case .volumeDown: command = .volumeDown
+            case .power: command = .power
+            case .notifications: command = .notifications
+            case .screenshot: command = .screenshot
+            }
+            sendControl(command)
+        } else if !action.hidSequence.isEmpty {
+            sendKeyEvents(action.hidSequence)
+        } else {
+            showToast("Aggiorna Phantom su Android per questo tasto")
+        }
+    }
+
     func sendControl(_ command: RemoteControlCommand) {
         let (c, q): (PhantomClient?, QuicConnection?) = withLock { (client, connection) }
         guard let c = c, let q = q else { return }
@@ -212,6 +255,10 @@ final class RemoteSession: ObservableObject {
                 case .wakeScreen:
                     self.hostScreenOff = false
                     self.showToast("Risveglio inviato ad Android")
+                case .screenshot:
+                    self.showToast("Screenshot richiesto")
+                default:
+                    break
                 }
             }
         }
@@ -246,7 +293,10 @@ final class RemoteSession: ObservableObject {
     /// corrotti fino al prossimo keyframe, che con gli I-frame ogni 10 s può arrivare molto tardi. Il core scarta i
     /// frame non-key in arrivo e chiede subito un keyframe all'host (una sola richiesta alla volta).
     func requestKeyframeAfterDecoderDrop() {
-        let (c, q): (PhantomClient?, QuicConnection?) = withLock { (client, connection) }
+        let (c, q): (PhantomClient?, QuicConnection?) = withLock {
+            decoderDrops &+= 1
+            return (client, connection)
+        }
         guard let c = c, let q = q else { return }
         ioQueue.async {
             if let datagram = c.requestKeyframe(nowUs: Self.nowUs()) {
@@ -515,6 +565,9 @@ final class RemoteSession: ObservableObject {
         for f in frames {
             bytesInWindow += f.data.count
             framesInWindow += 1
+            if let lat = f.latencyUs, lat >= 0, lat < 5_000_000 {
+                latenciesInWindowMs.append(Double(lat) / 1000.0)
+            }
             if let built = sampleBuilder.buildSample(from: f.data, codec: f.codec) {
                 readySamples.append((built.sampleBuffer, built.formatChanged))
                 if built.dimensions.isValid && built.dimensions != lastReportedVideoSize {
@@ -544,14 +597,24 @@ final class RemoteSession: ObservableObject {
         let fps = Double(framesInWindow) / elapsed
         let mbps = Double(bytesInWindow) * 8.0 / 1_000_000.0 / elapsed
         let videoDims = sampleBuilder.dimensions
+        let latency = BenchSummary(latenciesInWindowMs)
         windowStart = nowMedia
         framesInWindow = 0
         bytesInWindow = 0
+        latenciesInWindowMs.removeAll(keepingCapacity: true)
         sampleLock.unlock()
+
+        // I contatori audio arrivano dalla coda dell'audio: si usa l'ultimo valore (al massimo mezzo secondo vecchio).
+        audioPlayer.counters { [weak self] c in
+            guard let self = self else { return }
+            self.withLock { self.latestAudioCounters = c }
+        }
 
         let negotiated = client.negotiated()
         let counters = client.counters(nowUs: nowUs)
-        let (hostCounters, epLabel): (HostCounters?, String) = withLock { (hostLoopback?.hostCounters(), activeEndpointLabel) }
+        let (hostCounters, epLabel, drops, audioCounters): (HostCounters?, String, UInt64, JitterAudioCounters?) = withLock {
+            (hostLoopback?.hostCounters(), activeEndpointLabel, decoderDrops, latestAudioCounters)
+        }
 
         var snap = RemoteSessionMetrics()
         snap.connected = negotiated != nil && !client.isClosed()
@@ -564,6 +627,14 @@ final class RemoteSession: ObservableObject {
         snap.framesLost = counters.framesLost
         snap.videoWidth = videoDims.width
         snap.videoHeight = videoDims.height
+        if latency.count > 0 {
+            snap.latencyP50Ms = latency.p50
+            snap.latencyP95Ms = latency.p95
+        }
+        snap.keyframeRequests = counters.keyframeRequests
+        snap.decoderDrops = drops
+        snap.host = client.hostReport()
+        snap.audio = audioCounters
         if let hc = hostCounters {
             snap.hostTouchReceived = hc.touchStates
             snap.hostKeyReceived = hc.keyEvents
@@ -583,8 +654,12 @@ final class RemoteSession: ObservableObject {
             snap.codecName = agreement.videoCodec ?? "n/d"
         }
 
+        let systemKeys = negotiated.map { capsContains(caps: $0.caps, capability: .systemKeys) } ?? false
         guard isGenerationActive(gen) else { return }
         DispatchQueue.main.async {
+            if self.systemKeysSupported != systemKeys {
+                self.systemKeysSupported = systemKeys
+            }
             self.metrics = snap
             if snap.connected {
                 self.statusText = "Connesso (\(snap.codecName))"

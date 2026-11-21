@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use phantom_core::jitter::{AudioJitter, JitterConfig};
 use phantom_core::phantom_proto::{
-    caps, AudioCodec as ProtoAudioCodec, Codec, ControlCommand as ProtoControlCommand, Finger, Header, Message,
-    HEADER_LEN, MAX_DATAGRAM, MAX_FINGERS, MAX_VIDEO_PAYLOAD, VIDEO_HEADER_LEN,
+    caps, AudioCodec as ProtoAudioCodec, Codec, ControlCommand as ProtoControlCommand, Finger, Header,
+    HostReport as ProtoHostReport, Message, HEADER_LEN, MAX_DATAGRAM, MAX_FINGERS, MAX_VIDEO_PAYLOAD, VIDEO_HEADER_LEN,
 };
 use phantom_core::{AudioSample, Client, Delivered, Host, KeyEvent, Negotiated, SessionConfig};
 use phantom_p2p::{P2pEndpoint, P2pError, P2pLink};
@@ -191,6 +191,24 @@ pub enum RemoteControlCommand {
     ScreenOff,
     /// Riaccende il display fisico dell'host.
     ScreenOn,
+    /// Tasto Indietro.
+    Back,
+    /// Tasto Home.
+    Home,
+    /// App recenti.
+    Recents,
+    /// Tendina delle notifiche.
+    Notifications,
+    /// Impostazioni rapide.
+    QuickSettings,
+    /// Tasto di accensione (blocca o risveglia).
+    Power,
+    /// Volume su.
+    VolumeUp,
+    /// Volume giù.
+    VolumeDown,
+    /// Screenshot.
+    Screenshot,
 }
 
 impl From<RemoteControlCommand> for ProtoControlCommand {
@@ -199,6 +217,15 @@ impl From<RemoteControlCommand> for ProtoControlCommand {
             RemoteControlCommand::WakeScreen => ProtoControlCommand::WakeScreen,
             RemoteControlCommand::ScreenOff => ProtoControlCommand::ScreenOff,
             RemoteControlCommand::ScreenOn => ProtoControlCommand::ScreenOn,
+            RemoteControlCommand::Back => ProtoControlCommand::Back,
+            RemoteControlCommand::Home => ProtoControlCommand::Home,
+            RemoteControlCommand::Recents => ProtoControlCommand::Recents,
+            RemoteControlCommand::Notifications => ProtoControlCommand::Notifications,
+            RemoteControlCommand::QuickSettings => ProtoControlCommand::QuickSettings,
+            RemoteControlCommand::Power => ProtoControlCommand::Power,
+            RemoteControlCommand::VolumeUp => ProtoControlCommand::VolumeUp,
+            RemoteControlCommand::VolumeDown => ProtoControlCommand::VolumeDown,
+            RemoteControlCommand::Screenshot => ProtoControlCommand::Screenshot,
         }
     }
 }
@@ -209,6 +236,15 @@ impl From<ProtoControlCommand> for RemoteControlCommand {
             ProtoControlCommand::WakeScreen => RemoteControlCommand::WakeScreen,
             ProtoControlCommand::ScreenOff => RemoteControlCommand::ScreenOff,
             ProtoControlCommand::ScreenOn => RemoteControlCommand::ScreenOn,
+            ProtoControlCommand::Back => RemoteControlCommand::Back,
+            ProtoControlCommand::Home => RemoteControlCommand::Home,
+            ProtoControlCommand::Recents => RemoteControlCommand::Recents,
+            ProtoControlCommand::Notifications => RemoteControlCommand::Notifications,
+            ProtoControlCommand::QuickSettings => RemoteControlCommand::QuickSettings,
+            ProtoControlCommand::Power => RemoteControlCommand::Power,
+            ProtoControlCommand::VolumeUp => RemoteControlCommand::VolumeUp,
+            ProtoControlCommand::VolumeDown => RemoteControlCommand::VolumeDown,
+            ProtoControlCommand::Screenshot => RemoteControlCommand::Screenshot,
         }
     }
 }
@@ -258,6 +294,10 @@ pub enum Capability {
     Clipboard,
     /// Controllo risveglio/oscuramento display fisico dell'host.
     ScreenPower,
+    /// Rapporto periodico dell'host per la telemetria.
+    HostReport,
+    /// Tasti di sistema come comandi di controllo.
+    SystemKeys,
 }
 
 impl Capability {
@@ -272,6 +312,8 @@ impl Capability {
             Capability::AudioAac => caps::AUDIO_AAC,
             Capability::Clipboard => caps::CLIPBOARD,
             Capability::ScreenPower => caps::SCREEN_POWER,
+            Capability::HostReport => caps::HOST_REPORT,
+            Capability::SystemKeys => caps::SYSTEM_KEYS,
         }
     }
 }
@@ -449,6 +491,71 @@ pub struct HostCounters {
     pub bitrate_decreases: u64,
     /// Bitrate che l'encoder dovrebbe usare adesso (bit/s).
     pub target_bitrate_bps: u64,
+    /// Keyframe spediti.
+    pub keyframes_sent: u64,
+}
+
+/// Rapporto periodico dell'host per la telemetria (encoder, coda di invio, stato termico).
+#[derive(Clone, Copy, Debug, Default, PartialEq, uniffi::Record)]
+pub struct HostReportInfo {
+    /// Frame al secondo prodotti dall'encoder.
+    pub encoder_fps: f64,
+    /// Bitrate reale in uscita dall'encoder (kbit/s).
+    pub encoded_kbps: u32,
+    /// Bitrate chiesto all'encoder dal controllo (kbit/s).
+    pub target_kbps: u32,
+    /// Larghezza codificata (pixel).
+    pub width: u16,
+    /// Altezza codificata (pixel).
+    pub height: u16,
+    /// Tempo medio dalla cattura all'uscita dall'encoder (µs).
+    pub encode_latency_us: u32,
+    /// Byte in coda di invio nel trasporto.
+    pub send_queue_bytes: u32,
+    /// Datagrammi scartati dal trasporto per coda piena (cumulativo).
+    pub queue_overflows: u32,
+    /// Invii rifiutati dal trasporto (cumulativo).
+    pub send_errors: u32,
+    /// Keyframe spediti (cumulativo; quando si spedisce lo mette l'host).
+    pub keyframes: u32,
+    /// Stato termico: 0 normale, 1 tiepido, 2 caldo, 3 critico.
+    pub thermal_level: u8,
+}
+
+impl From<HostReportInfo> for ProtoHostReport {
+    fn from(r: HostReportInfo) -> Self {
+        ProtoHostReport {
+            encoder_fps_x10: (r.encoder_fps * 10.0).round().clamp(0.0, f64::from(u16::MAX)) as u16,
+            encoded_kbps: r.encoded_kbps,
+            target_kbps: r.target_kbps,
+            width: r.width,
+            height: r.height,
+            encode_latency_us: r.encode_latency_us,
+            send_queue_bytes: r.send_queue_bytes,
+            queue_overflows: r.queue_overflows,
+            send_errors: r.send_errors,
+            keyframes: r.keyframes,
+            thermal_level: r.thermal_level,
+        }
+    }
+}
+
+impl From<ProtoHostReport> for HostReportInfo {
+    fn from(r: ProtoHostReport) -> Self {
+        HostReportInfo {
+            encoder_fps: f64::from(r.encoder_fps_x10) / 10.0,
+            encoded_kbps: r.encoded_kbps,
+            target_kbps: r.target_kbps,
+            width: r.width,
+            height: r.height,
+            encode_latency_us: r.encode_latency_us,
+            send_queue_bytes: r.send_queue_bytes,
+            queue_overflows: r.queue_overflows,
+            send_errors: r.send_errors,
+            keyframes: r.keyframes,
+            thermal_level: r.thermal_level,
+        }
+    }
 }
 
 /// Contatori e misure del client.
@@ -592,7 +699,14 @@ impl PhantomHost {
             key_events: s.key_events,
             bitrate_decreases: s.bitrate_decreases,
             target_bitrate_bps: g.host.target_bitrate_bps(),
+            keyframes_sent: s.keyframes_sent,
         }
+    }
+
+    /// Rapporto periodico per la telemetria del client (circa una volta al secondo): il datagramma da spedire, o
+    /// `None` se la sessione non è aperta o il client non lo sa leggere. Il numero di keyframe lo mette l'host.
+    pub fn host_report(&self, report: HostReportInfo) -> Option<Vec<u8>> {
+        lock(&self.inner).host.host_report(report.into())
     }
 
     /// Esito dell'apertura della sessione (`Hello`/`HelloAck`), se il client l'ha già aperta: versione e funzioni
@@ -761,6 +875,11 @@ impl PhantomClient {
         lock(&self.inner).request_keyframe(now_us)
     }
 
+    /// Ultimo rapporto dell'host (encoder, coda di invio, stato termico), se ne è arrivato uno.
+    pub fn host_report(&self) -> Option<HostReportInfo> {
+        lock(&self.inner).host_report().map(HostReportInfo::from)
+    }
+
     /// Contatori e misure; `now_us` è l'ora locale del client.
     pub fn counters(&self, now_us: u64) -> ClientCounters {
         let g = lock(&self.inner);
@@ -792,13 +911,15 @@ pub struct JitterAudioFrame {
 }
 
 /// Risposta di [`AudioJitterBuffer::poll`].
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct JitterAudioPoll {
     /// Se presente: svuotare il riproduttore e portare il suo orologio a questa posizione (campioni) prima di
     /// accodare `frames`.
     pub resync_playhead_samples: Option<i64>,
     /// Pacchetti da accodare, in ordine.
     pub frames: Vec<JitterAudioFrame>,
+    /// Velocità di riproduzione consigliata (1,0 ± 0,5%) per assorbire la deriva tra gli orologi senza salti.
+    pub playback_rate: f64,
 }
 
 /// Contatori del buffer anti-jitter audio.
@@ -849,6 +970,7 @@ impl AudioJitterBuffer {
                 .into_iter()
                 .map(|f| JitterAudioFrame { pts_samples: f.pts_samples, data: f.data })
                 .collect(),
+            playback_rate: p.playback_rate,
         }
     }
 
@@ -1505,6 +1627,28 @@ mod tests {
         assert_eq!(clamped_low.frag_size, 1);
         let clamped_high: SessionConfig = SessionSettings { frag_size: u16::MAX, ..d }.into();
         assert_eq!(clamped_high.frag_size, MAX_VIDEO_PAYLOAD as u16);
+    }
+
+    #[test]
+    fn host_report_travels_from_host_to_client() {
+        let host = PhantomHost::new(default_session_settings());
+        let client = PhantomClient::new(default_session_settings());
+        let hello = client.tick(0).remove(0);
+        let ack = host.on_datagram(0, hello).remove(0);
+        client.on_datagram(0, ack);
+        assert!(caps_contains(client.negotiated().expect("aperta").caps, Capability::HostReport));
+        let info = HostReportInfo {
+            encoder_fps: 59.94,
+            encoded_kbps: 12_000,
+            width: 1080,
+            height: 2400,
+            ..HostReportInfo::default()
+        };
+        let d = host.host_report(info).expect("rapporto");
+        client.on_datagram(1, d);
+        let got = client.host_report().expect("ricevuto");
+        assert!((got.encoder_fps - 59.9).abs() < 1e-9, "decimi di fps: {}", got.encoder_fps);
+        assert_eq!((got.encoded_kbps, got.width, got.height, got.keyframes), (12_000, 1080, 2400, 0));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-20. Branch `main`, base `9425593` (v1.2.0) più correzioni audio v1.2.1 non committate.
+Ultimo aggiornamento: 2026-11-20. Branch `main`, base `b948eda` (v1.2.1) più la v1.3.0 non committata.
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Dove siamo
@@ -379,10 +379,15 @@ Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
   istanti dal conteggio dei campioni e senza PCM perso, `AudioSpecificConfig` ripetuto, ogni pacchetto audio spedito
   due volte. Dettagli in `HANDOFF.md`.
 
+- **Prova v1.2.1**: audio buono (qualche micro-lag), video ok; fps mostrati max 60/62 (limite dello Snapdragon 695
+  a 1080p: l'encoder scende da 120 a 60 da solo).
+- **v1.3.0 (locale, da committare)**: telemetria completa nell'HUD, modalità Shizuku, Accessibilità in modalità
+  Standard, tasti di sistema veri, qualità adattiva e intra-refresh, correzione morbida della deriva audio, release
+  seria (changelog, controllo versioni, keystore, esportazione log) e pulizia (archivio legacy via script, MSRV).
+  Dettagli in `HANDOFF.md` e `CHANGELOG.md`.
+
 ## Prossimo passo
 
-1. Committare e pushare `v1.2.1` e riprovare l'audio sul Redmi (musica o video), poi creare il tag della release.
-2. Fase «progetto completo»: controllo senza root (Shizuku/ADB wireless), adattamento di risoluzione e fps, tasti di
-   sistema nell'app iOS, telemetria estesa, release seria.
-3. Quando il Redmi Note 11 Pro 5G avrà il root, verificare multi-touch/tastiera, audio Root Android 12+, `Schermo Off`
-   fisico e Doze in 5G reale.
+1. Committare e pushare la v1.3.0, provare sul Redmi le tre modalità (vedi `HANDOFF.md`), poi tag `v1.3.0` e
+   archivio della legacy.
+2. Quando il Redmi Note 11 Pro 5G avrà il root, verificare anche la modalità Root (stesso motore di Shizuku).

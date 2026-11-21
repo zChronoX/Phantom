@@ -552,6 +552,14 @@ struct RemoteSessionView: View {
                     quickButton("Vol+", systemImage: "speaker.wave.3", action: .volumeUp)
                 }
 
+                if session.systemKeysSupported {
+                    HStack(spacing: 8) {
+                        quickButton("Notifiche", systemImage: "bell", action: .notifications)
+                        quickButton("Screenshot", systemImage: "camera.viewfinder", action: .screenshot)
+                        quickButton("Blocca", systemImage: "lock", action: .power)
+                    }
+                }
+
                 HStack(spacing: 8) {
                     controlButton("Appunti", systemImage: "doc.on.clipboard") {
                         session.sendClipboardFromPasteboard()
@@ -572,10 +580,16 @@ struct RemoteSessionView: View {
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.white.opacity(0.7))
                 } else if session.metrics.connected {
-                    Text(hudDetailLine)
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.72))
-                        .lineLimit(1)
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(Array(hudTelemetryLines.enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.white.opacity(0.72))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
@@ -594,25 +608,84 @@ struct RemoteSessionView: View {
         return String(format: "%@%.0f fps · %@", prefix, m.fps, rtt)
     }
 
-    private var hudDetailLine: String {
+    /// Telemetria dell'HUD espanso, una riga per argomento: video, latenza, rete, audio e host.
+    private var hudTelemetryLines: [String] {
         let m = session.metrics
-        var parts: [String] = []
+        var lines: [String] = []
+
+        // Video: risoluzione e codec, fps dell'encoder (dal rapporto dell'host) e fps ricevuti
+        var video: [String] = []
         if m.videoWidth > 0 && m.videoHeight > 0 {
-            parts.append("\(m.videoWidth)×\(m.videoHeight)")
+            video.append("\(m.videoWidth)×\(m.videoHeight)")
         }
         if !m.codecName.isEmpty {
-            parts.append(m.codecName)
+            video.append(m.codecName)
         }
-        parts.append(String(format: "%.1f Mbps", m.bitrateMbps))
+        if let h = m.host {
+            video.append(String(format: "encoder %.0f fps", h.encoderFps))
+        }
+        video.append(String(format: "ricevuti %.0f fps", m.fps))
+        lines.append(video.joined(separator: " · "))
+
+        // Latenza: cattura → decoder (mediana e p95), tempo di codifica, RTT, coda
+        var latency: [String] = []
+        if let p50 = m.latencyP50Ms, let p95 = m.latencyP95Ms {
+            latency.append(String(format: "latenza %.0f ms (p95 %.0f)", p50, p95))
+        } else {
+            latency.append("latenza –")
+        }
+        if let h = m.host, h.encodeLatencyUs > 0 {
+            latency.append(String(format: "codifica %.0f ms", Double(h.encodeLatencyUs) / 1000.0))
+        }
+        if let rtt = m.rttMs {
+            latency.append(String(format: "RTT %.0f ms", rtt))
+        }
         if let q = m.queueDelayMs {
-            parts.append(String(format: "coda %.0f ms", q))
+            latency.append(String(format: "coda %.0f ms", q))
         }
-        return parts.joined(separator: " · ")
+        lines.append(latency.joined(separator: " · "))
+
+        // Rete: bitrate ricevuto e obiettivo, coda di invio dell'host, perdite e keyframe
+        var net: [String] = []
+        if let h = m.host, h.targetKbps > 0 {
+            net.append(String(format: "%.1f/%.0f Mbps", m.bitrateMbps, Double(h.targetKbps) / 1000.0))
+        } else {
+            net.append(String(format: "%.1f Mbps", m.bitrateMbps))
+        }
+        net.append("persi \(m.framesLost)")
+        if let h = m.host {
+            net.append("coda host \(h.sendQueueBytes / 1024) KB")
+            if h.queueOverflows > 0 || h.sendErrors > 0 {
+                net.append("scartati \(h.queueOverflows + h.sendErrors)")
+            }
+            net.append("keyframe \(h.keyframes)")
+        } else {
+            net.append("richieste keyframe \(m.keyframeRequests)")
+        }
+        if m.decoderDrops > 0 {
+            net.append("decoder \(m.decoderDrops)")
+        }
+        lines.append(net.joined(separator: " · "))
+
+        // Audio e stato termico dell'host
+        var tail: [String] = []
+        if let a = m.audio {
+            tail.append("audio \(a.delayMs) ms · buchi \(a.skipped) · ritardi \(a.late) · resync \(a.resyncs)")
+        } else {
+            tail.append("audio –")
+        }
+        if let h = m.host {
+            let thermal = ["normale", "tiepido", "caldo", "critico"]
+            let level = Int(h.thermalLevel)
+            tail.append("termico " + (level < thermal.count ? thermal[level] : "?"))
+        }
+        lines.append(tail.joined(separator: " · "))
+        return lines
     }
 
     private func quickButton(_ title: String, systemImage: String, action: RemoteQuickAction) -> some View {
         controlButton(title, systemImage: systemImage) {
-            session.sendKeyEvents(action.hidSequence)
+            session.sendQuickAction(action)
         }
     }
 

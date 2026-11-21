@@ -12,8 +12,8 @@ use std::collections::VecDeque;
 
 use phantom_clock::{ClockSync, Sample};
 use phantom_proto::{
-    audio_flags, caps, close_reason, decode, AudioCodec, AudioPacket, Codec, ControlCommand, Finger, Header, Message,
-    Role, Stats, MAX_AUDIO_PAYLOAD, MAX_CLIPBOARD_BYTES, QUEUE_DELAY_UNKNOWN, VERSION,
+    audio_flags, caps, close_reason, decode, AudioCodec, AudioPacket, Codec, ControlCommand, Finger, Header,
+    HostReport, Message, Role, Stats, MAX_AUDIO_PAYLOAD, MAX_CLIPBOARD_BYTES, QUEUE_DELAY_UNKNOWN, VERSION,
 };
 use phantom_video::{AssembledFrame, EncodedFrame, Output, ReceiverConfig, VideoReceiver, VideoSender};
 use rate::{RateConfig, RateController};
@@ -228,6 +228,8 @@ pub struct HostStats {
     pub key_events: u64,
     /// Riduzioni del bitrate decise dal controllo.
     pub bitrate_decreases: u64,
+    /// Keyframe spediti.
+    pub keyframes_sent: u64,
 }
 
 /// Lato host (Android): riceve ping, NACK, richieste di keyframe e tocco; spedisce video.
@@ -331,6 +333,8 @@ impl Host {
             | audio
             | caps::CLIPBOARD
             | caps::SCREEN_POWER
+            | caps::HOST_REPORT
+            | caps::SYSTEM_KEYS
     }
 
     fn encode(&mut self, m: &Message<'_>) -> Option<Vec<u8>> {
@@ -370,6 +374,18 @@ impl Host {
             && self.last_key_ts_us.is_none_or(|t| now_us.saturating_sub(t) >= self.cfg.min_keyframe_gap_us)
     }
 
+    /// Prepara il rapporto periodico per la telemetria del client (circa una volta al secondo). Il conteggio dei
+    /// keyframe lo mette l'host; il resto lo misura l'app. `None` se la sessione non è aperta o il client non sa
+    /// leggere il rapporto (app più vecchia).
+    pub fn host_report(&mut self, report: HostReport) -> Option<Vec<u8>> {
+        let n = self.negotiated?;
+        if self.closed.is_some() || n.caps & caps::HOST_REPORT == 0 {
+            return None;
+        }
+        let report = HostReport { keyframes: self.stats.keyframes_sent.min(u64::from(u32::MAX)) as u32, ..report };
+        self.encode(&Message::HostReport(report))
+    }
+
     /// Chiede un keyframe dal lato host, senza aspettare il client: per esempio quando il trasporto ha dovuto scartare
     /// datagrammi già in coda (il client vedrebbe un frame rotto solo dopo il timeout). Vale il distanziamento minimo
     /// di [`Host::wants_keyframe`]; prima dell'apertura della sessione non fa nulla.
@@ -390,6 +406,7 @@ impl Host {
         if key {
             self.keyframe_wanted = false;
             self.last_key_ts_us = Some(capture_ts_us);
+            self.stats.keyframes_sent += 1;
         }
         let f = EncodedFrame { frame_id, codec: self.cfg.codec, key, config: key, capture_ts_us, data };
         let out = self.video.send_frame(&f);
@@ -587,6 +604,8 @@ pub struct Client {
     closed: Option<u8>,
     /// Frame consegnati al decoder.
     pub delivered: Vec<Delivered>,
+    /// Ultimo rapporto dell'host (telemetria).
+    host_report: Option<HostReport>,
 }
 
 impl Client {
@@ -616,6 +635,7 @@ impl Client {
             next_hello_us: 0,
             closed: None,
             delivered: Vec::new(),
+            host_report: None,
         }
     }
 
@@ -656,6 +676,8 @@ impl Client {
             | caps::AUDIO_AAC
             | caps::CLIPBOARD
             | caps::SCREEN_POWER
+            | caps::HOST_REPORT
+            | caps::SYSTEM_KEYS
     }
 
     /// Frame consegnati dal ricevitore dall'ultima chiamata, nell'ordine di arrivo: chi usa il client per un'app li
@@ -789,9 +811,17 @@ impl Client {
                 self.last_clip_seq = Some(clip_seq);
                 self.pending_clipboard = Some(text.to_owned());
             }
+            Message::HostReport(r) => {
+                self.host_report = Some(r);
+            }
             _ => {}
         }
         send
+    }
+
+    /// Ultimo rapporto dell'host (encoder, coda di invio, stato termico), se ne è arrivato uno.
+    pub fn host_report(&self) -> Option<HostReport> {
+        self.host_report
     }
 
     /// Da chiamare di frequente: ping di sincronia, timer del video. Restituisce i datagrammi da spedire.
@@ -1552,5 +1582,37 @@ mod resync {
 
         let again = cfg.receiver.key_retry_us + 3_000;
         assert!(client.request_keyframe(again).is_some(), "dopo il keyframe si può richiedere di nuovo");
+    }
+}
+
+#[cfg(test)]
+mod host_report {
+    use super::*;
+
+    /// Il rapporto dell'host parte solo a sessione aperta, arriva al client e porta il conteggio dei keyframe.
+    #[test]
+    fn host_report_reaches_client_after_open() {
+        let cfg = SessionConfig::default();
+        let mut host = Host::new(cfg.clone());
+        let mut client = Client::new(cfg);
+        let sample = HostReport { encoder_fps_x10: 600, width: 1080, height: 2400, ..HostReport::default() };
+        assert!(host.host_report(sample).is_none(), "prima dell'apertura non parte nulla");
+
+        let hello = client.tick(0).remove(0);
+        let ack = host.on_datagram(0, &hello).remove(0);
+        client.on_datagram(0, &ack);
+        assert_ne!(client.negotiated().map_or(0, |n| n.caps) & caps::HOST_REPORT, 0, "funzione concordata");
+
+        host.send_frame(0, true, 0, &[1; 64]);
+        host.send_frame(1, false, 0, &[2; 64]);
+        host.send_frame(2, true, 0, &[3; 64]);
+        assert!(client.host_report().is_none());
+        let d = host.host_report(sample).expect("rapporto");
+        client.on_datagram(10, &d);
+        let got = client.host_report().expect("ricevuto");
+        assert_eq!(got.encoder_fps_x10, 600);
+        assert_eq!((got.width, got.height), (1080, 2400));
+        assert_eq!(got.keyframes, 2, "i keyframe li conta l'host");
+        assert_eq!(host.stats().keyframes_sent, 2);
     }
 }

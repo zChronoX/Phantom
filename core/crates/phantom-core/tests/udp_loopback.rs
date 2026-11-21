@@ -41,7 +41,7 @@ struct ClientReport {
 }
 
 fn frame_bytes(rng: &mut Rng, id: u32, scale: f64, host_wants_key: bool) -> (Vec<u8>, bool) {
-    let key = id % 240 == 0 || host_wants_key;
+    let key = id.is_multiple_of(240) || host_wants_key;
     let base = if key { 120_000.0 } else { 10_000.0 + rng.up_to(20_000) as f64 };
     let len = ((base * scale) as usize).max(200);
     ((0..len).map(|i| (i as u32).wrapping_mul(2654435761).wrapping_add(id) as u8).collect(), key)

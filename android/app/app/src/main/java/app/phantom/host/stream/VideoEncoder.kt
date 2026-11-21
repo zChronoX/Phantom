@@ -124,6 +124,7 @@ class VideoEncoder private constructor(
             val setVbr: Boolean,
             val lowLatencyHints: Boolean,
             val maxLongSideOverride: Int? = null,
+            val intraRefresh: Boolean = false,
         )
 
         fun create(
@@ -132,10 +133,15 @@ class VideoEncoder private constructor(
             requestedFps: Int,
             preferHevc: Boolean,
             initialBitrateBps: Int,
+            intraRefresh: Boolean = false,
             onLog: (String) -> Unit,
         ): VideoEncoder {
-            val attempts = ArrayList<Attempt>(8)
+            val attempts = ArrayList<Attempt>(9)
             val firstCodec = if (preferHevc) VideoCodec.H265 else VideoCodec.H264
+            if (intraRefresh) {
+                // Se l'encoder non accetta l'intra-refresh si ricade sui tentativi normali
+                attempts.add(Attempt(firstCodec, requestedFps, setVbr = true, lowLatencyHints = true, intraRefresh = true))
+            }
             attempts.add(Attempt(firstCodec, requestedFps, setVbr = true, lowLatencyHints = true))
             if (requestedFps > 60) {
                 attempts.add(Attempt(firstCodec, 60, setVbr = true, lowLatencyHints = true))
@@ -163,6 +169,7 @@ class VideoEncoder private constructor(
                         setVbr = attempt.setVbr,
                         lowLatencyHints = attempt.lowLatencyHints,
                         maxLongSideOverride = attempt.maxLongSideOverride,
+                        intraRefresh = attempt.intraRefresh,
                         onLog = onLog,
                     )
                 } catch (t: Throwable) {
@@ -183,6 +190,7 @@ class VideoEncoder private constructor(
             setVbr: Boolean,
             lowLatencyHints: Boolean,
             maxLongSideOverride: Int?,
+            intraRefresh: Boolean,
             onLog: (String) -> Unit,
         ): VideoEncoder {
             val mime = if (codecType == VideoCodec.H265) {
@@ -220,6 +228,10 @@ class VideoEncoder private constructor(
                     if (setVbr) {
                         setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
                     }
+                    if (intraRefresh) {
+                        // Rinfresco intra distribuito su un secondo di frame: niente picchi dei keyframe periodici
+                        setInteger(MediaFormat.KEY_INTRA_REFRESH_PERIOD, actualFps)
+                    }
                     if (lowLatencyHints) {
                         setInteger(MediaFormat.KEY_PRIORITY, 0) // 0 = realtime
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -234,6 +246,7 @@ class VideoEncoder private constructor(
                 mc.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 surface = mc.createInputSurface()
                 mc.start()
+                if (intraRefresh) onLog("Intra-refresh attivo (${codecType.name}, periodo $actualFps frame)")
                 return VideoEncoder(
                     codec = mc,
                     inputSurface = surface,

@@ -2,7 +2,8 @@ package app.phantom.host.stream
 
 enum class CaptureMode(val label: String) {
     ROOT("Root (cattura + tocco/tastiera)"),
-    MEDIA_PROJECTION("Standard senza root (solo video)"),
+    SHIZUKU("Shizuku (controllo completo senza root)"),
+    MEDIA_PROJECTION("Standard (video; controllo con Accessibilità)"),
 }
 
 enum class StreamProfile(val maxShortSide: Int, val fps: Int, val label: String) {
@@ -16,4 +17,6 @@ data class HostRunConfig(
     val profile: StreamProfile = StreamProfile.P1080_120,
     val preferHevc: Boolean = true,
     val mode: CaptureMode = CaptureMode.ROOT,
+    /** Intra-refresh: rinfresco graduale al posto dei keyframe periodici interi (meno picchi, sperimentale). */
+    val intraRefresh: Boolean = false,
 )

@@ -51,6 +51,10 @@ enum RemoteQuickAction: CaseIterable {
     case volumeUp
     case volumeDown
     case power
+    /// Tendina delle notifiche: solo come comando di sistema (nessun tasto HID equivalente).
+    case notifications
+    /// Screenshot: solo come comando di sistema.
+    case screenshot
 
     var hidSequence: [HidKeyEvent] {
         switch self {
@@ -72,6 +76,8 @@ enum RemoteQuickAction: CaseIterable {
             return [HidKeyEvent(code: HidKeyCode.volumeDown, down: true), HidKeyEvent(code: HidKeyCode.volumeDown, down: false)]
         case .power:
             return [HidKeyEvent(code: HidKeyCode.power, down: true), HidKeyEvent(code: HidKeyCode.power, down: false)]
+        case .notifications, .screenshot:
+            return []
         }
     }
 }

@@ -23,6 +23,7 @@ final class AudioStreamPlayer {
     private var lastAsc = Data()
     private var jitter: AudioJitterBuffer?
     private var clockRunning = false
+    private var currentRate: Double = 1.0
     private var pumpTimer: DispatchSourceTimer?
 
     /// Campioni per pacchetto AAC-LC.
@@ -38,6 +39,8 @@ final class AudioStreamPlayer {
     }
 
     init() {
+        // Le piccole correzioni di velocità (±0,5%) per la deriva tra gli orologi non devono cambiare l'intonazione
+        renderer.audioTimePitchAlgorithm = .timeDomain
         synchronizer.addRenderer(renderer)
     }
 
@@ -102,6 +105,7 @@ final class AudioStreamPlayer {
         synchronizer.rate = 0
         renderer.flush()
         clockRunning = false
+        currentRate = 1.0
         jitter = nil
     }
 
@@ -163,6 +167,11 @@ final class AudioStreamPlayer {
             renderer.flush()
             synchronizer.setRate(1.0, time: CMTime(value: start, timescale: sr))
             clockRunning = true
+            currentRate = 1.0
+        } else if clockRunning && abs(result.playbackRate - currentRate) > 0.0001 {
+            // Deriva tra gli orologi di Android e iPhone: si accelera o rallenta impercettibilmente invece di saltare
+            synchronizer.rate = Float(result.playbackRate)
+            currentRate = result.playbackRate
         }
 
         let duration = CMTime(value: Self.frameSamples, timescale: sr)
