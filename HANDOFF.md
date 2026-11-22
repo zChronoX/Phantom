@@ -185,7 +185,30 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 
 ## Uncommitted changes
 
-**v1.3.1** (la v1.3.0 è nel commit `ddf5c78`). Dalla telemetria del Redmi in Shizuku:
+**v1.3.2** (base: v1.3.1 = commit `3b7a0c2` sul PC). Dai test sul Redmi con **PixelOS Android 17** (senza root):
+- Shizuku: `NoSuchMethodException DisplayControl.createDisplay(String, boolean)`. `RootDisplayCapture` prova ora
+  `DisplayManager.createVirtualDisplay(name, w, h, displayIdToMirror=0, surface)` (statico nascosto, come scrcpy) per
+  primo su Android 14+, poi `SurfaceControl.createDisplay`; su 10–13 l'ordine è invertito. `DisplayControl` resta
+  ultima spiaggia, anche con la firma a 3 argomenti. Il metodo usato va nel log («Cattura display via …»).
+- `root/WorkerEnvironment.kt`: porting dei `Workarounds` di scrcpy (ActivityThread finto, ConfigurationController,
+  AppBindData `com.android.shell`, applicazione iniziale) + `FakeContext` (base = contesto di sistema,
+  `getDeviceId() = 0`, attribuzione uid 2000). Chiamato in `RootHostMain` dopo `prepareMainLooper`; gli errori
+  finiscono nel log come «Ambiente worker: …» senza bloccare l'avvio.
+- Audio Shizuku NPE: `AudioStreamer.createForRoot` usa `WorkerEnvironment.context()`; se il builder lancia, ripiego su
+  `root/ReflectiveAudioRecord.kt` (`native_setup` via riflessione, firme Android 12–13 e 14+).
+- MediaProjection: `stream/ProjectionDisplay.kt` crea il `VirtualDisplay` una sola volta e poi `resize` + `setSurface`
+  (Android 14+ vieta un secondo `createVirtualDisplay` sulla stessa proiezione: SecurityException al cambio di qualità).
+- `RootDisplayPower`: su Android 15+ prima `DisplayManagerGlobal.requestDisplayPower(0, on)`.
+- `VideoEncoder`: `vendor.qti-ext-enc-low-latency.enable=1` sugli encoder `c2.qti.*`/`OMX.qcom.*` (solo nei tentativi
+  con hint di bassa latenza), log del nome encoder.
+- iOS: Indietro/Home/Recenti nella pillola compatta (`RemoteControlSurface.collapsedHandle`, `pillNavButton`), timeout
+  LAN 2,5/2,0 s quando c'è il P2P, indirizzo LAN aggiornato da Bonjour all'avvio della sessione.
+- Versione `1.3.2`, sezione in `CHANGELOG.md`.
+
+Verifiche: app Kotlin compilata con `kotlinc` (stub API 34), 29 test JVM ok. Core Rust invariato. Non verificati:
+Gradle, Swift, telefono (in particolare Shizuku/audio su Android 17 e la pillola sull'iPhone).
+
+**v1.3.1** (commit `3b7a0c2`; la v1.3.0 è nel commit `ddf5c78`). Dalla telemetria del Redmi in Shizuku:
 - video a **488×1088**: l'encoder dichiara limiti «orizzontali» (1920×1088) e il codice li applicava alla lettera a uno
   schermo verticale. Ora `VideoEncoder.fitSizeToCapabilities` ragiona per lato lungo/corto e accetta la misura
   ruotata (`isSizeSupported(w,h) || isSizeSupported(h,w)`, fps interrogati sulla misura ruotata); in fondo ai tentativi

@@ -1,9 +1,6 @@
 package app.phantom.host.stream
 
 import android.annotation.SuppressLint
-import android.content.AttributionSource
-import android.content.Context
-import android.content.ContextWrapper
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
@@ -17,6 +14,8 @@ import android.os.Build
 import android.os.Process
 import android.os.SystemClock
 import app.phantom.host.core.AudioSampleClock
+import app.phantom.host.root.ReflectiveAudioRecord
+import app.phantom.host.root.WorkerEnvironment
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -184,31 +183,27 @@ class AudioStreamer private constructor(
                 return null
             }
             return createWithBuilder(onLog) { minBuf ->
-                AudioRecord.Builder()
-                    .setContext(RootAudioContext())
-                    .setAudioSource(MediaRecorder.AudioSource.REMOTE_SUBMIX)
-                    .setAudioFormat(pcmFormat())
-                    .setBufferSizeInBytes(minBuf)
-                    .build()
-            }
-        }
-
-        @SuppressLint("NewApi")
-        private class RootAudioContext : ContextWrapper(null) {
-            private val pkgName: String = if (Process.myUid() == 0) "root" else "com.android.shell"
-
-            override fun getPackageName(): String = pkgName
-
-            override fun getOpPackageName(): String = pkgName
-
-            override fun getAttributionTag(): String? = null
-
-            override fun getApplicationContext(): Context = this
-
-            override fun getAttributionSource(): AttributionSource {
-                return AttributionSource.Builder(Process.myUid())
-                    .setPackageName(pkgName)
-                    .build()
+                try {
+                    AudioRecord.Builder()
+                        .setContext(WorkerEnvironment.context())
+                        .setAudioSource(MediaRecorder.AudioSource.REMOTE_SUBMIX)
+                        .setAudioFormat(pcmFormat())
+                        .setBufferSizeInBytes(minBuf)
+                        .build()
+                } catch (builderError: Exception) {
+                    // Android 17 / ROM modificate: il builder pretende un contesto "da app vera" e va in
+                    // NullPointerException (o simili). Inizializziamo l'AudioRecord via riflessione come scrcpy.
+                    onLog("AudioRecord.Builder non utilizzabile (${builderError.javaClass.simpleName}): uso la creazione diretta")
+                    ReflectiveAudioRecord.create(
+                        source = MediaRecorder.AudioSource.REMOTE_SUBMIX,
+                        sampleRate = SAMPLE_RATE,
+                        channelConfig = AudioFormat.CHANNEL_IN_STEREO,
+                        channels = CHANNELS,
+                        channelMask = AudioFormat.CHANNEL_IN_STEREO,
+                        encoding = AudioFormat.ENCODING_PCM_16BIT,
+                        bufferSizeInBytes = minBuf,
+                    )
+                }
             }
         }
 
@@ -272,7 +267,7 @@ class AudioStreamer private constructor(
                     codec?.release()
                 } catch (_: Throwable) {
                 }
-                onLog("Audio non disponibile su questo dispositivo (solo video): ${t.javaClass.simpleName}")
+                onLog("Audio non disponibile su questo dispositivo (solo video): ${t.javaClass.simpleName}${t.message?.let { " · ${it.take(160)}" } ?: ""}")
                 null
             }
         }

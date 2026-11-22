@@ -50,6 +50,8 @@ object RootHostMain {
         if (Looper.getMainLooper() == null) {
             Looper.prepareMainLooper()
         }
+        // Android 14–17: ActivityThread/contesto "shell" finti, necessari ad audio e display virtuale (vedi scrcpy).
+        WorkerEnvironment.apply()
 
         val port = args.getOrNull(0)?.toIntOrNull() ?: 47800
         val profileName = args.getOrNull(1) ?: StreamProfile.P1080_120.name
@@ -81,7 +83,7 @@ object RootHostMain {
             p2pSecret = HostIdentityStore.loadP2pSecretFromPath(p2pSecretPath)
             authToken = HostIdentityStore.loadAuthTokenFromPath(authTokenPath)
         }
-        emit("LOG|Worker avviato come uid ${android.os.Process.myUid()}${if (android.os.Process.myUid() == 0) " (root)" else " (shell/Shizuku)"}")
+        emit("LOG|Worker avviato come uid ${android.os.Process.myUid()} · Android ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})${if (android.os.Process.myUid() == 0) " (root)" else " (shell/Shizuku)"}")
 
         val config = HostRunConfig(
             port = port,
@@ -91,6 +93,8 @@ object RootHostMain {
             intraRefresh = System.getProperty("phantom.intraRefresh") == "true",
         )
 
+        WorkerEnvironment.notes.forEach { emit("LOG|Ambiente worker: $it") }
+        RootDisplayCapture.onLog = { msg -> emit("LOG|$msg") }
         val (srcW, srcH) = RootDisplayCapture.readPrimaryDisplaySize()
         val injector = RootInputInjector(srcW, srcH)
         emit("LOG|Display rilevato ${srcW}×${srcH} · input injector=${injector.isAvailable} · identità=${identity != null} · p2p=${p2pSecret != null} · auth=${authToken != null}")

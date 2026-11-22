@@ -16,8 +16,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
-import android.hardware.display.DisplayManager
-import android.hardware.display.VirtualDisplay
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.net.ConnectivityManager
@@ -42,6 +40,7 @@ import app.phantom.host.stream.AudioStreamer
 import app.phantom.host.stream.CaptureMode
 import app.phantom.host.stream.HostRunConfig
 import app.phantom.host.stream.PhantomHostSession
+import app.phantom.host.stream.ProjectionDisplay
 import app.phantom.host.stream.StreamProfile
 import app.phantom.host.stream.SurfaceCaptureFactory
 import uniffi.phantom_ffi.RemoteControlCommand
@@ -442,27 +441,16 @@ class HostForegroundService : Service() {
         }, null)
 
         val densityDpi = resources.displayMetrics.densityDpi.coerceAtLeast(160)
+        val projectionDisplay = ProjectionDisplay(projection, densityDpi)
 
         val session = PhantomHostSession(
             config = config,
             sourceSizeProvider = { readDisplayMetrics() },
+            // Android 14+ consente UN SOLO createVirtualDisplay per istanza di MediaProjection: il display virtuale
+            // viene creato alla prima cattura e poi riusato (resize + setSurface) a ogni rotazione, cambio di qualità
+            // o nuovo client, invece di essere ricreato (che causava la SecurityException "Don't re-use the resultData").
             captureFactory = SurfaceCaptureFactory { surface, width, height, _, _ ->
-                val vd: VirtualDisplay = projection.createVirtualDisplay(
-                    "phantom-host",
-                    width,
-                    height,
-                    densityDpi,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    surface,
-                    null,
-                    null,
-                ) ?: throw IllegalStateException("createVirtualDisplay ha restituito null")
-                AutoCloseable {
-                    try {
-                        vd.release()
-                    } catch (_: Throwable) {
-                    }
-                }
+                projectionDisplay.attach(surface, width, height)
             },
             thermalProvider = { currentThermalPolicy.get() },
             identityCertDer = identity?.certDer,
@@ -547,6 +535,7 @@ class HostForegroundService : Service() {
                 session.runBlocking()
             } finally {
                 unregisterMdns()
+                projectionDisplay.release()
                 try {
                     projection.stop()
                 } catch (_: Throwable) {

@@ -333,6 +333,7 @@ struct RemoteSessionView: View {
     @State private var controllerBridge = GamepadBridge()
     @State private var pillOffset: CGSize = .zero
     @GestureState private var pillDrag: CGSize = .zero
+    private let pillHaptic = UIImpactFeedbackGenerator(style: .light)
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -445,28 +446,47 @@ struct RemoteSessionView: View {
         .padding(.horizontal, 28)
     }
 
+    /// Pillola compatta mostrata con la HUD chiusa: stato + FPS, e i tre tasti di navigazione Android sempre a
+    /// portata. Sull'iPhone lo swipe dal bordo inferiore chiuderebbe Phantom, quindi Home/Indietro/Recenti
+    /// devono restare raggiungibili senza riaprire la HUD intera.
     private var collapsedHandle: some View {
         HStack {
             Spacer()
-            Button {
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) { hudHidden = false }
-            } label: {
-                HStack(spacing: 7) {
-                    Circle()
-                        .fill(session.metrics.connected ? PhantomPalette.liveGreen : PhantomPalette.warnAmber)
-                        .frame(width: 7, height: 7)
-                    if session.metrics.connected {
-                        Text(String(format: "%.0f fps", session.metrics.fps))
-                            .font(.caption2.monospacedDigit().weight(.semibold))
+            HStack(spacing: 2) {
+                pillNavButton(.back, systemImage: "chevron.backward", label: "Indietro")
+                pillNavButton(.home, systemImage: "circle", label: "Home")
+                pillNavButton(.recents, systemImage: "square", label: "Recenti")
+
+                Rectangle()
+                    .fill(.white.opacity(0.22))
+                    .frame(width: 1, height: 18)
+                    .padding(.horizontal, 4)
+
+                Button {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) { hudHidden = false }
+                } label: {
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(session.metrics.connected ? PhantomPalette.liveGreen : PhantomPalette.warnAmber)
+                            .frame(width: 7, height: 7)
+                        if session.metrics.connected {
+                            Text(String(format: "%.0f fps", session.metrics.fps))
+                                .font(.caption2.monospacedDigit().weight(.semibold))
+                        }
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.caption.weight(.semibold))
                     }
-                    Image(systemName: "slider.horizontal.3")
-                        .font(.caption.weight(.semibold))
+                    .padding(.leading, 4)
+                    .padding(.trailing, 8)
+                    .frame(minHeight: 34)
+                    .contentShape(Rectangle())
                 }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .phantomGlassCapsule(overVideo: true)
+                .accessibilityLabel("Mostra controlli")
             }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+            .phantomGlassCapsule(overVideo: true)
             .padding(.top, 8)
             .padding(.trailing, 12)
             .offset(
@@ -479,11 +499,27 @@ struct RemoteSessionView: View {
                         state = value.translation
                     }
                     .onEnded { value in
-                        pillOffset.width = max(-260, min(0, pillOffset.width + value.translation.width))
+                        // La pillola ora è più larga: limite a sinistra ridotto per non farla uscire dallo schermo.
+                        pillOffset.width = max(-180, min(0, pillOffset.width + value.translation.width))
                         pillOffset.height = max(0, min(520, pillOffset.height + value.translation.height))
                     }
             )
         }
+    }
+
+    private func pillNavButton(_ action: RemoteQuickAction, systemImage: String, label: String) -> some View {
+        Button {
+            pillHaptic.impactOccurred(intensity: 0.6)
+            session.sendQuickAction(action)
+        } label: {
+            Image(systemName: systemImage)
+                .font(.caption.weight(.bold))
+                .frame(width: 34, height: 34)
+                .contentShape(Rectangle())
+        }
+        .disabled(!session.metrics.connected)
+        .opacity(session.metrics.connected ? 1 : 0.45)
+        .accessibilityLabel(label)
     }
 
     private var hudBar: some View {

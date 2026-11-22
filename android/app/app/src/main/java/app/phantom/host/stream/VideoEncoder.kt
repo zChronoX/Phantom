@@ -189,6 +189,9 @@ class VideoEncoder private constructor(
             throw IllegalStateException("Impossibile avviare MediaCodec: ${lastError?.javaClass?.simpleName}: ${lastError?.message}", lastError)
         }
 
+        internal fun isQualcommEncoder(name: String): Boolean =
+            name.startsWith("c2.qti.", ignoreCase = true) || name.startsWith("OMX.qcom.", ignoreCase = true)
+
         private fun openConfigured(
             reqWidth: Int,
             reqHeight: Int,
@@ -249,12 +252,19 @@ class VideoEncoder private constructor(
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                             setInteger(MediaFormat.KEY_LATENCY, 1)
                         }
+                        if (isQualcommEncoder(mc.name)) {
+                            // Modalità a bassa latenza degli encoder Qualcomm (Snapdragon, es. Redmi Note 11 Pro 5G):
+                            // consegna ogni frame appena codificato invece di trattenerlo per il rate control.
+                            // Se il codec rifiuta la chiave, il tentativo successivo senza hint la omette.
+                            setInteger("vendor.qti-ext-enc-low-latency.enable", 1)
+                        }
                     }
                 }
 
                 mc.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 surface = mc.createInputSurface()
                 mc.start()
+                onLog("Encoder ${mc.name} · ${actualW}×${actualH} @ $actualFps fps${if (lowLatencyHints) " · bassa latenza" else ""}")
                 if (intraRefresh) onLog("Intra-refresh attivo (${codecType.name}, periodo $actualFps frame)")
                 return VideoEncoder(
                     codec = mc,

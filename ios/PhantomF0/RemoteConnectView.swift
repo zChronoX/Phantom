@@ -408,6 +408,11 @@ struct PhantomHomeView: View {
     }
 
     private func launchSavedDevice(_ device: PairedDevice, liveLan: String?) {
+        // Il telefono host può cambiare IP (DHCP, MAC casuale dopo un cambio ROM): se Bonjour lo ha appena trovato,
+        // aggiorna l'indirizzo LAN salvato così il prossimo avvio non scivola sul P2P (più lento) per un IP vecchio.
+        if let live = liveLan, let norm = EndpointParser.normalizeAddress(live), norm != device.lanAddress {
+            deviceStore.update(id: device.id, lanAddress: .some(norm))
+        }
         let candidates = EndpointCandidateSelector.candidates(
             for: device,
             discoveredLan: liveLan,

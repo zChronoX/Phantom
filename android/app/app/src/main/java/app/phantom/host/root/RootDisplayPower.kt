@@ -1,6 +1,7 @@
 package app.phantom.host.root
 
 import android.annotation.SuppressLint
+import android.os.Build
 import android.os.IBinder
 import dalvik.system.PathClassLoader
 import java.util.concurrent.atomic.AtomicBoolean
@@ -16,6 +17,12 @@ object RootDisplayPower {
     private val displayTurnedOff = AtomicBoolean(false)
 
     fun setPhysicalDisplayPower(on: Boolean): Boolean {
+        // Android 15+: API nascosta `DisplayManagerGlobal.requestDisplayPower(displayId, on)` (come scrcpy). I token
+        // fisici di `DisplayControl` richiedono le librerie native di `system_server` e falliscono su 15–17.
+        if (Build.VERSION.SDK_INT >= 35 && requestDisplayPower(on)) {
+            displayTurnedOff.set(!on)
+            return true
+        }
         return try {
             val sc = Class.forName("android.view.SurfaceControl")
             val token = resolvePrimaryDisplayToken(sc) ?: return false
@@ -30,6 +37,15 @@ object RootDisplayPower {
         } catch (_: Throwable) {
             false
         }
+    }
+
+    private fun requestDisplayPower(on: Boolean): Boolean = try {
+        val cls = Class.forName("android.hardware.display.DisplayManagerGlobal")
+        val dmg = cls.getMethod("getInstance").invoke(null)
+        cls.getMethod("requestDisplayPower", Int::class.javaPrimitiveType, Boolean::class.javaPrimitiveType)
+            .invoke(dmg, 0, on) as? Boolean ?: false
+    } catch (_: Throwable) {
+        false
     }
 
     /** Riaccende il display fisico solo se questa sessione lo aveva effettivamente spento. */

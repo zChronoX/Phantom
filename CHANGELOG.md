@@ -2,6 +2,30 @@
 
 Le note di ogni release vengono prese da qui dalla CI (sezione `## [x.y.z]` che corrisponde al tag `vx.y.z`).
 
+## [1.3.2] - 2026-11-22
+
+### Correzioni
+- **Shizuku e Root su Android 14–17** (es. PixelOS Android 17): l'host non partiva per
+  `NoSuchMethodException: DisplayControl.createDisplay`. La cattura dello schermo usa ora
+  `DisplayManager.createVirtualDisplay` (la stessa tecnica di scrcpy), con ripiego sul metodo precedente per Android
+  10–13. Il worker prepara un ambiente «da app» minimo (contesto `com.android.shell`) richiesto da Android recenti.
+- **Audio con Shizuku su Android 17**: risolta la `NullPointerException` («Audio non disponibile… solo video»). Se il
+  sistema rifiuta comunque la creazione standard, l'audio viene aperto per via diretta come fa scrcpy.
+- **Modalità Standard/Accessibilità che si staccava** quando la qualità si adattava alla rete o il telefono ruotava
+  (`SecurityException: Don't re-use the resultData`): da Android 14 la proiezione ammette un solo display virtuale,
+  che ora viene creato una volta e poi solo ridimensionato.
+- Schermo spento da remoto su Android 15+ con l'API di sistema `requestDisplayPower`.
+- Il log «Qualità adattata alla rete» mostra il bitrate con un decimale (prima «0 Mbps» sotto 1 Mbit/s).
+
+### Novità
+- **iPhone: Indietro, Home e Recenti nella pillola compatta** (quella con solo gli FPS), con un leggero feedback
+  aptico: non serve più tenere aperta tutta la HUD per navigare quando le gesture dell'iPhone chiuderebbero Phantom.
+
+### Prestazioni
+- Encoder Qualcomm (Snapdragon): attivata la modalità a bassa latenza del produttore; il log indica l'encoder usato.
+- iPhone: più tempo alla connessione LAN prima di passare al P2P (2–2,5 s invece di 1,3–1,6 s) e indirizzo LAN
+  salvato aggiornato quando Bonjour trova il telefono su un IP nuovo, così a casa non si finisce sul P2P (più lento).
+
 ## [1.3.1] - 2026-11-21
 
 ### Correzioni

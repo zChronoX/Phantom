@@ -187,8 +187,8 @@ enum EndpointCandidateSelector {
         }
 
         if !cellularOnly {
-            appendDirect(discoveredLan, label: "LAN (trovato)", isLan: true, timeoutMs: hasWideArea ? 1_600 : 5_000)
-            appendDirect(device.lanAddress, label: "LAN", isLan: true, timeoutMs: hasWideArea ? 1_300 : 5_000)
+            appendDirect(discoveredLan, label: "LAN (trovato)", isLan: true, timeoutMs: hasWideArea ? 2_500 : 5_000)
+            appendDirect(device.lanAddress, label: "LAN", isLan: true, timeoutMs: hasWideArea ? 2_000 : 5_000)
         }
 
         if let p2p = device.p2pEndpointId, !p2p.isEmpty {

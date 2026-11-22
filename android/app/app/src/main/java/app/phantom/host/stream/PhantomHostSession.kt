@@ -597,7 +597,7 @@ class PhantomHostSession(
                                 currentStep.set(step)
                                 onLog(
                                     "Qualità adattata alla rete: ${step.maxShortSide}p · ${step.fps} fps " +
-                                        "(bitrate obiettivo ${desired / 1_000_000} Mbps)",
+                                        "(bitrate obiettivo ${"%.1f".format(java.util.Locale.ROOT, desired / 1_000_000.0)} Mbps)",
                                 )
                                 reconfigureRequested.set(true)
                             }
