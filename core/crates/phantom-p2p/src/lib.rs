@@ -249,12 +249,38 @@ impl Drop for P2pLink {
 }
 
 fn new_runtime() -> Result<Runtime, P2pError> {
+    quiet_android_context_panics();
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .thread_name("phantom-p2p")
         .enable_all()
         .build()
         .map_err(|e| P2pError::Transport(e.to_string()))
+}
+
+/// Messaggio del panic di `ndk-context` quando nessuno ha pubblicato il contesto JNI (nel worker Shizuku/root non c'è
+/// un'app Android, e con JNA non passa da `JNI_OnLoad`).
+const ANDROID_CONTEXT_PANIC: &str = "android context was not initialized";
+
+/// Il resolver DNS di iroh e `netdev` provano a leggere la configurazione di rete via JNI e, se il contesto Android non
+/// c'è, vanno in panic dentro un `catch_unwind` e ripiegano sui server DNS predefiniti. Il ripiego funziona, ma l'hook
+/// predefinito stampa comunque il panic, che finiva nel log dell'host come errore («thread 'phantom-p2p' panicked»).
+/// Qui si zittisce solo quel messaggio; ogni altro panic passa all'hook precedente.
+fn quiet_android_context_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !is_android_context_panic(info.payload()) {
+                previous(info);
+            }
+        }));
+    });
+}
+
+fn is_android_context_panic(payload: &(dyn std::any::Any + Send)) -> bool {
+    let msg = payload.downcast_ref::<&str>().copied().or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+    msg.is_some_and(|m| m.contains(ANDROID_CONTEXT_PANIC))
 }
 
 /// Coda dei datagrammi in uscita: stesso ragionamento di `phantom-quic` (contiene un keyframe, non 0,7 s di video).
@@ -276,6 +302,18 @@ fn transport_config() -> QuicTransportConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn android_context_panic_is_recognised_and_silenced() {
+        assert!(is_android_context_panic(&"android context was not initialized"));
+        assert!(is_android_context_panic(&String::from("android context was not initialized")));
+        assert!(!is_android_context_panic(&"altro errore"));
+        assert!(!is_android_context_panic(&42u32));
+        quiet_android_context_panics();
+        // il panic resta catturabile come prima: cambia solo la stampa
+        let caught = std::panic::catch_unwind(|| panic!("{}", ANDROID_CONTEXT_PANIC));
+        assert!(caught.is_err());
+    }
 
     #[test]
     fn secret_key_roundtrip_and_invalid_lengths() {

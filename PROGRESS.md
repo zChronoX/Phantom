@@ -1,7 +1,16 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-20. Branch `main`, base `b948eda` (v1.2.1) più la v1.3.0 non committata.
+Ultimo aggiornamento: 2026-11-22. Branch `main`, base `86c1761` (v1.3.2) più la v1.3.3 (patch consegnata).
+Roadmap fino alla 2.0.0: documento di progetto «claude/PHANTOM-HANDOFF-ROADMAP.md».
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
+
+## Ultime release
+
+- **v1.3.3** (2026-11-22): AWDL spento durante lo streaming (scatti periodici in LAN), qualità che torna a 1080p,
+  schermo spento con Shizuku/Root su Android 14–17, svuotamento della coda host → taglio del bitrate con tetto,
+  obiettivo del bitrate limitato al tetto utile del gradino più alto, niente falso panic `ndk-context` nel log.
+- **v1.3.2** (2026-11-22): Shizuku e audio su Android 14–17 (PixelOS Android 17 confermato), proiezione senza
+  `SecurityException`, tasti nella pillola iOS.
 
 ## Dove siamo
 

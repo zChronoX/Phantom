@@ -23,7 +23,10 @@ final class BonjourDiscovery: NSObject, ObservableObject {
     func start() {
         guard browser == nil else { return }
         let params = NWParameters.udp
-        params.includePeerToPeer = true
+        // Serve solo la LAN. Con `includePeerToPeer = true` iOS accende AWDL (la radio peer-to-peer di AirDrop):
+        // il Wi-Fi salta periodicamente su un altro canale e lo streaming ha picchi di latenza e cali di banda a
+        // intervalli regolari (lo stesso problema noto a Moonlight, Steam Link e Parsec).
+        params.includePeerToPeer = false
         let descriptor = NWBrowser.Descriptor.bonjourWithTXTRecord(type: "_phantom._udp", domain: nil)
         let b = NWBrowser(for: descriptor, using: params)
         b.browseResultsChangedHandler = { [weak self] results, _ in

@@ -74,3 +74,23 @@ class AdaptiveQuality(
         return null
     }
 }
+
+/**
+ * Bitrate da usare in un giro di controllo: uno per l'encoder e uno per la scelta del gradino.
+ *
+ * L'encoder riceve il bitrate del controllo di rete limitato dal termico, dal minimo e dal tetto utile della
+ * risoluzione **corrente** (oltre ~0,15 bit per pixel l'HEVC non migliora). La qualità adattiva invece deve vedere il
+ * bitrate che la rete concede *senza* quel tetto: altrimenti, scesi a 720p, il tetto di 720p (≈10 Mbit/s a 60 fps in
+ * HEVC) rapportato a 1080p non supera mai la soglia di risalita e la sessione resta a 720p per sempre.
+ */
+data class BitratePlan(val encoderBps: Long, val qualityBps: Long) {
+    companion object {
+        fun compute(networkBps: Long, policy: ThermalPolicy, minBps: Long, usefulMaxBps: Long): BitratePlan {
+            val thermal = ThermalGuard.cappedBitrate(networkBps, policy, minBps).coerceAtLeast(minBps)
+            return BitratePlan(
+                encoderBps = thermal.coerceAtMost(usefulMaxBps).coerceAtLeast(minBps),
+                qualityBps = thermal,
+            )
+        }
+    }
+}

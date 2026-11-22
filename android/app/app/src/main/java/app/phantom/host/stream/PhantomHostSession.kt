@@ -4,6 +4,7 @@ import android.os.Process
 import android.os.SystemClock
 import android.view.Surface
 import app.phantom.host.core.AdaptiveQuality
+import app.phantom.host.core.BitratePlan
 import app.phantom.host.core.HostFormatHelpers
 import app.phantom.host.core.QualityStep
 import app.phantom.host.core.ThermalGuard
@@ -403,6 +404,15 @@ class PhantomHostSession(
             val phantomHost = PhantomHost.newWithOptions(settings, tokenBytes, audioStreamer != null)
             host = phantomHost
             activeHost.set(phantomHost)
+            // L'obiettivo del core non sale oltre il bitrate utile del gradino più alto: oltre, l'encoder non lo usa e
+            // le riduzioni per congestione taglierebbero un numero che non conta.
+            var topUsefulMax = HostFormatHelpers.maxUsefulBitrate(
+                enc.actualWidth,
+                enc.actualHeight,
+                enc.actualFps,
+                enc.actualCodec == uniffi.phantom_ffi.VideoCodec.H265,
+            )
+            phantomHost.setMaxBitrateBps(topUsefulMax.coerceAtLeast(defaults.minBitrateBps.toLong()).toULong())
 
             val audioLabel = if (audioStreamer != null) " + audio AAC" else ""
             val profileRef = AtomicReference("${enc.actualWidth}×${enc.actualHeight} @ ${enc.actualFps} fps (${enc.actualCodec.name})$audioLabel")
@@ -583,21 +593,33 @@ class PhantomHostSession(
                             val usefulMax = activeEnc?.let {
                                 HostFormatHelpers.maxUsefulBitrate(it.actualWidth, it.actualHeight, it.actualFps, it.actualCodec == uniffi.phantom_ffi.VideoCodec.H265)
                             } ?: Long.MAX_VALUE
-                            val desired = ThermalGuard.cappedBitrate(
+                            // Solo verso l'alto: subito dopo un cambio di gradino l'encoder attivo può essere ancora
+                            // quello del gradino precedente, e il tetto non deve scendere per sbaglio.
+                            if (synchronized(quality) { quality.index } == 0 && activeEnc != null &&
+                                usefulMax > topUsefulMax
+                            ) {
+                                topUsefulMax = usefulMax
+                                phantomHost.setMaxBitrateBps(topUsefulMax.coerceAtLeast(defaults.minBitrateBps.toLong()).toULong())
+                            }
+                            // L'encoder riceve il bitrate limitato al tetto utile; la qualità adattiva quello della rete
+                            // (solo termico e minimo), altrimenti da 720p non si risale più a 1080p.
+                            val plan = BitratePlan.compute(
                                 phantomHost.targetBitrateBps().toLong(),
                                 policy,
                                 defaults.minBitrateBps.toLong(),
-                            ).coerceAtMost(usefulMax).coerceAtLeast(defaults.minBitrateBps.toLong())
+                                usefulMax,
+                            )
+                            val desired = plan.encoderBps
                             if (appliedBitrate > 0 && abs(desired - appliedBitrate) * 100 > appliedBitrate * 5) {
                                 activeEnc?.setBitrate(desired.toInt())
                                 appliedBitrate = desired
                             }
-                            val step = synchronized(quality) { quality.update(nowMs, desired) }
+                            val step = synchronized(quality) { quality.update(nowMs, plan.qualityBps) }
                             if (step != null) {
                                 currentStep.set(step)
                                 onLog(
                                     "Qualità adattata alla rete: ${step.maxShortSide}p · ${step.fps} fps " +
-                                        "(bitrate obiettivo ${"%.1f".format(java.util.Locale.ROOT, desired / 1_000_000.0)} Mbps)",
+                                        "(rete ${"%.1f".format(java.util.Locale.ROOT, plan.qualityBps / 1_000_000.0)} Mbps)",
                                 )
                                 reconfigureRequested.set(true)
                             }

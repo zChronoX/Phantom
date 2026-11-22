@@ -128,6 +128,15 @@ struct PhantomHomeView: View {
             bonjour.stop()
             networkPath.stop()
         }
+        // Una `fullScreenCover` non fa scattare `onDisappear` della Home: senza questo la ricerca Bonjour resterebbe
+        // accesa per tutta la sessione. La si ferma quando parte lo streaming e la si riavvia quando si torna alla Home.
+        .onChange(of: activeMode?.id) { _, routeId in
+            if routeId == nil {
+                bonjour.start()
+            } else {
+                bonjour.stop()
+            }
+        }
         .sheet(isPresented: $showScanner) {
             QRScannerSheet { scannedText in
                 if let parsed = PairingURI.parse(scannedText) {

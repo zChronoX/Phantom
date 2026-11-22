@@ -143,6 +143,8 @@ struct Ceiling {
 #[derive(Clone, Debug)]
 pub struct RateController {
     cfg: RateConfig,
+    /// Massimo fissato alla creazione: [`RateController::set_max_bps`] non lo supera mai.
+    hard_max_bps: u64,
     bitrate_bps: u64,
     phase: Phase,
     last_decrease_us: Option<u64>,
@@ -160,6 +162,7 @@ impl RateController {
         let bitrate_bps = cfg.start_bps.clamp(cfg.min_bps, max);
         RateController {
             cfg: RateConfig { max_bps: max, ..cfg },
+            hard_max_bps: max,
             bitrate_bps,
             phase: Phase::Startup,
             last_decrease_us: None,
@@ -199,6 +202,36 @@ impl RateController {
     /// Ultima velocità di consegna misurata (bit/s), se la finestra era abbastanza lunga.
     pub fn last_rx_rate_bps(&self) -> Option<u64> {
         self.last_rx_rate_bps
+    }
+
+    /// Massimo attuale (bit/s).
+    pub fn max_bps(&self) -> u64 {
+        self.cfg.max_bps
+    }
+
+    /// Cambia il massimo durante la sessione (bit/s), entro `[min, massimo iniziale]`. Serve all'host per non far
+    /// salire l'obiettivo molto oltre il bitrate che l'encoder può usare con profitto: un obiettivo di 32 Mbit/s con un
+    /// encoder fermo a 15 rende inutili le riduzioni (si taglia l'obiettivo, ma l'encoder non cambia).
+    pub fn set_max_bps(&mut self, max_bps: u64) {
+        let max = max_bps.clamp(self.cfg.min_bps, self.hard_max_bps);
+        self.cfg.max_bps = max;
+        self.bitrate_bps = self.bitrate_bps.min(max);
+        if let Some(c) = &mut self.ceiling {
+            c.bps = c.bps.min(max);
+        }
+    }
+
+    /// La coda di invio dell'host ha superato la soglia e lo scarto alla sorgente ha dovuto svuotarla (frame saltati e
+    /// un keyframe per ripartire). È congestione vista dal lato host, prima ancora che il client misuri perdite o coda:
+    /// si scende di un passo fisso e si fissa un tetto. Se succede di nuovo a breve, la sonda del tetto si allontana
+    /// (come per ogni congestione), così uno stallo periodico del Wi-Fi porta il bitrate dove lo stallo entra nella
+    /// coda invece di provocare un keyframe ogni pochi secondi. La velocità di consegna non si usa: misurata durante
+    /// uno stallo è vicina a zero e taglierebbe troppo.
+    pub fn on_send_stall(&mut self, now_us: u64) -> Verdict {
+        let rx = self.last_rx_rate_bps.take();
+        let v = self.apply(now_us, Verdict::Congested);
+        self.last_rx_rate_bps = rx;
+        v
     }
 
     /// Elabora una statistica del client (contatori cumulativi). `now_us` è l'orologio dell'host.
@@ -574,5 +607,50 @@ mod tests {
             "a regime segue la nuova capacità: {:.1} Mbps di media",
             avg_after / 1e6
         );
+    }
+
+    #[test]
+    fn send_stall_cuts_and_sets_a_ceiling() {
+        let mut c = RateController::new(RateConfig { start_bps: 14_000_000, min_bps: 3_000_000, max_bps: 32_000_000 });
+        assert_eq!(c.on_send_stall(1_000_000), Verdict::Congested);
+        assert_eq!(c.bitrate_bps(), 10_500_000, "passo fisso, non la velocità di consegna");
+        assert_eq!(c.ceiling_bps(), Some(12_600_000));
+        assert_eq!(c.phase(), Phase::Steady);
+        // un secondo stallo subito dopo non taglia di nuovo (la coda ha bisogno di tempo per svuotarsi)
+        c.on_send_stall(1_100_000);
+        assert_eq!(c.bitrate_bps(), 10_500_000);
+        // uno stallo più tardi taglia ancora e allontana la sonda
+        c.on_send_stall(1_500_000);
+        assert_eq!(c.bitrate_bps(), 7_875_000);
+        assert_eq!(c.decreases(), 2);
+    }
+
+    #[test]
+    fn send_stall_ignores_a_delivery_rate_measured_during_the_stall() {
+        let mut c = RateController::new(RateConfig { start_bps: 12_000_000, min_bps: 3_000_000, max_bps: 32_000_000 });
+        let mut f = Feeder::new();
+        f.feed(&mut c, 12, 0, 2_000, 12_000_000);
+        f.feed(&mut c, 12, 0, 2_000, 200_000); // finestra di stallo: quasi niente consegnato
+        let before = c.bitrate_bps();
+        c.on_send_stall(f.t + 1);
+        assert_eq!(c.bitrate_bps(), (before as f64 * DECREASE_FACTOR) as u64);
+        assert_eq!(c.last_rx_rate_bps(), Some(200_000), "la misura resta per le statistiche");
+    }
+
+    #[test]
+    fn max_can_be_lowered_and_raised_within_the_initial_limit() {
+        let mut c = RateController::new(RateConfig { start_bps: 30_000_000, min_bps: 3_000_000, max_bps: 32_000_000 });
+        c.set_max_bps(15_000_000);
+        assert_eq!(c.max_bps(), 15_000_000);
+        assert_eq!(c.bitrate_bps(), 15_000_000);
+        let mut f = Feeder::new();
+        for _ in 0..50 {
+            f.feed(&mut c, 12, 0, 1_000, 40_000_000);
+        }
+        assert_eq!(c.bitrate_bps(), 15_000_000, "non supera il nuovo massimo");
+        c.set_max_bps(100_000_000);
+        assert_eq!(c.max_bps(), 32_000_000, "mai oltre il massimo iniziale");
+        c.set_max_bps(1);
+        assert_eq!(c.max_bps(), 3_000_000, "mai sotto il minimo");
     }
 }

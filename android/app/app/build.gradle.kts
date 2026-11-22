@@ -12,7 +12,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = System.getenv("BUILD_NUMBER")?.toIntOrNull() ?: 1
-        versionName = "1.3.2"
+        versionName = "1.3.3"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")

@@ -1,9 +1,28 @@
 # Handoff
 
-Scritto: 2026-11-20; aggiornato con la **v1.3.0** (telemetria, Shizuku, Accessibilità, tasti di sistema, qualità adattiva, deriva audio, release seria, pulizia).
-Branch: main - base `b948eda` (v1.2.1, pushata e taggata dall'utente) + modifiche v1.3.0 non committate (vedi «Uncommitted changes»).
+Scritto: 2026-11-20; aggiornato il 2026-11-22 con la **v1.3.3** (AWDL, risalita a 1080p, schermo spento su Android 14–17, stallo della coda → bitrate). Roadmap completa nel documento di progetto «claude/PHANTOM-HANDOFF-ROADMAP.md».
+Branch: main - base `86c1761` (v1.3.2, pushata e taggata dall'utente) + commit v1.3.3 consegnato come patch (vedi «Uncommitted changes»).
 Cartella sul PC: `C:\Users\Giovanni\Documents\Progetti personali\Phantom\Phantom` (spostata dall'utente).
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
+
+## Esito dei test 1.3.2 (PixelOS Android 17, Shizuku, LAN) e risposta della 1.3.3
+
+- OK: Shizuku parte, «Cattura display via DisplayManager.createVirtualDisplay», audio AAC, HUD «LAN», tasti nella
+  pillola. 864×1920 HEVC 60 fps (encoder `c2.qti.hevc.encoder`, intra-refresh).
+- Problemi: «Rete in affanno» ogni 5–20 s (fino a 494 pacchetti scartati per coda piena in 5 s, con la coda poi a
+  0 KB), HUD con scartati 1902, saltati 143, keyframe 138, persi 16, latenza 78/96 ms, codifica 42 ms, RTT 19 ms,
+  audio buchi 36/resync 11; schermo spento «ok=false»; panic `ndk-context` di `phantom-p2p` nel log.
+- Diagnosi: stalli periodici del collegamento (la coda di invio passa da 0 a 512 KiB, cioè ~300 ms senza invio a
+  14 Mbit/s) → svuotamento + keyframe. Causa più probabile: AWDL acceso dal browser Bonjour (sezione 4.2 della roadmap)
+  per tutta la sessione. In più il controllo del bitrate non sapeva nulla degli svuotamenti lato host.
+- 1.3.3: Bonjour senza peer-to-peer e fermo durante lo streaming; `RateController::on_send_stall` (taglio 0,75 + tetto,
+  chiamato da `send_frame_via` a ogni nuovo svuotamento); `set_max_bps` dall'host = bitrate utile del gradino più
+  alto; `BitratePlan` (qualità adattiva con il bitrate della rete, encoder con il tetto utile); `RootDisplayPower`
+  con `DisplayControl` caricata come scrcpy (`ClassLoaderFactory` + `loadLibrary0(android_servers)`) e motivo
+  dell'errore nel log; hook dei panic che zittisce solo «android context was not initialized».
+- Da guardare nei test della 1.3.3: «Rete in affanno» deve sparire o quasi; keyframe e saltati vicini a 0; in caso
+  di stalli residui il bitrate scende (log «bitrate N Mbps»); schermo spento con `ok=true` (altrimenti il motivo è
+  nella stessa riga); codifica ancora ~40 ms? (candidato per la 1.4.0 insieme ai limiti di QP).
 
 ## Goal
 
@@ -184,6 +203,16 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 «sessione (apertura e chiusura)»).
 
 ## Uncommitted changes
+
+**v1.3.3** (base: v1.3.2 = commit `86c1761`). Consegnata come patch da applicare con `git am`; file toccati:
+`core/crates/phantom-core/src/{rate.rs,lib.rs}`, `core/crates/phantom-ffi/src/lib.rs`,
+`core/crates/phantom-p2p/src/lib.rs`, `android/.../core/AdaptiveQuality.kt` (+ test),
+`android/.../stream/PhantomHostSession.kt`, `android/.../root/{RootDisplayPower,RootHostMain}.kt`,
+`ios/PhantomF0/{BonjourDiscovery,RemoteConnectView}.swift`, versioni e `CHANGELOG.md`.
+Verificato nel container: `cargo fmt --check`, `clippy -D warnings`, `cargo test --workspace --release` (tutti `ok`,
+`phantom-core` 54 test con i 3 nuovi di `rate`), `cargo doc -D warnings`, binding Kotlin rigenerati, `kotlinc` di
+tutto `main` + test con stub, 31 test JVM superati. Swift non compilato (solo la CI `ios.yml`).
+
 
 **v1.3.2** (base: v1.3.1 = commit `3b7a0c2` sul PC). Dai test sul Redmi con **PixelOS Android 17** (senza root):
 - Shizuku: `NoSuchMethodException DisplayControl.createDisplay(String, boolean)`. `RootDisplayCapture` prova ora

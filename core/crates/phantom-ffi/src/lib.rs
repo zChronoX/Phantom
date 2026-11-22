@@ -682,7 +682,12 @@ impl PhantomHost {
             let mut g = lock(&self.inner);
             let target = g.host.target_bitrate_bps();
             let limit = g.dropper.limit_bytes(target, SEND_BUFFER_BYTES * 4 / 5);
+            let drains = g.dropper.drains();
             let outcome = g.dropper.decide(queued, limit, key);
+            if g.dropper.drains() > drains {
+                // la coda è andata oltre la soglia: è congestione anche se il client non l'ha ancora vista
+                g.host.on_send_stall(capture_ts_us);
+            }
             if outcome.request_keyframe {
                 g.host.request_keyframe();
             }
@@ -710,7 +715,11 @@ impl PhantomHost {
         }
         if report.queue_overflows > 0 {
             // il frame precedente arriverà rotto: si svuota e si riparte da un keyframe (non uno per pacchetto)
+            let drains = g.dropper.drains();
             g.dropper.on_queue_overflow();
+            if g.dropper.drains() > drains {
+                g.host.on_send_stall(capture_ts_us);
+            }
         }
         report.request_keyframe = g.host.wants_keyframe(capture_ts_us);
         report
@@ -730,6 +739,13 @@ impl PhantomHost {
     /// Bitrate che l'encoder dovrebbe usare adesso (bit/s): cambia con le condizioni della rete.
     pub fn target_bitrate_bps(&self) -> u64 {
         lock(&self.inner).host.target_bitrate_bps()
+    }
+
+    /// Limita il bitrate obiettivo durante la sessione (bit/s), senza mai superare il massimo iniziale delle
+    /// impostazioni: l'host passa il bitrate utile del gradino di qualità più alto, così l'obiettivo non sale molto
+    /// oltre quello che l'encoder può usare e le riduzioni per congestione hanno effetto subito.
+    pub fn set_max_bitrate_bps(&self, max_bps: u64) {
+        lock(&self.inner).host.set_max_bitrate_bps(max_bps);
     }
 
     /// Lo stato del tocco arrivato dopo l'ultima chiamata, se ce n'è uno nuovo.

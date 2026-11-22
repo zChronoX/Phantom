@@ -2,6 +2,28 @@
 
 Le note di ogni release vengono prese da qui dalla CI (sezione `## [x.y.z]` che corrisponde al tag `vx.y.z`).
 
+## [1.3.3] - 2026-11-22
+
+### Correzioni
+- **Scatti periodici sull'iPhone**: la ricerca Bonjour accendeva AWDL (la radio peer-to-peer di AirDrop) e restava
+  attiva per tutta la sessione, perché la schermata di streaming non chiude la Home. Con AWDL il Wi-Fi dell'iPhone
+  salta di canale a intervalli regolari: picchi di latenza, coda di invio piena sull'host e un keyframe a ogni
+  svuotamento (nei test della 1.3.2: 1902 pacchetti scartati e 138 keyframe in pochi minuti in LAN). Ora la ricerca
+  usa solo la LAN e si ferma quando parte lo streaming.
+- **La qualità torna a 1080p**: una volta scesa a 720p non risaliva più, perché la qualità adattiva vedeva il
+  bitrate già limitato al tetto utile di 720p. Ora vede quello concesso dalla rete; l'encoder resta limitato.
+- **Schermo spento da remoto con Shizuku/Root su Android 14–17** (prima «ok=false»): i display fisici si spengono
+  come fa scrcpy, caricando `DisplayControl` con la sua libreria di sistema; `requestDisplayPower` resta solo come
+  ultimo ripiego. Se non riesce, il log spiega perché.
+- Il log dell'host non mostra più il falso errore «thread 'phantom-p2p' panicked … android context was not
+  initialized»: era un tentativo di leggere i DNS di sistema, già gestito con un ripiego.
+
+### Prestazioni
+- Quando la coda di invio dell'host si deve svuotare, il bitrate scende subito e si fissa un tetto che si rialza piano:
+  uno stallo ricorrente della rete porta il bitrate a un livello che regge, invece di un keyframe ogni pochi secondi.
+- L'obiettivo del controllo di rete non sale più oltre il bitrate utile della risoluzione massima (prima arrivava a
+  32 Mbit/s con l'encoder fermo a 15), così le riduzioni hanno effetto immediato.
+
 ## [1.3.2] - 2026-11-22
 
 ### Correzioni

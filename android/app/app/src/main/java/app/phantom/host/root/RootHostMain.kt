@@ -128,11 +128,11 @@ object RootHostMain {
                     }
                     RemoteControlCommand.SCREEN_OFF -> {
                         val ok = RootDisplayPower.setPhysicalDisplayPower(false)
-                        emit("LOG|Schermo fisico host spento (ok=$ok)")
+                        emit("LOG|Schermo fisico host spento (ok=$ok)" + powerError(ok))
                     }
                     RemoteControlCommand.SCREEN_ON -> {
                         val ok = RootDisplayPower.setPhysicalDisplayPower(true)
-                        emit("LOG|Schermo fisico host riacceso (ok=$ok)")
+                        emit("LOG|Schermo fisico host riacceso (ok=$ok)" + powerError(ok))
                     }
                     RemoteControlCommand.BACK -> injector.injectKeyCode(KeyEvent.KEYCODE_BACK)
                     RemoteControlCommand.HOME -> injector.injectKeyCode(KeyEvent.KEYCODE_HOME)
@@ -261,6 +261,10 @@ object RootHostMain {
     }
 
     private val outLock = Any()
+
+    /** Motivo del fallimento di spegnimento/accensione da aggiungere al log (vuoto se è andata bene). */
+    private fun powerError(ok: Boolean): String =
+        if (ok) "" else RootDisplayPower.lastError.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
 
     private fun emit(line: String) {
         synchronized(outLock) {

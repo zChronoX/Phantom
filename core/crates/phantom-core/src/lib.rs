@@ -360,6 +360,16 @@ impl Host {
         self.rate.bitrate_bps()
     }
 
+    /// La coda di invio dell'host si è dovuta svuotare (vedi [`rate::RateController::on_send_stall`]).
+    pub fn on_send_stall(&mut self, now_us: u64) {
+        self.rate.on_send_stall(now_us);
+    }
+
+    /// Massimo del bitrate durante la sessione (vedi [`rate::RateController::set_max_bps`]).
+    pub fn set_max_bitrate_bps(&mut self, max_bps: u64) {
+        self.rate.set_max_bps(max_bps);
+    }
+
     /// Il controllo del bitrate (sola lettura: fase, giudizio, riduzioni).
     pub fn rate(&self) -> &RateController {
         &self.rate
