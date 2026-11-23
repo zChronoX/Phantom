@@ -1337,9 +1337,19 @@ impl P2pHostEndpoint {
         self.inner.endpoint_id()
     }
 
-    /// `true` se l'endpoint P2P ha raggiunto il relay online entro `online_timeout_ms`.
+    /// `true` se **adesso** l'endpoint è collegato a un relay di casa (raggiungibile da fuori casa).
     pub fn is_online(&self) -> bool {
         self.inner.is_online()
+    }
+
+    /// Stato dei relay di casa in una riga, per il log (URL e collegato/ultimo errore).
+    pub fn relay_status(&self) -> String {
+        self.inner.relay_status()
+    }
+
+    /// `true` se l'endpoint è stato chiuso: va riaperto per tornare raggiungibili.
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
     }
 
     /// Aspetta una connessione P2P in ingresso entro `timeout_ms` millisecondi.
@@ -1452,6 +1462,58 @@ impl QuicConnection {
         let space = self.send_buffer_space();
         SEND_BUFFER_BYTES.saturating_sub(space) as u64
     }
+
+    /// Statistiche del percorso QUIC: RTT, finestra di congestione, pacchetti spediti/persi, eventi di congestione
+    /// e, in P2P, se il percorso passa dal relay. Servono a capire se uno stallo viene dalla rete (RTT che esplode,
+    /// perdite) o dal controllo di congestione (finestra piccola).
+    pub fn link_stats(&self) -> LinkStats {
+        match &self.link {
+            ConnectionBackend::Direct(link) => {
+                let s = link.link_stats();
+                LinkStats {
+                    rtt_us: s.rtt_us,
+                    cwnd_bytes: s.cwnd_bytes,
+                    sent_packets: s.sent_packets,
+                    lost_packets: s.lost_packets,
+                    congestion_events: s.congestion_events,
+                    via_relay: s.via_relay,
+                }
+            }
+            ConnectionBackend::P2p(link) => {
+                let s = link.link_stats();
+                LinkStats {
+                    rtt_us: s.rtt_us,
+                    cwnd_bytes: s.cwnd_bytes,
+                    sent_packets: s.sent_packets,
+                    lost_packets: s.lost_packets,
+                    congestion_events: s.congestion_events,
+                    via_relay: s.via_relay,
+                }
+            }
+        }
+    }
+
+    /// `true` se la connessione è P2P (`iroh`), `false` se QUIC diretto.
+    pub fn is_p2p(&self) -> bool {
+        matches!(self.link, ConnectionBackend::P2p(_))
+    }
+}
+
+/// Statistiche del percorso di una [`QuicConnection`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct LinkStats {
+    /// RTT stimato da QUIC (µs).
+    pub rtt_us: u64,
+    /// Finestra di congestione (byte).
+    pub cwnd_bytes: u64,
+    /// Pacchetti QUIC spediti (cumulativo).
+    pub sent_packets: u64,
+    /// Pacchetti QUIC persi (cumulativo).
+    pub lost_packets: u64,
+    /// Eventi di congestione (cumulativo).
+    pub congestion_events: u64,
+    /// Il percorso scelto passa da un relay (solo P2P).
+    pub via_relay: bool,
 }
 
 /// Coda dei datagrammi in uscita impostata nei due trasporti.

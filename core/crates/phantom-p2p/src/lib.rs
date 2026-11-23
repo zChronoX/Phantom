@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use iroh::endpoint::{presets, Connection, IdleTimeout, QuicTransportConfig, VarInt};
-use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey, Watcher};
 use tokio::runtime::Runtime;
 
 /// Protocollo applicativo annunciato in ALPN su `iroh` (identico al trasporto QUIC diretto).
@@ -132,9 +132,39 @@ impl P2pEndpoint {
         self.endpoint.id().to_string()
     }
 
-    /// `true` se l'endpoint ha completato la registrazione al relay entro `wait_online`.
-    pub fn is_online(&self) -> bool {
+    /// `true` se l'endpoint ha completato la registrazione al relay entro `wait_online` (valore dell'apertura).
+    pub fn was_online_at_bind(&self) -> bool {
         self.online
+    }
+
+    /// `true` se **adesso** l'endpoint è collegato ad almeno un relay di casa: senza, l'host non è raggiungibile da
+    /// fuori casa finché iroh non si ricollega (dopo un cambio di rete o un'interruzione del Wi-Fi).
+    pub fn is_online(&self) -> bool {
+        self.endpoint.home_relay_status().get().iter().any(|s| s.is_connected())
+    }
+
+    /// Stato dei relay di casa in una riga (per il log): URL, collegato o ultimo errore.
+    pub fn relay_status(&self) -> String {
+        let list = self.endpoint.home_relay_status().get();
+        if list.is_empty() {
+            return "nessun relay scelto".to_string();
+        }
+        list.iter()
+            .map(|s| {
+                let state = if s.is_connected() {
+                    "collegato".to_string()
+                } else {
+                    s.last_error().map_or_else(|| "non collegato".to_string(), |e| format!("errore: {e}"))
+                };
+                format!("{} {state}", s.url())
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    /// `true` se l'endpoint è stato chiuso (non accetterà più connessioni).
+    pub fn is_closed(&self) -> bool {
+        self.endpoint.is_closed()
     }
 
     /// Aspetta una connessione P2P in ingresso entro `timeout`.
@@ -144,7 +174,7 @@ impl P2pEndpoint {
                 .await
                 .map_err(|_| P2pError::Timeout)?
                 .ok_or(P2pError::EndpointClosed)?;
-            tokio::time::timeout(timeout, incoming)
+            tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming)
                 .await
                 .map_err(|_| P2pError::Timeout)?
                 .map_err(|e| P2pError::Connection(e.to_string()))
@@ -229,6 +259,23 @@ impl P2pLink {
         self.connection.max_datagram_size()
     }
 
+    /// Statistiche del percorso scelto (RTT, finestra di congestione) e della connessione (perdite), e se il
+    /// percorso passa dal relay invece che diretto.
+    pub fn link_stats(&self) -> LinkStats {
+        let conn = self.connection.stats();
+        let mut out =
+            LinkStats { sent_packets: conn.sent_packets, lost_packets: conn.lost_packets, ..LinkStats::default() };
+        let paths = self.connection.paths();
+        if let Some(p) = paths.iter().find(|p| p.is_selected()) {
+            let ps = p.stats();
+            out.rtt_us = u64::try_from(ps.rtt.as_micros()).unwrap_or(u64::MAX);
+            out.cwnd_bytes = ps.cwnd;
+            out.congestion_events = ps.congestion_events;
+            out.via_relay = p.is_relay();
+        }
+        out
+    }
+
     /// Chiude la connessione con codice e motivo applicativo.
     pub fn close(&self, code: u32, reason: &[u8]) {
         let _guard = self.runtime.enter();
@@ -285,6 +332,27 @@ fn is_android_context_panic(payload: &(dyn std::any::Any + Send)) -> bool {
 
 /// Coda dei datagrammi in uscita: stesso ragionamento di `phantom-quic` (contiene un keyframe, non 0,7 s di video).
 const DATAGRAM_SEND_BUFFER: usize = 512 * 1024;
+
+/// Tempo massimo per completare l'handshake di una connessione in arrivo (stesso valore di `phantom-quic`): via
+/// relay o con il hole punching l'handshake richiede facilmente più dell'attesa breve passata ad `accept`.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Statistiche del percorso di una connessione P2P (stessi campi di `phantom_quic::LinkStats`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LinkStats {
+    /// RTT stimato sul percorso scelto (µs).
+    pub rtt_us: u64,
+    /// Finestra di congestione del percorso scelto (byte).
+    pub cwnd_bytes: u64,
+    /// Pacchetti QUIC spediti (cumulativo).
+    pub sent_packets: u64,
+    /// Pacchetti QUIC persi (cumulativo).
+    pub lost_packets: u64,
+    /// Eventi di congestione del percorso scelto (cumulativo).
+    pub congestion_events: u64,
+    /// Il percorso scelto passa dal relay invece che diretto.
+    pub via_relay: bool,
+}
 
 fn transport_config() -> QuicTransportConfig {
     let mut builder = QuicTransportConfig::builder()

@@ -1,9 +1,32 @@
 # Handoff
 
-Scritto: 2026-11-20; aggiornato il 2026-11-22 con la **v1.3.3** (AWDL, risalita a 1080p, schermo spento su Android 14–17, stallo della coda → bitrate). Roadmap completa nel documento di progetto «claude/PHANTOM-HANDOFF-ROADMAP.md».
-Branch: main - base `86c1761` (v1.3.2, pushata e taggata dall'utente) + commit v1.3.3 consegnato come patch (vedi «Uncommitted changes»).
+Scritto: 2026-11-20; aggiornato il 2026-11-23 con la **v1.4.0** (host sempre raggiungibile, HUD laterale, sessione viva in background). Roadmap completa nel documento di progetto «claude/PHANTOM-HANDOFF-ROADMAP.md».
+Branch: main - base `76144e0` (v1.3.3, pushata e taggata dall'utente) + commit v1.4.0 consegnato come patch (vedi «Uncommitted changes»).
 Cartella sul PC: `C:\Users\Giovanni\Documents\Progetti personali\Phantom\Phantom` (spostata dall'utente).
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
+
+## Esito dei test 1.3.3 (23/11) e risposta della 1.4.0
+
+- HUD: «LAN (trovato) · 60 fps · 19 ms», latenza 56/67 ms (prima 78/96), keyframe 75 (prima 138), ma ancora
+  scartati 439 e saltati 1243; righe «Rete in affanno» con il bitrate che ora scende (6–14 Mbit/s). Gli stalli restano:
+  cause candidate il risparmio energetico del Wi-Fi del Redmi (da Android 14 `WIFI_MODE_FULL_HIGH_PERF` non fa nulla e
+  `LOW_LATENCY` vale solo con Phantom in primo piano e schermo acceso) o le scansioni Wi-Fi. La 1.4.0 prova
+  `cmd wifi force-low-latency-mode enabled` dal worker e mette le statistiche QUIC nel log per distinguere.
+- Da fuori casa il Redmi non era raggiungibile e dopo un blackout nemmeno a casa. Trovati due difetti: (1) i cicli di
+  `accept` LAN e P2P uscivano con `break` al primo handshake fallito (nel log: «Errore accept P2P: … authentication
+  failed») e l'host restava sordo fino al riavvio; (2) `accept(400 ms)` usava gli stessi 400 ms anche per
+  l'handshake, che via relay/5G spesso non bastano (la connessione veniva abbandonata e l'host non la vedeva mai).
+  Test `short_accept_timeout_does_not_abort_a_slow_handshake` con un proxy UDP che ritarda di 40 ms: fallisce col
+  codice vecchio, passa col nuovo.
+- iPhone: HUD difficile da spostare e da chiudere → HUD laterale. Background → sessione chiusa e riaperta → ora
+  `UIBackgroundModes: audio`, video in pausa e keyframe al rientro. «Chiusura inaspettata» dopo la chiusura dalle
+  recenti: `CrashLog.makeReport` controllava `hasSuffix("background")` ma la riga finisce con « · memoria N MB».
+- Il log dell'iPhone non era allegato: va chiesto se servono dettagli lato client.
+- Da guardare nei test della 1.4.0: righe «Wi-Fi a bassa latenza forzata: …» ed «Esclusione dal risparmio batteria:
+  …» (se la prima è «non consentita» serve un'altra strada); le nuove righe «Rete in affanno … QUIC RTT … finestra …
+  persi … congestioni …» durante gli stalli; «P2P non raggiungibile da fuori casa» / «P2P di nuovo raggiungibile»;
+  prova da 5G con il Redmi a casa; background con audio acceso e spento (con audio spento iOS può sospendere l'app:
+  al ritorno deve riconnettersi da sola).
 
 ## Esito dei test 1.3.2 (PixelOS Android 17, Shizuku, LAN) e risposta della 1.3.3
 
@@ -203,6 +226,21 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 «sessione (apertura e chiusura)»).
 
 ## Uncommitted changes
+
+**v1.4.0** (base: v1.3.3 = commit `76144e0`). Consegnata come patch. File toccati: `core/crates/phantom-quic`
+(`HANDSHAKE_TIMEOUT`, `LinkStats`, nuovo test con proxy UDP), `core/crates/phantom-p2p` (`HANDSHAKE_TIMEOUT`,
+`is_online` letto dai relay di casa in tempo reale, `relay_status`, `is_closed`, `LinkStats` con percorso via relay),
+`core/crates/phantom-ffi` (`QuicConnection.link_stats/is_p2p`, `P2pHostEndpoint.relay_status/is_closed`, record
+`LinkStats`), `android/.../stream/PhantomHostSession.kt` (cicli di accept resistenti, `runP2pAcceptLoop` con
+controllo ogni 15 s e riapertura, `logThrottled`, statistiche QUIC nel log), `android/.../root/RootHostMain.kt`
+(`tuneNetworkForStreaming`), `android/.../HostForegroundService.kt` (mDNS rifatto 3 s dopo un cambio di rete),
+`ios/PhantomF0/RemoteControlSurface.swift` (HUD laterale, background), `ios/PhantomF0/RemoteSession.swift`
+(`enterBackground/enterForeground`), `ios/PhantomF0/CrashLog.swift`, `ios/project.yml` (`UIBackgroundModes`),
+versioni e `CHANGELOG.md`.
+Verificato nel container: fmt, clippy `-D warnings`, `cargo test --workspace --release` (tutti `ok`, `phantom-quic` 5
+test), `cargo doc -D warnings`, binding Kotlin rigenerati, `kotlinc` di `main` + test, 31 test JVM. Swift: solo
+analisi sintattica con tree-sitter (0 problemi sui file toccati); la compilazione vera è la CI `ios.yml`.
+
 
 **v1.3.3** (base: v1.3.2 = commit `86c1761`). Consegnata come patch da applicare con `git am`; file toccati:
 `core/crates/phantom-core/src/{rate.rs,lib.rs}`, `core/crates/phantom-ffi/src/lib.rs`,

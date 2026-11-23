@@ -303,3 +303,67 @@ fn persistent_host_identity_survives_rebind() {
         host.join().expect("join host");
     }
 }
+
+/// Proxy UDP che ritarda ogni pacchetto di `delay` in entrambe le direzioni (una rete lenta finta). Il primo
+/// mittente che non è il server diventa «il client».
+fn delaying_proxy(server: SocketAddr, delay: Duration) -> SocketAddr {
+    use std::net::UdpSocket;
+    use std::sync::{Arc, Mutex};
+    let socket = Arc::new(UdpSocket::bind(loopback()).expect("bind proxy"));
+    let address = socket.local_addr().expect("indirizzo proxy");
+    let client: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+    thread::spawn(move || {
+        let mut buf = [0u8; 2048];
+        while let Ok((n, from)) = socket.recv_from(&mut buf) {
+            let to = if from == server {
+                match *client.lock().expect("lock") {
+                    Some(c) => c,
+                    None => continue,
+                }
+            } else {
+                *client.lock().expect("lock") = Some(from);
+                server
+            };
+            let packet = buf[..n].to_vec();
+            let out = Arc::clone(&socket);
+            thread::spawn(move || {
+                thread::sleep(delay);
+                let _ = out.send_to(&packet, to);
+            });
+        }
+    });
+    address
+}
+
+/// Regressione 1.3.3: l'host chiamava `accept(400 ms)` e usava lo stesso timeout anche per l'handshake, così una
+/// connessione lenta (relay, 5G, Wi-Fi che cambia) veniva abbandonata a metà e l'host non la vedeva mai. Ora l'attesa
+/// breve vale solo per l'arrivo di una connessione. Qui la rete ritarda ogni pacchetto di 40 ms (handshake ~160 ms)
+/// e l'host aspetta a colpi di 30 ms: prima non accettava mai, ora sì.
+#[test]
+fn short_accept_timeout_does_not_abort_a_slow_handshake() {
+    let endpoint = HostEndpoint::bind(loopback()).expect("bind host");
+    let server = endpoint.local_addr().expect("indirizzo");
+    let proxy = delaying_proxy(server, Duration::from_millis(40));
+    let certificate = endpoint.certificate_der().to_vec();
+    let client = thread::spawn(move || {
+        let ep = ClientEndpoint::bind(loopback()).expect("bind client");
+        let link = ep.connect(proxy, SERVER_NAME, &certificate, Duration::from_secs(5)).expect("connect");
+        thread::sleep(Duration::from_millis(500));
+        drop(link);
+        drop(ep);
+    });
+    let started = Instant::now();
+    let mut accepted = false;
+    while started.elapsed() < Duration::from_secs(5) {
+        match endpoint.accept(Duration::from_millis(30)) {
+            Ok(_) => {
+                accepted = true;
+                break;
+            }
+            Err(QuicError::Timeout) => continue,
+            Err(e) => panic!("errore inatteso: {e}"),
+        }
+    }
+    assert!(accepted, "la connessione lenta è stata accettata nonostante l'attesa da 30 ms");
+    client.join().expect("client");
+}

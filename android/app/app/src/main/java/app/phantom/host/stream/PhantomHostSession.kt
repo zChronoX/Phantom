@@ -191,6 +191,9 @@ class PhantomHostSession(
             onReady(localPort, certHex)
             onLog("Endpoint QUIC LAN pronto sulla porta $localPort")
 
+            // Un handshake fallito (client con dati vecchi, rete che cambia a metà, pacchetti spuri) è un problema di
+            // quella connessione, non dell'endpoint: prima il ciclo usciva con `break` al primo errore e l'host restava
+            // irraggiungibile (in LAN o in P2P) fino al riavvio. Ora si esce solo se l'endpoint è chiuso davvero.
             lanAcceptThread = Thread({
                 while (running.get()) {
                     try {
@@ -198,13 +201,14 @@ class PhantomHostSession(
                         authenticateAndEnqueue(conn, "LAN")
                     } catch (_: QuicTransportException.Timeout) {
                         continue
+                    } catch (_: QuicTransportException.EndpointClosed) {
+                        if (running.get()) onLog("Endpoint LAN chiuso")
+                        break
                     } catch (e: QuicTransportException) {
-                        if (running.get()) {
-                            onLog("Errore accept LAN: ${e.message}")
-                        }
-                        break
-                    } catch (_: Throwable) {
-                        break
+                        if (running.get()) logThrottled("accept-lan", "Connessione LAN in arrivo fallita: ${e.message}")
+                    } catch (t: Throwable) {
+                        if (running.get()) logThrottled("accept-lan", "Connessione LAN in arrivo fallita: ${t.javaClass.simpleName}: ${t.message}")
+                        sleepQuietly(200)
                     }
                 }
             }, "phantom-accept-lan").apply {
@@ -214,41 +218,7 @@ class PhantomHostSession(
 
             val secret = p2pSecretKey
             if (secret != null && secret.size == 32) {
-                p2pAcceptThread = Thread({
-                    var p2pEp: P2pHostEndpoint? = null
-                    try {
-                        val ep = P2pHostEndpoint.bind(secret, 8_000uL)
-                        p2pEp = ep
-                        activeP2pEndpoint.set(ep)
-                        val eid = ep.endpointId()
-                        onP2pReady(eid)
-                        val p2pState = if (ep.isOnline()) "online" else "in attesa relay"
-                        onLog("P2P integrato (iroh) $p2pState · ID ${eid.take(12)}…")
-                        while (running.get()) {
-                            try {
-                                val conn = ep.accept(400uL)
-                                authenticateAndEnqueue(conn, "P2P")
-                            } catch (_: QuicTransportException.Timeout) {
-                                continue
-                            } catch (e: QuicTransportException) {
-                                if (running.get()) {
-                                    onLog("Errore accept P2P: ${e.message}")
-                                }
-                                break
-                            }
-                        }
-                    } catch (t: Throwable) {
-                        if (running.get()) {
-                            onLog("P2P integrato non disponibile (LAN resta attiva): ${t.javaClass.simpleName}: ${t.message}")
-                        }
-                    } finally {
-                        activeP2pEndpoint.compareAndSet(p2pEp, null)
-                        try {
-                            p2pEp?.close()
-                        } catch (_: Throwable) {
-                        }
-                    }
-                }, "phantom-accept-p2p").apply {
+                p2pAcceptThread = Thread({ runP2pAcceptLoop(secret) { conn -> authenticateAndEnqueue(conn, "P2P") } }, "phantom-accept-p2p").apply {
                     isDaemon = true
                     start()
                 }
@@ -296,6 +266,107 @@ class PhantomHostSession(
                 endpoint?.close()
             } catch (_: Throwable) {
             }
+        }
+    }
+
+    /**
+     * Tiene vivo l'endpoint P2P per tutta la vita dell'host: lo apre (riprovando con attese crescenti se non c'è rete),
+     * accetta le connessioni e ogni 15 s controlla di essere collegato al relay. Senza relay l'host non è
+     * raggiungibile da fuori casa: dopo 45 s si chiede a iroh di ricontrollare la rete, dopo 3 minuti si chiude e
+     * si riapre l'endpoint (stessa chiave, quindi stesso ID: l'iPhone non deve rifare l'associazione).
+     */
+    private fun runP2pAcceptLoop(secret: ByteArray, onIncoming: (QuicConnection) -> Unit) {
+        var backoffMs = 2_000L
+        while (running.get()) {
+            var ep: P2pHostEndpoint? = null
+            try {
+                val opened = P2pHostEndpoint.bind(secret, 8_000uL)
+                ep = opened
+                activeP2pEndpoint.set(opened)
+                val eid = opened.endpointId()
+                onP2pReady(eid)
+                val online = opened.isOnline()
+                onLog("P2P integrato (iroh) ${if (online) "online" else "in attesa relay"} · ID ${eid.take(12)}…")
+                backoffMs = 2_000L
+                var wasOnline = online
+                var offlineSinceMs = if (online) -1L else SystemClock.elapsedRealtime()
+                var nudged = false
+                var lastCheckMs = SystemClock.elapsedRealtime()
+                while (running.get()) {
+                    try {
+                        onIncoming(opened.accept(400uL))
+                    } catch (_: QuicTransportException.Timeout) {
+                        // normale: nessuna connessione in arrivo
+                    } catch (_: QuicTransportException.EndpointClosed) {
+                        if (running.get()) onLog("Endpoint P2P chiuso: lo riapro")
+                        break
+                    } catch (e: QuicTransportException) {
+                        if (running.get()) logThrottled("accept-p2p", "Connessione P2P in arrivo fallita: ${e.message}")
+                    }
+                    val nowMs = SystemClock.elapsedRealtime()
+                    if (nowMs - lastCheckMs < 15_000L) continue
+                    lastCheckMs = nowMs
+                    if (opened.isClosed()) {
+                        if (running.get()) onLog("Endpoint P2P chiuso: lo riapro")
+                        break
+                    }
+                    val isOnline = opened.isOnline()
+                    if (isOnline) {
+                        if (!wasOnline) onLog("P2P di nuovo raggiungibile (relay collegato)")
+                        offlineSinceMs = -1L
+                        nudged = false
+                    } else {
+                        if (wasOnline || offlineSinceMs < 0) {
+                            offlineSinceMs = nowMs
+                            onLog("P2P non raggiungibile da fuori casa: relay scollegato (${opened.relayStatus()})")
+                        }
+                        val offlineMs = nowMs - offlineSinceMs
+                        if (!nudged && offlineMs >= 45_000L) {
+                            nudged = true
+                            try {
+                                opened.networkChange()
+                            } catch (_: Throwable) {
+                            }
+                        } else if (offlineMs >= 180_000L) {
+                            onLog("P2P ancora senza relay dopo 3 minuti: riapro l'endpoint")
+                            break
+                        }
+                    }
+                    wasOnline = isOnline
+                }
+            } catch (t: Throwable) {
+                if (running.get()) {
+                    logThrottled("bind-p2p", "P2P non disponibile, riprovo tra ${backoffMs / 1000} s (LAN resta attiva): ${t.javaClass.simpleName}: ${t.message}")
+                }
+            } finally {
+                activeP2pEndpoint.compareAndSet(ep, null)
+                try {
+                    ep?.close()
+                } catch (_: Throwable) {
+                }
+            }
+            if (!running.get()) break
+            sleepQuietly(backoffMs)
+            backoffMs = (backoffMs * 2).coerceAtMost(30_000L)
+        }
+    }
+
+    private val throttledLogs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** Lo stesso tipo di messaggio al massimo una volta ogni 30 s (un client che riprova non deve riempire il log). */
+    private fun logThrottled(key: String, message: String) {
+        val now = SystemClock.elapsedRealtime()
+        val last = throttledLogs[key]
+        if (last == null || now - last >= 30_000L) {
+            throttledLogs[key] = now
+            onLog(message)
+        }
+    }
+
+    private fun sleepQuietly(ms: Long) {
+        try {
+            Thread.sleep(ms)
+        } catch (_: InterruptedException) {
         }
     }
 
@@ -558,6 +629,8 @@ class PhantomHostSession(
                     var lastReportMs = lastBitrateCheckMs
                     var loggedOverflows = 0L
                     var loggedErrors = 0L
+                    var loggedLost = 0uL
+                    var loggedCongestion = 0uL
                     while (running.get() && clientActive.get() && !conn.isClosed() && !phantomHost.isClosed()) {
                         val nowMs = SystemClock.elapsedRealtime()
                         val policy = thermalProvider()
@@ -700,6 +773,19 @@ class PhantomHostSession(
                             lastNetLogMs = nowMs
                             val overflows = queueOverflows.get()
                             val errors = sendErrors.get()
+                            // Statistiche QUIC degli ultimi 5 s: un RTT che esplode o perdite dicono «rete/Wi-Fi»; una finestra di
+                            // congestione piccola con RTT normale dice «controllo di congestione».
+                            val quic = try {
+                                val ls = conn.linkStats()
+                                val lost = ls.lostPackets - loggedLost
+                                val cong = ls.congestionEvents - loggedCongestion
+                                loggedLost = ls.lostPackets
+                                loggedCongestion = ls.congestionEvents
+                                " · QUIC RTT ${ls.rttUs / 1000u} ms, finestra ${ls.cwndBytes / 1024u} KB, persi $lost, " +
+                                    "congestioni $cong${if (ls.viaRelay) " · via relay" else ""}"
+                            } catch (_: Throwable) {
+                                ""
+                            }
                             if (overflows != loggedOverflows || errors != loggedErrors) {
                                 val queuedKb = try {
                                     conn.queuedSendBytes().toLong() / 1024
@@ -708,7 +794,7 @@ class PhantomHostSession(
                                 }
                                 onLog(
                                     "Rete in affanno (ultimi 5 s): ${overflows - loggedOverflows} pacchetti scartati per coda piena, " +
-                                        "${errors - loggedErrors} invii falliti · coda $queuedKb KB · bitrate ${appliedBitrate / 1_000_000} Mbps",
+                                        "${errors - loggedErrors} invii falliti · coda $queuedKb KB · bitrate ${appliedBitrate / 1_000_000} Mbps$quic",
                                 )
                                 loggedOverflows = overflows
                                 loggedErrors = errors

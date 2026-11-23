@@ -9,7 +9,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "1.3.3"
+    MARKETING_VERSION: "1.4.0"
     CURRENT_PROJECT_VERSION: "1"
     ENABLE_USER_SCRIPT_SANDBOXING: YES
 targets:
@@ -42,6 +42,10 @@ targets:
         NSCameraUsageDescription: Phantom usa la fotocamera per scansionare il codice QR di accoppiamento del tuo telefono Android.
         NSBonjourServices:
           - _phantom._udp
+        # Con l'audio di Android in riproduzione la sessione resta viva quando Phantom va in background (si apre
+        # un'altra app, si blocca lo schermo): niente più disconnessione e riconnessione al ritorno.
+        UIBackgroundModes:
+          - audio
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.phantom.f0

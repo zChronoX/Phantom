@@ -324,15 +324,16 @@ struct RemoteSessionView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
 
-    @State private var hudExpanded = false
-    @State private var hudHidden = false
+    /// Pannello laterale aperto (controlli e telemetria); da chiuso resta solo la linguetta sul bordo.
+    @State private var panelOpen = false
+    /// Lato della HUD: «trailing» (destra, predefinito) o «leading» (sinistra). Ricordato tra le sessioni.
+    @AppStorage("hudEdge") private var hudEdgeRaw = "trailing"
+    @GestureState private var panelDrag: CGFloat = 0
     @State private var keyboardVisible = false
     @State private var toggleKeyboardToken = 0
     @State private var resetTouchesToken = 0
     @State private var started = false
     @State private var controllerBridge = GamepadBridge()
-    @State private var pillOffset: CGSize = .zero
-    @GestureState private var pillDrag: CGSize = .zero
     private let pillHaptic = UIImpactFeedbackGenerator(style: .light)
 
     var body: some View {
@@ -356,11 +357,7 @@ struct RemoteSessionView: View {
                 }
             }
 
-            if hudHidden {
-                collapsedHandle
-            } else {
-                hudBar
-            }
+            sideHud
 
             if let toast = session.toastText {
                 VStack {
@@ -387,10 +384,16 @@ struct RemoteSessionView: View {
             if phase == .inactive {
                 resetTouchesToken &+= 1
             } else if phase == .background {
+                // Prima qui si chiudeva la sessione e al ritorno si ricollegava da capo. Ora resta aperta: video in
+                // pausa, audio e connessione attivi.
                 resetTouchesToken &+= 1
-                end()
-            } else if phase == .active && !started {
-                begin()
+                if started { session.enterBackground() }
+            } else if phase == .active {
+                if started {
+                    session.enterForeground()
+                } else {
+                    begin()
+                }
             }
         }
     }
@@ -446,75 +449,115 @@ struct RemoteSessionView: View {
         .padding(.horizontal, 28)
     }
 
-    /// Pillola compatta mostrata con la HUD chiusa: stato + FPS, e i tre tasti di navigazione Android sempre a
-    /// portata. Sull'iPhone lo swipe dal bordo inferiore chiuderebbe Phantom, quindi Home/Indietro/Recenti
-    /// devono restare raggiungibili senza riaprire la HUD intera.
-    private var collapsedHandle: some View {
-        HStack {
-            Spacer()
-            HStack(spacing: 2) {
-                pillNavButton(.back, systemImage: "chevron.backward", label: "Indietro")
-                pillNavButton(.home, systemImage: "circle", label: "Home")
-                pillNavButton(.recents, systemImage: "square", label: "Recenti")
+    private var hudOnLeft: Bool { hudEdgeRaw == "leading" }
 
-                Rectangle()
-                    .fill(.white.opacity(0.22))
-                    .frame(width: 1, height: 18)
-                    .padding(.horizontal, 4)
+    private var hudEdge: Edge { hudOnLeft ? .leading : .trailing }
 
-                Button {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) { hudHidden = false }
-                } label: {
-                    HStack(spacing: 7) {
-                        Circle()
-                            .fill(session.metrics.connected ? PhantomPalette.liveGreen : PhantomPalette.warnAmber)
-                            .frame(width: 7, height: 7)
-                        if session.metrics.connected {
-                            Text(String(format: "%.0f fps", session.metrics.fps))
-                                .font(.caption2.monospacedDigit().weight(.semibold))
-                        }
-                        Image(systemName: "slider.horizontal.3")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .padding(.leading, 4)
-                    .padding(.trailing, 8)
-                    .frame(minHeight: 34)
-                    .contentShape(Rectangle())
+    private var hudAnimation: Animation { .spring(response: 0.3, dampingFraction: 0.86) }
+
+    private func setPanel(open: Bool) {
+        guard panelOpen != open else { return }
+        pillHaptic.impactOccurred(intensity: 0.5)
+        withAnimation(hudAnimation) { panelOpen = open }
+    }
+
+    /// Spostamento orizzontale «verso il centro dello schermo» (positivo) di un trascinamento.
+    private func towardCenter(_ dx: CGFloat) -> CGFloat { hudOnLeft ? dx : -dx }
+
+    /// HUD laterale: una linguetta fissa a metà altezza sul bordo (stato, FPS e Indietro/Home/Recenti sempre a portata)
+    /// e un pannello che scorre dal lato con tutti i controlli e la telemetria. Il pannello si chiude toccando fuori,
+    /// trascinandolo verso il bordo o toccando la freccia. Prima la HUD stava in alto, era difficile da spostare e il
+    /// tasto «–» era piccolo e scomodo da raggiungere.
+    private var sideHud: some View {
+        GeometryReader { geo in
+            ZStack(alignment: hudOnLeft ? Alignment.leading : Alignment.trailing) {
+                if panelOpen {
+                    // Velo trasparente: un tocco fuori chiude il pannello (e non arriva ad Android)
+                    Color.black.opacity(0.18)
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .onTapGesture { setPanel(open: false) }
+                        .transition(.opacity)
                 }
-                .accessibilityLabel("Mostra controlli")
+
+                if panelOpen {
+                    sidePanel(maxHeight: max(240, geo.size.height - 24), width: min(340, geo.size.width - 56))
+                        .offset(x: hudOnLeft ? min(0, panelDrag) : max(0, panelDrag))
+                        .gesture(
+                            DragGesture(minimumDistance: 8)
+                                .updating($panelDrag) { value, state, _ in state = value.translation.width }
+                                .onEnded { value in
+                                    if towardCenter(value.translation.width) < -50
+                                        || towardCenter(value.predictedEndTranslation.width) < -120 {
+                                        setPanel(open: false)
+                                    }
+                                }
+                        )
+                        .transition(.move(edge: hudEdge).combined(with: .opacity))
+                } else {
+                    edgeTab
+                        .transition(.move(edge: hudEdge).combined(with: .opacity))
+                }
             }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 4)
-            .padding(.vertical, 2)
-            .phantomGlassCapsule(overVideo: true)
-            .padding(.top, 8)
-            .padding(.trailing, 12)
-            .offset(
-                x: pillOffset.width + pillDrag.width,
-                y: pillOffset.height + pillDrag.height
-            )
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 6)
-                    .updating($pillDrag) { value, state, _ in
-                        state = value.translation
-                    }
-                    .onEnded { value in
-                        // La pillola ora è più larga: limite a sinistra ridotto per non farla uscire dallo schermo.
-                        pillOffset.width = max(-180, min(0, pillOffset.width + value.translation.width))
-                        pillOffset.height = max(0, min(520, pillOffset.height + value.translation.height))
-                    }
-            )
+            .frame(width: geo.size.width, height: geo.size.height, alignment: hudOnLeft ? Alignment.leading : Alignment.trailing)
         }
     }
 
-    private func pillNavButton(_ action: RemoteQuickAction, systemImage: String, label: String) -> some View {
+    /// Linguetta sul bordo: si apre toccando lo stato o trascinandola verso il centro.
+    private var edgeTab: some View {
+        VStack(spacing: 2) {
+            Button {
+                setPanel(open: true)
+            } label: {
+                VStack(spacing: 3) {
+                    Image(systemName: hudOnLeft ? "chevron.compact.right" : "chevron.compact.left")
+                        .font(.body.weight(.semibold))
+                    Circle()
+                        .fill(session.metrics.connected ? PhantomPalette.liveGreen : PhantomPalette.warnAmber)
+                        .frame(width: 7, height: 7)
+                    if session.metrics.connected {
+                        Text(String(format: "%.0f", session.metrics.fps))
+                            .font(.caption2.monospacedDigit().weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                    }
+                }
+                .frame(width: 40, height: 58)
+                .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Apri i controlli")
+
+            Rectangle()
+                .fill(.white.opacity(0.22))
+                .frame(width: 18, height: 1)
+                .padding(.vertical, 3)
+
+            tabNavButton(.back, systemImage: "chevron.backward", label: "Indietro")
+            tabNavButton(.home, systemImage: "circle", label: "Home")
+            tabNavButton(.recents, systemImage: "square", label: "Recenti")
+        }
+        .foregroundStyle(.white)
+        .padding(.vertical, 6)
+        .phantomGlassCard(cornerRadius: 22, overVideo: true)
+        .padding(hudOnLeft ? Edge.Set.leading : Edge.Set.trailing, 4)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 12)
+                .onEnded { value in
+                    if towardCenter(value.translation.width) > 24 {
+                        setPanel(open: true)
+                    }
+                }
+        )
+    }
+
+    private func tabNavButton(_ action: RemoteQuickAction, systemImage: String, label: String) -> some View {
         Button {
             pillHaptic.impactOccurred(intensity: 0.6)
             session.sendQuickAction(action)
         } label: {
             Image(systemName: systemImage)
-                .font(.caption.weight(.bold))
-                .frame(width: 34, height: 34)
+                .font(.footnote.weight(.bold))
+                .frame(width: 40, height: 40)
                 .contentShape(Rectangle())
         }
         .disabled(!session.metrics.connected)
@@ -522,118 +565,118 @@ struct RemoteSessionView: View {
         .accessibilityLabel(label)
     }
 
-    private var hudBar: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 11) {
-                Button {
-                    end()
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.caption.weight(.bold))
-                        .frame(width: 28, height: 28)
-                        .background(.white.opacity(0.14), in: Circle())
-                }
+    /// Pannello laterale: riepilogo, tasti in griglia, telemetria, lato della HUD e chiusura della sessione.
+    private func sidePanel(maxHeight: CGFloat, width: CGFloat) -> some View {
+        ViewThatFits(in: .vertical) {
+            panelContent
+            ScrollView(showsIndicators: false) { panelContent }
+        }
+        .frame(width: width)
+        // In verticale il contenuto ci sta e il pannello è alto quanto serve; in orizzontale diventa scorrevole.
+        .frame(maxHeight: maxHeight)
+        .phantomGlassCard(cornerRadius: 26, overVideo: true)
+        .padding(hudOnLeft ? Edge.Set.leading : Edge.Set.trailing, 8)
+    }
 
+    private var panelContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 9) {
                 Circle()
                     .fill(session.metrics.connected ? PhantomPalette.liveGreen : PhantomPalette.warnAmber)
                     .frame(width: 8, height: 8)
-
                 Text(hudSummaryLine)
                     .font(.caption.monospacedDigit().weight(.medium))
                     .lineLimit(1)
-
+                    .minimumScaleFactor(0.75)
                 Spacer(minLength: 4)
-
                 Button {
-                    session.toggleAudioMute()
+                    setPanel(open: false)
                 } label: {
-                    Image(systemName: session.audioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                        .font(.subheadline)
+                    Image(systemName: hudOnLeft ? "chevron.left" : "chevron.right")
+                        .font(.footnote.weight(.bold))
+                        .frame(width: 34, height: 34)
+                        .background(.white.opacity(0.14), in: Circle())
                 }
+                .accessibilityLabel("Chiudi i controlli")
+            }
 
-                Button {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
+                quickButton("Indietro", systemImage: "chevron.backward", action: .back)
+                quickButton("Home", systemImage: "circle", action: .home)
+                quickButton("Recenti", systemImage: "square.on.square", action: .recents)
+                quickButton("Vol−", systemImage: "speaker.wave.1", action: .volumeDown)
+                quickButton("Vol+", systemImage: "speaker.wave.3", action: .volumeUp)
+                controlButton(
+                    session.audioMuted ? "Audio off" : "Audio on",
+                    systemImage: session.audioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill"
+                ) {
+                    session.toggleAudioMute()
+                }
+                if session.systemKeysSupported {
+                    quickButton("Notifiche", systemImage: "bell", action: .notifications)
+                    quickButton("Screenshot", systemImage: "camera.viewfinder", action: .screenshot)
+                    quickButton("Blocca", systemImage: "lock", action: .power)
+                }
+                controlButton("Tastiera", systemImage: keyboardVisible ? "keyboard.chevron.compact.down" : "keyboard") {
                     resetTouchesToken &+= 1
                     toggleKeyboardToken &+= 1
-                } label: {
-                    Image(systemName: keyboardVisible ? "keyboard.chevron.compact.down" : "keyboard")
-                        .font(.subheadline)
+                    setPanel(open: false)
                 }
-
-                Button {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) { hudExpanded.toggle() }
-                } label: {
-                    Image(systemName: hudExpanded ? "chevron.up" : "chevron.down")
-                        .font(.caption.weight(.bold))
+                controlButton("Appunti", systemImage: "doc.on.clipboard") {
+                    session.sendClipboardFromPasteboard()
                 }
-
-                Button {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-                        hudExpanded = false
-                        hudHidden = true
-                    }
-                } label: {
-                    Image(systemName: "minus")
-                        .font(.caption.weight(.bold))
+                controlButton(
+                    session.hostScreenOff ? "Schermo On" : "Schermo Off",
+                    systemImage: session.hostScreenOff ? "sun.max.fill" : "moon.fill"
+                ) {
+                    session.sendControl(session.hostScreenOff ? .screenOn : .screenOff)
+                }
+                controlButton("Risveglia", systemImage: "power") {
+                    session.sendControl(.wakeScreen)
                 }
             }
-            .foregroundStyle(.white)
 
-            if hudExpanded {
-                HStack(spacing: 8) {
-                    quickButton("Indietro", systemImage: "chevron.backward", action: .back)
-                    quickButton("Home", systemImage: "circle", action: .home)
-                    quickButton("Recenti", systemImage: "square.on.square", action: .recents)
-                    quickButton("Vol−", systemImage: "speaker.wave.1", action: .volumeDown)
-                    quickButton("Vol+", systemImage: "speaker.wave.3", action: .volumeUp)
-                }
-
-                if session.systemKeysSupported {
-                    HStack(spacing: 8) {
-                        quickButton("Notifiche", systemImage: "bell", action: .notifications)
-                        quickButton("Screenshot", systemImage: "camera.viewfinder", action: .screenshot)
-                        quickButton("Blocca", systemImage: "lock", action: .power)
+            if case .localQuicLoopback = mode {
+                Text("Loopback · tocchi \(session.metrics.hostTouchReceived) · tasti \(session.metrics.hostKeyReceived)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.7))
+            } else if session.metrics.connected {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(Array(hudTelemetryLines.enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.white.opacity(0.72))
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
-                HStack(spacing: 8) {
-                    controlButton("Appunti", systemImage: "doc.on.clipboard") {
-                        session.sendClipboardFromPasteboard()
-                    }
-                    controlButton(
-                        session.hostScreenOff ? "Schermo On" : "Schermo Off",
-                        systemImage: session.hostScreenOff ? "sun.max.fill" : "moon.fill"
-                    ) {
-                        session.sendControl(session.hostScreenOff ? .screenOn : .screenOff)
-                    }
-                    controlButton("Risveglia", systemImage: "power") {
-                        session.sendControl(.wakeScreen)
-                    }
+            HStack(spacing: 8) {
+                controlButton(hudOnLeft ? "HUD a destra" : "HUD a sinistra",
+                              systemImage: hudOnLeft ? "arrow.right.to.line" : "arrow.left.to.line") {
+                    withAnimation(hudAnimation) { hudEdgeRaw = hudOnLeft ? "trailing" : "leading" }
                 }
-
-                if case .localQuicLoopback = mode {
-                    Text("Loopback · tocchi \(session.metrics.hostTouchReceived) · tasti \(session.metrics.hostKeyReceived)")
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.7))
-                } else if session.metrics.connected {
-                    VStack(alignment: .leading, spacing: 3) {
-                        ForEach(Array(hudTelemetryLines.enumerated()), id: \.offset) { _, line in
-                            Text(line)
-                                .font(.caption2.monospacedDigit())
-                                .foregroundStyle(.white.opacity(0.72))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.7)
-                        }
+                Button(role: .destructive) {
+                    end()
+                    dismiss()
+                } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: "xmark")
+                            .font(.footnote.weight(.semibold))
+                        Text("Termina")
+                            .font(.caption2.weight(.medium))
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+                    .background(Color.red.opacity(0.42), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
+                .accessibilityLabel("Termina la sessione")
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .phantomGlassCard(cornerRadius: hudExpanded ? 24 : 999, overVideo: true)
-        .padding(.horizontal, 12)
-        .padding(.top, 6)
+        .foregroundStyle(.white)
+        .padding(14)
     }
 
     private var hudSummaryLine: String {

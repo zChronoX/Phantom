@@ -585,6 +585,7 @@ class HostForegroundService : Service() {
 
     private fun registerMdns(port: Int, fingerprintHex: String) {
         unregisterMdns()
+        mdnsRegistration = port to fingerprintHex
         try {
             val mgr = getSystemService(Context.NSD_SERVICE) as? NsdManager ?: return
             val safeName = "Phantom-${Build.MODEL.ifBlank { "Android" }}".take(40)
@@ -618,6 +619,7 @@ class HostForegroundService : Service() {
     }
 
     private fun unregisterMdns() {
+        mdnsRegistration = null
         val mgr = nsdManager
         val listener = nsdListener
         nsdManager = null
@@ -719,7 +721,26 @@ class HostForegroundService : Service() {
         }
     }
 
+    /** Ultima registrazione mDNS (porta, impronta), per rifarla dopo un cambio di rete. */
+    @Volatile
+    private var mdnsRegistration: Pair<Int, String>? = null
+    private var mdnsRefreshPending = false
+
     private fun notifyNetworkChanged() {
+        // Dopo un cambio di rete (Wi-Fi che torna dopo un blackout, router riavviato, IP nuovo) l'annuncio Bonjour può
+        // restare legato alla rete vecchia e l'iPhone non trova più il telefono in LAN: lo si rifà, una volta sola
+        // per raffica di eventi, quando la rete si è assestata.
+        mdnsRegistration?.let { (port, fp) ->
+            if (!mdnsRefreshPending) {
+                mdnsRefreshPending = true
+                mainHandler.postDelayed({
+                    mdnsRefreshPending = false
+                    if (HostStateStore.snapshot().running && mdnsRegistration != null) {
+                        registerMdns(port, fp)
+                    }
+                }, 3_000L)
+            }
+        }
         val ifaces = collectActiveIpv4Interfaces()
         val ip = HostFormatHelpers.selectPreferredLanIpv4(ifaces)
         val vpnIp = HostFormatHelpers.selectPreferredVpnIpv4(ifaces)

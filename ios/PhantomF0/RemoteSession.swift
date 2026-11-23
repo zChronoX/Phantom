@@ -94,6 +94,13 @@ final class RemoteSession: ObservableObject {
     private var latestAudioCounters: JitterAudioCounters?
     private var lastReportedVideoSize = VideoDimensions.zero
 
+    /// L'app è in background: i frame video non vanno al decoder (iOS non decodifica video in background), l'audio
+    /// e la connessione restano attivi. Protetto da `sampleLock`.
+    private var videoPaused = false
+    /// Al ritorno in primo piano il primo frame mostrato deve ripartire da un decoder svuotato. Protetto da `sampleLock`.
+    private var flushOnNextSample = false
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+
     // Finestra metrica lato client (protetta da `sampleLock`)
     private var windowStart = CACurrentMediaTime()
     private var framesInWindow = 0
@@ -141,6 +148,50 @@ final class RemoteSession: ObservableObject {
         ioQueue.async { [weak self] in
             self?.runConnect(mode: mode, gen: currentGen)
         }
+    }
+
+    /// L'app va in background: la sessione resta aperta. L'audio continua (modalità «audio» in background), il video
+    /// si mette in pausa. Se iOS sospende comunque l'app (audio disattivato o assente), al ritorno la riconnessione
+    /// automatica riparte da sola. Il compito in background dà qualche secondo anche in quel caso, per non cadere
+    /// subito se l'utente torna in fretta.
+    func enterBackground() {
+        sampleLock.lock()
+        videoPaused = true
+        sampleLock.unlock()
+        DispatchQueue.main.async {
+            guard self.backgroundTask == .invalid else { return }
+            self.backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "phantom-session") { [weak self] in
+                self?.endBackgroundTask()
+            }
+        }
+        CrashLog.mark("RemoteSession: background (video in pausa, connessione aperta)")
+    }
+
+    /// Ritorno in primo piano: il video riparte da un keyframe nuovo con il decoder svuotato.
+    func enterForeground() {
+        sampleLock.lock()
+        let wasPaused = videoPaused
+        videoPaused = false
+        if wasPaused {
+            flushOnNextSample = true
+        }
+        sampleLock.unlock()
+        DispatchQueue.main.async { self.endBackgroundTask() }
+        guard wasPaused else { return }
+        CrashLog.mark("RemoteSession: primo piano (chiedo un keyframe)")
+        let (c, q): (PhantomClient?, QuicConnection?) = withLock { (client, connection) }
+        guard let c = c, let q = q else { return }
+        ioQueue.async {
+            if let datagram = c.requestKeyframe(nowUs: Self.nowUs()) {
+                try? q.sendDatagram(datagram: datagram)
+            }
+        }
+    }
+
+    private func endBackgroundTask() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
     }
 
     private func resetDecoderWindow() {
@@ -562,6 +613,15 @@ final class RemoteSession: ObservableObject {
         var updatedSize: VideoDimensions?
 
         sampleLock.lock()
+        if videoPaused {
+            // In background: si contano solo i byte (per le statistiche), niente decoder
+            for f in frames {
+                bytesInWindow += f.data.count
+            }
+            sampleLock.unlock()
+            return
+        }
+        var forceFlush = flushOnNextSample
         for f in frames {
             bytesInWindow += f.data.count
             framesInWindow += 1
@@ -569,7 +629,13 @@ final class RemoteSession: ObservableObject {
                 latenciesInWindowMs.append(Double(lat) / 1000.0)
             }
             if let built = sampleBuilder.buildSample(from: f.data, codec: f.codec) {
-                readySamples.append((built.sampleBuffer, built.formatChanged))
+                // dopo il background il primo frame (un keyframe: il core scarta gli altri finché non arriva) svuota il
+                // decoder, che iOS può aver invalidato mentre l'app non era in primo piano
+                readySamples.append((built.sampleBuffer, built.formatChanged || forceFlush))
+                if forceFlush {
+                    forceFlush = false
+                    flushOnNextSample = false
+                }
                 if built.dimensions.isValid && built.dimensions != lastReportedVideoSize {
                     lastReportedVideoSize = built.dimensions
                     updatedSize = built.dimensions

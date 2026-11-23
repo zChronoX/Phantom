@@ -199,7 +199,7 @@ impl HostEndpoint {
                 .await
                 .map_err(|_| QuicError::Timeout)?
                 .ok_or(QuicError::EndpointClosed)?;
-            tokio::time::timeout(timeout, incoming)
+            tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming)
                 .await
                 .map_err(|_| QuicError::Timeout)?
                 .map_err(QuicError::Connection)
@@ -323,6 +323,19 @@ impl QuicLink {
         self.connection.max_datagram_size()
     }
 
+    /// Statistiche del percorso (RTT, finestra di congestione, perdite).
+    pub fn link_stats(&self) -> LinkStats {
+        let p = self.connection.stats().path;
+        LinkStats {
+            rtt_us: u64::try_from(p.rtt.as_micros()).unwrap_or(u64::MAX),
+            cwnd_bytes: p.cwnd,
+            sent_packets: p.sent_packets,
+            lost_packets: p.lost_packets,
+            congestion_events: p.congestion_events,
+            via_relay: false,
+        }
+    }
+
     /// Chiude subito la connessione con un codice applicativo.
     pub fn close(&self, code: u32, reason: &[u8]) {
         let _guard = self.runtime.enter();
@@ -358,6 +371,28 @@ fn new_runtime() -> Result<Runtime, QuicError> {
 /// bitrate (se la coda fosse più corta del keyframe, QUIC ne butterebbe via l'inizio appena spedito), ma dimezzano la
 /// coda possibile. Il resto lo fa BBR, che non svuota la finestra a ogni perdita casuale del Wi-Fi.
 pub const DATAGRAM_SEND_BUFFER: usize = 512 * 1024;
+
+/// Tempo massimo per completare l'handshake di una connessione in arrivo. È separato dall'attesa di una nuova
+/// connessione (`accept(timeout)`, di solito poche centinaia di ms): prima si usava lo stesso timeout anche per
+/// l'handshake, e una connessione appena un po' lenta veniva abbandonata a metà.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Statistiche del percorso di una connessione (per la diagnosi degli stalli).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LinkStats {
+    /// RTT stimato da QUIC (µs).
+    pub rtt_us: u64,
+    /// Finestra di congestione (byte).
+    pub cwnd_bytes: u64,
+    /// Pacchetti QUIC spediti (cumulativo).
+    pub sent_packets: u64,
+    /// Pacchetti QUIC persi (cumulativo).
+    pub lost_packets: u64,
+    /// Eventi di congestione (cumulativo).
+    pub congestion_events: u64,
+    /// Il percorso scelto passa da un relay (solo P2P).
+    pub via_relay: bool,
+}
 
 /// Byte di datagrammi in arrivo tenuti in attesa che l'app li legga.
 pub const DATAGRAM_RECEIVE_BUFFER: usize = 1 << 20;

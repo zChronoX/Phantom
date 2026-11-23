@@ -94,6 +94,7 @@ object RootHostMain {
         )
 
         WorkerEnvironment.notes.forEach { emit("LOG|Ambiente worker: $it") }
+        tuneNetworkForStreaming(enable = true)
         RootDisplayCapture.onLog = { msg -> emit("LOG|$msg") }
         val (srcW, srcH) = RootDisplayCapture.readPrimaryDisplaySize()
         val injector = RootInputInjector(srcW, srcH)
@@ -208,12 +209,65 @@ object RootHostMain {
             session.runBlocking()
         } finally {
             RootDisplayPower.restoreIfTurnedOff()
+            tuneNetworkForStreaming(enable = false)
         }
         emit("STOPPED")
     }
 
     /** Argomento al posto dei percorsi dell'identità: l'identità arriva come prima riga su stdin. */
     const val IDENTITY_STDIN = "--identity-stdin"
+
+    /**
+     * Regolazioni di sistema utili allo streaming, possibili con i permessi del worker (root o shell):
+     * - **Wi-Fi a bassa latenza forzata** (`cmd wifi force-low-latency-mode`): spegne il risparmio energetico della
+     *   radio. Il Wi-Fi lock dell'app non basta: da Android 14 `HIGH_PERF` non fa più nulla e `LOW_LATENCY` vale solo
+     *   con Phantom in primo piano e schermo acceso, cioè quasi mai durante l'uso remoto. Su alcune ROM il comando è
+     *   riservato a root: l'esito va nel log.
+     * - **Esclusione dall'ottimizzazione batteria** (`cmd deviceidle whitelist`): il servizio dell'app resta attivo e
+     *   in rete anche in Doze, così l'host resta raggiungibile a telefono fermo.
+     */
+    private fun tuneNetworkForStreaming(enable: Boolean) {
+        val mode = if (enable) "enabled" else "disabled"
+        val wifi = runShellSync("cmd wifi force-low-latency-mode $mode")
+        if (enable) {
+            emit("LOG|Wi-Fi a bassa latenza forzata: ${describeShellResult(wifi)}")
+            val idle = runShellSync("cmd deviceidle whitelist +$APP_PACKAGE")
+            emit("LOG|Esclusione dal risparmio batteria (Doze): ${describeShellResult(idle)}")
+        }
+    }
+
+    private const val APP_PACKAGE = "app.phantom.host"
+
+    /** Esito leggibile di un comando di sistema: «attiva» se è andato bene, altrimenti la prima riga dell'errore. */
+    private fun describeShellResult(result: Pair<Int, String>?): String {
+        if (result == null) return "non eseguibile"
+        val (code, out) = result
+        val firstLine = out.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }.orEmpty()
+        val failed = code != 0 || listOf("Exception", "denied", "not allowed", "Unknown", "Error", "error:")
+            .any { firstLine.contains(it, ignoreCase = false) }
+        return if (failed) "non consentita (${firstLine.take(140).ifEmpty { "exit $code" }})" else "attiva"
+    }
+
+    /** Esegue un comando e ne restituisce exit code e output (al massimo 3 s), o `null` se non parte. */
+    private fun runShellSync(command: String): Pair<Int, String>? = try {
+        val p = ProcessBuilder("sh", "-c", command).redirectErrorStream(true).start()
+        val out = StringBuilder()
+        val reader = Thread({
+            try {
+                out.append(p.inputStream.bufferedReader().readText())
+            } catch (_: Throwable) {
+            }
+        }, "phantom-shell-out").apply {
+            isDaemon = true
+            start()
+        }
+        val done = p.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)
+        if (!done) p.destroy()
+        reader.join(500)
+        (if (done) p.exitValue() else -1) to out.toString()
+    } catch (_: Throwable) {
+        null
+    }
 
     /** Comando di sistema eseguito con i permessi del worker (root o shell), senza attendere l'esito. */
     private fun runShell(command: String) {

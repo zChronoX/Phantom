@@ -2,6 +2,37 @@
 
 Le note di ogni release vengono prese da qui dalla CI (sezione `## [x.y.z]` che corrisponde al tag `vx.y.z`).
 
+## [1.4.0] - 2026-11-23
+
+### Raggiungibilità dell'host
+- **Una connessione andata male non spegne più l'host**: se un handshake in arrivo falliva (es. «authentication
+  failed» dopo un blackout o un cambio di rete) il P2P, e allo stesso modo la LAN, smettevano di accettare connessioni
+  fino al riavvio dell'host. Ora l'errore riguarda solo quella connessione.
+- **P2P da fuori casa più affidabile**: l'handshake di una connessione in arrivo aveva solo 400 ms per completarsi;
+  via relay o con il 5G spesso non bastavano e la connessione veniva abbandonata. Ora ha 10 s.
+- **P2P che si ripara da solo**: ogni 15 s l'host controlla di essere collegato al relay. Se non lo è, lo scrive nel
+  log, chiede a iroh di ricontrollare la rete e dopo 3 minuti riapre l'endpoint (stesso ID, nessuna nuova
+  associazione). Se il P2P non parte, riprova con attese crescenti invece di arrendersi.
+- **Annuncio in LAN rifatto dopo un cambio di rete** (Wi-Fi che torna dopo un blackout, router riavviato), così
+  l'iPhone ritrova il telefono a casa.
+- Con Shizuku/Root: l'app viene esclusa dal risparmio batteria (Doze) e si prova a forzare il Wi-Fi a bassa latenza
+  (risparmio energetico della radio spento). Su alcune ROM il secondo comando richiede root: l'esito è nel log.
+
+### iPhone
+- **Nuova HUD laterale**: una linguetta fissa a metà schermo sul bordo, con stato, FPS e Indietro/Home/Recenti sempre a
+  portata. Toccandola o trascinandola verso il centro si apre un pannello con tutti i controlli e la telemetria; si
+  chiude toccando fuori, trascinandolo verso il bordo o con la freccia. Il lato (destra o sinistra) si sceglie dal
+  pannello e viene ricordato.
+- **La sessione resta aperta in background**: aprendo un'altra app o bloccando lo schermo l'audio continua e la
+  connessione resta attiva; il video si ferma e riparte da un keyframe al ritorno. Prima la sessione cadeva e si
+  riconnetteva ogni volta.
+- **Niente più falso «l'app si è chiusa all'improvviso»** dopo averla chiusa dalle app recenti.
+
+### Diagnosi
+- La riga «Rete in affanno» riporta anche le statistiche QUIC degli ultimi 5 s (RTT, finestra di congestione,
+  pacchetti persi, eventi di congestione, percorso via relay): servono a capire se gli stalli vengono dal Wi-Fi o dal
+  controllo di congestione.
+
 ## [1.3.3] - 2026-11-22
 
 ### Correzioni

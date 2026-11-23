@@ -71,12 +71,17 @@ enum CrashLog {
     }
 
     /// Trasforma il diario dell'esecuzione precedente in un rapporto, oppure nil se l'app era finita bene.
-    /// «Bene» = nessun errore registrato e ultima fase «background» (ad esempio l'utente l'ha chiusa dal selettore delle app).
+    /// «Bene» = nessun errore registrato e ultima fase «background» o «inactive» (ad esempio l'utente l'ha chiusa dal
+    /// selettore delle app).
     private static func makeReport(from text: String) -> String? {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
         let crashed = lines.contains { $0.hasPrefix("SEGNALE") || $0.hasPrefix("ECCEZIONE") }
         let lastPhase = lines.last(where: { $0.contains(" FASE ") })
-        let wentBackground = lastPhase?.hasSuffix("background") ?? false
+        // La riga è «+12.345 FASE background · memoria 80 MB»: prima si controllava che *finisse* con «background»,
+        // e il pezzo sulla memoria faceva sembrare un crash ogni chiusura dalle app recenti.
+        // Anche «inactive» conta come uscita normale: chiudendo l'app dal selettore può non fare in tempo a passare a
+        // «background». I crash veri restano riconosciuti dalle righe SEGNALE/ECCEZIONE.
+        let wentBackground = lastPhase.map { $0.contains("FASE background") || $0.contains("FASE inactive") } ?? false
         if !crashed && wentBackground { return nil }
         let title = crashed
             ? "L'app è stata interrotta da un errore (cerca SEGNALE o ECCEZIONE qui sotto)."

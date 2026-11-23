@@ -1,11 +1,15 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-22. Branch `main`, base `86c1761` (v1.3.2) più la v1.3.3 (patch consegnata).
+Ultimo aggiornamento: 2026-11-23. Branch `main`, base `76144e0` (v1.3.3) più la v1.4.0 (patch consegnata).
 Roadmap fino alla 2.0.0: documento di progetto «claude/PHANTOM-HANDOFF-ROADMAP.md».
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Ultime release
 
+- **v1.4.0** (2026-11-23): host sempre raggiungibile (accept LAN/P2P che non muoiono a un handshake fallito,
+  handshake da 10 s invece di 400 ms, P2P che controlla il relay e si riapre, mDNS rifatto al cambio rete, Doze e
+  Wi-Fi a bassa latenza via Shizuku), HUD laterale a scomparsa su iPhone, sessione viva in background (audio),
+  niente falso crash dopo la chiusura dalle recenti, statistiche QUIC nel log degli stalli.
 - **v1.3.3** (2026-11-22): AWDL spento durante lo streaming (scatti periodici in LAN), qualità che torna a 1080p,
   schermo spento con Shizuku/Root su Android 14–17, svuotamento della coda host → taglio del bitrate con tetto,
   obiettivo del bitrate limitato al tetto utile del gradino più alto, niente falso panic `ndk-context` nel log.
