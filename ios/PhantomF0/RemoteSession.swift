@@ -48,6 +48,8 @@ struct RemoteSessionMetrics: Equatable {
     var host: HostReportInfo?
     /// Buffer anti-jitter dell'audio: `nil` finché l'audio non parte.
     var audio: JitterAudioCounters?
+    /// Solo in P2P: `true` se il percorso passa dal relay, `false` se è diretto; `nil` in LAN.
+    var p2pViaRelay: Bool?
 }
 
 /// Coordina `QuicConnection` + `PhantomClient` (e, in loopback, l'host locale) per il controllo remoto a bassa latenza.
@@ -100,6 +102,24 @@ final class RemoteSession: ObservableObject {
     /// Al ritorno in primo piano il primo frame mostrato deve ripartire da un decoder svuotato. Protetto da `sampleLock`.
     private var flushOnNextSample = false
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    /// Ultima richiesta di pausa del video mandata all'host (orologio di `nowUs`); la pausa scade dopo 3 s sull'host e
+    /// va rinnovata finché l'app resta in background. Solo da `ioQueue`.
+    private var lastVideoPauseSentUs: UInt64 = 0
+
+    /// Chiave di `UserDefaults` dell'opzione «Audio in background» (spenta: in background l'audio tace).
+    static let backgroundAudioKey = "backgroundAudio"
+
+    /// Diario della sessione sull'iPhone (connessioni, errori, cambi di rete, background), per la diagnosi.
+    private let eventLock = NSLock()
+    private var events: [String] = []
+    private static let maxEvents = 300
+
+    /// Ritorno in LAN: in P2P si prova ogni tanto l'indirizzo di casa; se risponde ci si ricollega in LAN.
+    private var lanProbeTarget: (address: String, cert: Data)?
+    private var lanProbeIntervalUs: UInt64 = 20_000_000
+    private var nextLanProbeUs: UInt64 = 0
+    private var lanProbeInFlight = false
+    private var returningToLan = false
 
     // Finestra metrica lato client (protetta da `sampleLock`)
     private var windowStart = CACurrentMediaTime()
@@ -113,6 +133,7 @@ final class RemoteSession: ObservableObject {
 
     func start(mode: RemoteSessionMode) {
         stop()
+        logEvent("Avvio sessione")
 
         let observer = NetworkPathObserver()
         let currentGen: UInt64 = withLock {
@@ -125,6 +146,10 @@ final class RemoteSession: ObservableObject {
             activeTargetIsLan = false
             waitingForReconnect = false
             pathObserver = observer
+            lanProbeTarget = nil
+            lanProbeIntervalUs = 20_000_000
+            lanProbeInFlight = false
+            returningToLan = false
             touchDispatch.reset()
             decoderDrops = 0
             latestAudioCounters = nil
@@ -158,6 +183,14 @@ final class RemoteSession: ObservableObject {
         sampleLock.lock()
         videoPaused = true
         sampleLock.unlock()
+        // L'audio continua a girare anche da muto: è quello che tiene viva l'app (e la sessione) in background.
+        let keepAudio = UserDefaults.standard.bool(forKey: Self.backgroundAudioKey)
+        if !keepAudio {
+            audioPlayer.isMuted = true
+        }
+        ioQueue.async { [weak self] in
+            self?.sendVideoPause(true)
+        }
         DispatchQueue.main.async {
             guard self.backgroundTask == .invalid else { return }
             self.backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "phantom-session") { [weak self] in
@@ -165,6 +198,7 @@ final class RemoteSession: ObservableObject {
             }
         }
         CrashLog.mark("RemoteSession: background (video in pausa, connessione aperta)")
+        logEvent("App in background (video in pausa sull'host, audio \(keepAudio ? "acceso" : "muto"))")
     }
 
     /// Ritorno in primo piano: il video riparte da un keyframe nuovo con il decoder svuotato.
@@ -176,14 +210,160 @@ final class RemoteSession: ObservableObject {
             flushOnNextSample = true
         }
         sampleLock.unlock()
-        DispatchQueue.main.async { self.endBackgroundTask() }
+        DispatchQueue.main.async {
+            self.endBackgroundTask()
+            // l'audio torna come l'utente l'aveva lasciato con il tasto «Audio»
+            self.audioPlayer.isMuted = self.audioMuted
+        }
         guard wasPaused else { return }
         CrashLog.mark("RemoteSession: primo piano (chiedo un keyframe)")
+        logEvent("App in primo piano (chiedo un keyframe)")
         let (c, q): (PhantomClient?, QuicConnection?) = withLock { (client, connection) }
         guard let c = c, let q = q else { return }
-        ioQueue.async {
+        ioQueue.async { [weak self] in
+            // la ripresa parte due volte (datagrammi non affidabili); se si perdessero entrambe, la pausa sull'host
+            // scade comunque dopo 3 s
+            self?.sendVideoPause(false)
+            self?.sendVideoPause(false)
             if let datagram = c.requestKeyframe(nowUs: Self.nowUs()) {
                 try? q.sendDatagram(datagram: datagram)
+            }
+        }
+    }
+
+    /// Manda all'host la pausa (`true`) o la ripresa del video. Solo da `ioQueue`. Non fa nulla se l'host non conosce
+    /// la funzione (versione precedente alla 1.5.0): lì il video continua ad arrivare e viene scartato come prima.
+    private func sendVideoPause(_ paused: Bool) {
+        lastVideoPauseSentUs = paused ? Self.nowUs() : 0
+        let (c, q): (PhantomClient?, QuicConnection?) = withLock { (client, connection) }
+        guard let c = c, let q = q, let datagram = c.videoPause(paused: paused) else { return }
+        try? q.sendDatagram(datagram: datagram)
+    }
+
+    /// Aggiunge una riga al diario della sessione (qualsiasi thread).
+    func logEvent(_ text: String) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        let line = "\(formatter.string(from: Date())) · \(text)"
+        eventLock.lock()
+        events.append(line)
+        if events.count > Self.maxEvents {
+            events.removeFirst(events.count - Self.maxEvents)
+        }
+        eventLock.unlock()
+    }
+
+    private func eventSnapshot() -> [String] {
+        eventLock.lock()
+        defer { eventLock.unlock() }
+        return events
+    }
+
+    /// Prepara la diagnosi in un file di testo: iPhone, sessione, telemetria dell'HUD, diario della sessione, ultimo
+    /// crash e il log dell'host chiesto al telefono Android (`SendLog`), se la sessione è aperta e l'host lo sa
+    /// mandare. Il log dell'host si aspetta al massimo 4 s; se arriva a metà si tiene quello che c'è.
+    func collectDiagnostics(hudLines: [String], completion: @escaping (URL?) -> Void) {
+        let (c, q, label): (PhantomClient?, QuicConnection?, String) = withLock { (client, connection, activeEndpointLabel) }
+        let metricsSnapshot = metrics
+        ioQueue.async { [weak self] in
+            guard let self = self else { return }
+            var hostLogSection = "Log dell'host non disponibile: sessione non aperta."
+            if let c = c, let q = q, let n = c.negotiated() {
+                if capsContains(caps: n.caps, capability: .hostLog), let req = c.sendControl(command: .sendLog) {
+                    try? q.sendDatagram(datagram: req)
+                    let deadline = Date().addingTimeInterval(4)
+                    var log: HostLogText?
+                    while log == nil && Date() < deadline {
+                        Thread.sleep(forTimeInterval: 0.1)
+                        log = c.takeHostLog(partial: false)
+                    }
+                    if log == nil {
+                        log = c.takeHostLog(partial: true)
+                    }
+                    if let log = log {
+                        hostLogSection = "Pezzi arrivati: \(log.received)/\(log.total)\n\(log.text)"
+                    } else {
+                        hostLogSection = "Log dell'host non arrivato entro 4 s (rete in difficoltà?): riprova."
+                    }
+                } else {
+                    hostLogSection = "Log dell'host non disponibile: il telefono Android ha una versione di Phantom precedente alla 1.5."
+                }
+            }
+
+            var link = ""
+            if let q = q {
+                let ls = q.linkStats()
+                link = String(
+                    format: "QUIC lato iPhone: %@%@ · RTT %.0f ms · finestra %llu KB · pacchetti spediti %llu, persi %llu · congestioni %llu",
+                    q.isP2p() ? "P2P" : "LAN",
+                    q.isP2p() ? (ls.viaRelay ? " via relay" : " diretto") : "",
+                    Double(ls.rttUs) / 1000.0,
+                    ls.cwndBytes / 1024,
+                    ls.sentPackets,
+                    ls.lostPackets,
+                    ls.congestionEvents
+                )
+            }
+
+            let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+            let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+            let stamp = ISO8601DateFormatter().string(from: Date())
+            var text = "Phantom · diagnosi\n"
+            text += "Data: \(stamp)\n"
+            text += "iPhone: \(DecoderBench.machineId()) · iOS \(UIDevice.current.systemVersion) · app \(version) (\(build))\n"
+            text += "Sessione: \(metricsSnapshot.connected ? "connessa" : "non connessa") · \(label.isEmpty ? "–" : label)\n"
+            if !link.isEmpty { text += link + "\n" }
+            text += "\n== Telemetria (HUD) ==\n" + hudLines.joined(separator: "\n") + "\n"
+            text += "\n== Diario della sessione (iPhone) ==\n" + self.eventSnapshot().joined(separator: "\n") + "\n"
+            if let crash = CrashLog.previousReport {
+                text += "\n== Ultima chiusura inattesa dell'app ==\n" + crash + "\n"
+            }
+            text += "\n== Log dell'host (Android) ==\n" + hostLogSection + "\n"
+
+            let fileFormatter = DateFormatter()
+            fileFormatter.dateFormat = "yyyyMMdd-HHmmss"
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("phantom-diagnosi-\(fileFormatter.string(from: Date())).txt")
+            let ok = (try? text.data(using: .utf8)?.write(to: url)) != nil
+            self.logEvent("Diagnosi preparata (\(ok ? "ok" : "errore di scrittura"))")
+            DispatchQueue.main.async { completion(ok ? url : nil) }
+        }
+    }
+
+    /// In P2P, ogni tanto si prova l'indirizzo LAN del telefono: se risponde (si è tornati a casa, o la LAN si è
+    /// ripresa dopo un problema) ci si ricollega, e l'ordine dei candidati rimette la LAN per prima. Prima, una volta
+    /// finiti in P2P, ci si restava anche con la LAN di nuovo disponibile, e con una qualità peggiore.
+    private func maybeProbeLan(now: UInt64, gen: UInt64) {
+        let target: (address: String, cert: Data)? = withLock {
+            guard !lanProbeInFlight, !returningToLan, p2pClientEndpoint != nil, now >= nextLanProbeUs,
+                  !(pathObserver?.cellularOnlySnapshot ?? false), let t = lanProbeTarget else { return nil }
+            lanProbeInFlight = true
+            nextLanProbeUs = now + lanProbeIntervalUs
+            return t
+        }
+        guard let target = target else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var reachable = false
+            if let ep = try? QuicClientEndpoint.bind(addr: "0.0.0.0:0"),
+               let link = try? ep.connect(
+                   addr: target.address,
+                   serverName: defaultQuicServerName(),
+                   pinnedCertificateDer: target.cert,
+                   timeoutMs: 1_500
+               ) {
+                reachable = true
+                link.close(code: 0, reason: Data())
+            }
+            guard let self = self else { return }
+            let go: Bool = self.withLock {
+                self.lanProbeInFlight = false
+                guard reachable, self.generation == gen, !self.stopRequested else { return false }
+                self.returningToLan = true
+                return true
+            }
+            if go {
+                self.logEvent("LAN di nuovo raggiungibile (\(target.address)): passo dal P2P alla LAN")
+                self.handleDisconnect(reason: "Ritorno in LAN", orderly: false, gen: gen, immediate: true)
             }
         }
     }
@@ -471,6 +651,7 @@ final class RemoteSession: ObservableObject {
                     break
                 } catch {
                     attemptErrors.append("\(candidate.label): \(error)")
+                    logEvent("Tentativo \(candidate.label) (\(candidate.displayAddress)) fallito: \(error)")
                 }
             }
 
@@ -502,6 +683,28 @@ final class RemoteSession: ObservableObject {
                 self.activeTargetIsLan = chosenIsLan
                 self.reconnectAttempt = 0
                 self.hasConnectedOnce = true
+                // in P2P si tiene pronto l'indirizzo LAN da riprovare; tornati in LAN si riparte con l'intervallo breve
+                if chosenIsLan {
+                    self.lanProbeIntervalUs = 20_000_000
+                    self.lanProbeTarget = nil
+                } else {
+                    if self.returningToLan {
+                        // si voleva tornare in LAN ma si è di nuovo in P2P: si riprova più di rado (fino a 5 minuti)
+                        self.lanProbeIntervalUs = min(self.lanProbeIntervalUs * 2, 300_000_000)
+                    }
+                    if case let .remote(endpoints, cert, _, _, _) = mode,
+                       let lan = endpoints.first(where: {
+                           if case let .directQuic(_, isLan) = $0.target { return isLan }
+                           return false
+                       }),
+                       case let .directQuic(address, _) = lan.target {
+                        self.lanProbeTarget = (address, cert)
+                    } else {
+                        self.lanProbeTarget = nil
+                    }
+                    self.nextLanProbeUs = Self.nowUs() + self.lanProbeIntervalUs
+                }
+                self.returningToLan = false
                 return true
             }
             guard installed else {
@@ -510,6 +713,7 @@ final class RemoteSession: ObservableObject {
                 return
             }
 
+            logEvent("Connesso via \(chosenLabel)")
             DispatchQueue.main.async {
                 self.statusText = "Apertura sessione (\(chosenLabel))…"
             }
@@ -591,6 +795,16 @@ final class RemoteSession: ObservableObject {
         drainDeliveredFrames(client: client, gen: gen)
         drainAudioAndClipboard(client: client, gen: gen)
         refreshSessionAndMetrics(client: client, nowUs: now, gen: gen)
+        maybeProbeLan(now: now, gen: gen)
+
+        // In background la pausa del video si rinnova ogni secondo (sull'host scade dopo 3 s). Vale anche per una
+        // sessione nuova nata mentre l'app era in background (riconnessione).
+        sampleLock.lock()
+        let backgrounded = videoPaused
+        sampleLock.unlock()
+        if backgrounded && now &- lastVideoPauseSentUs >= 1_000_000 {
+            sendVideoPause(true)
+        }
     }
 
     private func drainAudioAndClipboard(client: PhantomClient, gen: UInt64) {
@@ -678,8 +892,8 @@ final class RemoteSession: ObservableObject {
 
         let negotiated = client.negotiated()
         let counters = client.counters(nowUs: nowUs)
-        let (hostCounters, epLabel, drops, audioCounters): (HostCounters?, String, UInt64, JitterAudioCounters?) = withLock {
-            (hostLoopback?.hostCounters(), activeEndpointLabel, decoderDrops, latestAudioCounters)
+        let (hostCounters, epLabel, drops, audioCounters, conn): (HostCounters?, String, UInt64, JitterAudioCounters?, QuicConnection?) = withLock {
+            (hostLoopback?.hostCounters(), activeEndpointLabel, decoderDrops, latestAudioCounters, connection)
         }
 
         var snap = RemoteSessionMetrics()
@@ -698,6 +912,9 @@ final class RemoteSession: ObservableObject {
             snap.latencyP95Ms = latency.p95
         }
         snap.keyframeRequests = counters.keyframeRequests
+        if let conn = conn, conn.isP2p() {
+            snap.p2pViaRelay = conn.linkStats().viaRelay
+        }
         snap.decoderDrops = drops
         snap.host = client.hostReport()
         snap.audio = audioCounters
@@ -778,6 +995,7 @@ final class RemoteSession: ObservableObject {
     }
 
     private func handleDisconnect(reason: String, orderly: Bool, gen: UInt64, immediate: Bool = false) {
+        logEvent("Disconnessione: \(reason)")
         let result: (
             conn: QuicConnection?,
             directEp: QuicClientEndpoint?,

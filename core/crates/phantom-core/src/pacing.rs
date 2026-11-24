@@ -54,12 +54,17 @@ impl SourceDropper {
         self.drains
     }
 
-    /// Soglia della coda (byte) per un bitrate obiettivo: circa 250 ms di video, mai meno di 48 KiB, mai più di
+    /// Soglia della coda (byte) per un bitrate obiettivo: `window_ms` di video, mai meno di 48 KiB, mai più di
     /// `max_bytes`; almeno il doppio dell'ultimo keyframe, così un keyframe appena spedito non fa ripartire subito lo
     /// svuotamento.
-    pub fn limit_bytes(&self, target_bps: u64, max_bytes: usize) -> usize {
-        let quarter_second = (target_bps / 8 / 4) as usize;
-        quarter_second.max(48 * 1024).max(self.last_key_bytes.saturating_mul(2)).min(max_bytes)
+    ///
+    /// La finestra dipende dal collegamento. In LAN conviene larga (~600 ms): gli stalli del Wi-Fi durano qualche
+    /// centinaio di ms e poi la radio smaltisce l'arretrato in pochi ms, quindi è molto meglio tenerlo in coda che
+    /// buttarlo e ripartire da un keyframe. Su P2P/relay la banda è vicina al bitrate e l'arretrato si smaltirebbe
+    /// lentamente: lì resta stretta (~250 ms).
+    pub fn limit_bytes(&self, target_bps: u64, window_ms: u64, max_bytes: usize) -> usize {
+        let window = (target_bps / 8).saturating_mul(window_ms) / 1000;
+        (window as usize).max(48 * 1024).max(self.last_key_bytes.saturating_mul(2)).min(max_bytes)
     }
 
     /// Decide per il prossimo frame. `queued_bytes` è quanto c'è ora nella coda di invio, `limit_bytes` la soglia
@@ -163,10 +168,11 @@ mod tests {
     fn limit_scales_with_bitrate_and_last_keyframe() {
         let mut d = SourceDropper::new();
         let max = 400 * 1024;
-        assert_eq!(d.limit_bytes(1_000_000, max), 48 * 1024, "minimo a basso bitrate");
-        assert_eq!(d.limit_bytes(8_000_000, max), 250_000, "250 ms a 8 Mbit/s");
-        assert_eq!(d.limit_bytes(40_000_000, max), max, "tetto");
+        assert_eq!(d.limit_bytes(1_000_000, 250, max), 48 * 1024, "minimo a basso bitrate");
+        assert_eq!(d.limit_bytes(8_000_000, 250, max), 250_000, "250 ms a 8 Mbit/s");
+        assert_eq!(d.limit_bytes(40_000_000, 250, max), max, "tetto");
+        assert_eq!(d.limit_bytes(14_000_000, 600, 2 * 1024 * 1024), 1_050_000, "600 ms a 14 Mbit/s in LAN");
         d.on_keyframe_sent(120_000);
-        assert_eq!(d.limit_bytes(1_000_000, max), 240_000, "almeno due keyframe");
+        assert_eq!(d.limit_bytes(1_000_000, 250, max), 240_000, "almeno due keyframe");
     }
 }

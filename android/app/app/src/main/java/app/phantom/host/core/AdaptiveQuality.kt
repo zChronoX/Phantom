@@ -8,8 +8,16 @@ data class QualityStep(val maxShortSide: Int, val fps: Int)
  * bit: su una rete debole un 1080p a 3 Mbit/s diventa un mosaico, mentre un 720p allo stesso bitrate resta nitido.
  *
  * Il criterio sono i **bit per pixel** (bitrate / (pixel × fps)): sotto `lowBpp` per `downHoldMs` si scende di un
- * gradino; si risale quando il gradino superiore avrebbe almeno `highBpp` per `upHoldMs`. Le due soglie distanti e i
- * tempi di attesa evitano di cambiare continuamente (ogni cambio costa un keyframe e ~100 ms di immagine ferma).
+ * gradino; si risale quando il gradino superiore avrebbe almeno `highBpp` per `upHoldMs`, e non prima di `minDwellMs`
+ * dall'ultimo cambio. Le due soglie distanti e i tempi di attesa evitano di cambiare continuamente: ogni cambio
+ * ricrea l'encoder (keyframe e immagine ferma). Nei test 1.4.0, con 3 s e 8 s, si cambiava 720p ↔ 1080p 11 volte
+ * in 45 minuti.
+ *
+ * **Risalite fallite.** Nei test del 24/11 la rete stimata tornava a ~15 Mbit/s dopo un paio di minuti, la qualità
+ * risaliva a 1080p e il collegamento cedeva di nuovo entro un minuto: 21 cambi in un'ora, sempre a minuti di distanza,
+ * quindi oltre la permanenza minima. Ora, se dopo una salita bisogna riscendere entro `failedClimbWindowMs`, il
+ * tentativo successivo verso quel gradino aspetta di più: prima `backoffStartMs`, poi il doppio a ogni nuovo
+ * fallimento, fino a `maxUpHoldMs`. Restare sul gradino raggiunto per `stableResetMs` cancella la penalità.
  */
 class AdaptiveQuality(
     top: QualityStep,
@@ -17,8 +25,13 @@ class AdaptiveQuality(
     private var aspect: Double,
     private val lowBpp: Double = 0.035,
     private val highBpp: Double = 0.08,
-    private val downHoldMs: Long = 3_000L,
-    private val upHoldMs: Long = 8_000L,
+    private val downHoldMs: Long = 6_000L,
+    private val upHoldMs: Long = 20_000L,
+    private val minDwellMs: Long = 30_000L,
+    private val failedClimbWindowMs: Long = 120_000L,
+    private val backoffStartMs: Long = 120_000L,
+    private val maxUpHoldMs: Long = 600_000L,
+    private val stableResetMs: Long = 300_000L,
 ) {
     val steps: List<QualityStep> = buildList {
         add(top)
@@ -33,6 +46,16 @@ class AdaptiveQuality(
 
     private var lowSinceMs = -1L
     private var highSinceMs = -1L
+    private var lastChangeMs = Long.MIN_VALUE / 2
+
+    /** Attesa con la rete buona prima di salire a ciascun gradino (cresce dopo le risalite fallite). */
+    private val climbHoldMs = LongArray(steps.size) { upHoldMs }
+    /** Gradino raggiunto con l'ultima salita (-1 se nessuna in corso di verifica) e quando. */
+    private var lastClimbTo = -1
+    private var lastClimbMs = 0L
+
+    /** Quanto bisognerà aspettare, con la rete buona, prima di salire di un gradino da qui (0 se si è già in cima). */
+    fun nextClimbHoldMs(): Long = if (index > 0) climbHoldMs[index - 1] else 0L
 
     /** Frequenza che l'encoder regge davvero (può essere più bassa di quella chiesta, es. 120 → 60). */
     var fpsCap: Int = top.fps
@@ -49,13 +72,23 @@ class AdaptiveQuality(
 
     /** Nuovo bitrate obiettivo; restituisce il nuovo gradino se bisogna cambiare, altrimenti `null`. */
     fun update(nowMs: Long, bitrateBps: Long): QualityStep? {
+        if (lastClimbTo == index && nowMs - lastClimbMs >= stableResetMs) {
+            // la salita ha tenuto: il gradino torna raggiungibile con l'attesa normale
+            climbHoldMs[index] = upHoldMs
+            lastClimbTo = -1
+        }
         val bpp = bitsPerPixel(bitrateBps, current)
         if (bpp < lowBpp && index < steps.size - 1) {
             if (lowSinceMs < 0) lowSinceMs = nowMs
             highSinceMs = -1L
             if (nowMs - lowSinceMs >= downHoldMs) {
+                if (lastClimbTo == index && nowMs - lastClimbMs <= failedClimbWindowMs) {
+                    climbHoldMs[index] = (climbHoldMs[index] * 2).coerceAtLeast(backoffStartMs).coerceAtMost(maxUpHoldMs)
+                }
+                lastClimbTo = -1
                 index++
                 lowSinceMs = -1L
+                lastChangeMs = nowMs
                 return current
             }
             return null
@@ -63,9 +96,12 @@ class AdaptiveQuality(
         lowSinceMs = -1L
         if (index > 0 && bitsPerPixel(bitrateBps, steps[index - 1]) >= highBpp) {
             if (highSinceMs < 0) highSinceMs = nowMs
-            if (nowMs - highSinceMs >= upHoldMs) {
+            if (nowMs - highSinceMs >= climbHoldMs[index - 1] && nowMs - lastChangeMs >= minDwellMs) {
                 index--
                 highSinceMs = -1L
+                lastChangeMs = nowMs
+                lastClimbTo = index
+                lastClimbMs = nowMs
                 return current
             }
             return null

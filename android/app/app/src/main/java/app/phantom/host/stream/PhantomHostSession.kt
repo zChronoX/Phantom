@@ -59,6 +59,9 @@ private data class PendingClient(
  * di accoppiamento e preemption immediata di sessioni stale (cambio Wi-Fi → 5G in ~1–2 s), streaming
  * video hardware `VideoEncoder` + audio AAC-LC, appunti condivisi e comandi controllo display.
  */
+/** Ogni quanto riassumere i pacchetti iniziali non validi scartati dagli accept. */
+private const val STRAY_SUMMARY_MS = 60L * 60L * 1000L
+
 class PhantomHostSession(
     private val config: HostRunConfig,
     private val sourceSizeProvider: () -> Pair<Int, Int>,
@@ -78,10 +81,48 @@ class PhantomHostSession(
     private val onReady: (port: Int, certHex: String) -> Unit,
     private val onP2pReady: (endpointId: String) -> Unit = {},
     private val onStats: (HostLiveStats) -> Unit,
-    private val onLog: (String) -> Unit,
+    onLog: (String) -> Unit,
     private val onThermalStop: () -> Unit,
     private val onClientDisconnected: () -> Unit = {},
 ) {
+    private val logSink: (String) -> Unit = onLog
+    private val recentLog = ArrayDeque<String>()
+
+    /**
+     * Ogni riga di log va al chiamante (app o worker) e in un registro delle ultime righe: l'iPhone lo può chiedere
+     * per la «diagnosi in un tocco» (`RemoteControlCommand.SEND_LOG`), così basta un file per avere i log di entrambi.
+     */
+    private fun onLog(message: String) {
+        val stamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.ROOT).format(java.util.Date())
+        synchronized(recentLog) {
+            recentLog.addLast("$stamp · $message")
+            while (recentLog.size > MAX_LOG_LINES) recentLog.removeFirst()
+        }
+        logSink(message)
+    }
+
+    /** Testo per la diagnosi: dispositivo, modalità, collegamento attuale e le ultime righe del log dell'host. */
+    private fun diagnosticLog(conn: QuicConnection): String {
+        val sb = StringBuilder()
+        sb.append("Phantom host · ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · Android ")
+            .append(android.os.Build.VERSION.RELEASE).append(" (API ").append(android.os.Build.VERSION.SDK_INT).append(")\n")
+        sb.append("Modalità ${config.mode} · profilo ${config.profile} · HEVC ${config.preferHevc} · intra-refresh ${config.intraRefresh}\n")
+        try {
+            val ls = conn.linkStats()
+            sb.append(
+                "Collegamento ${if (conn.isP2p()) "P2P" else "LAN"}${if (ls.viaRelay) " via relay" else ""} · QUIC RTT ${ls.rttUs / 1000u} ms · " +
+                    "finestra ${ls.cwndBytes / 1024u} KB · pacchetti spediti ${ls.sentPackets}, persi ${ls.lostPackets} · " +
+                    "congestioni ${ls.congestionEvents} · coda ${conn.queuedSendBytes() / 1024u} KB\n",
+            )
+        } catch (_: Throwable) {
+        }
+        sb.append("----\n")
+        synchronized(recentLog) {
+            for (line in recentLog) sb.append(line).append('\n')
+        }
+        return sb.toString()
+    }
+
     private val running = AtomicBoolean(false)
     private val activeConnection = AtomicReference<QuicConnection?>(null)
     private val activeHost = AtomicReference<PhantomHost?>(null)
@@ -205,7 +246,7 @@ class PhantomHostSession(
                         if (running.get()) onLog("Endpoint LAN chiuso")
                         break
                     } catch (e: QuicTransportException) {
-                        if (running.get()) logThrottled("accept-lan", "Connessione LAN in arrivo fallita: ${e.message}")
+                        if (running.get()) logAcceptFailure("accept-lan", "LAN", e.message)
                     } catch (t: Throwable) {
                         if (running.get()) logThrottled("accept-lan", "Connessione LAN in arrivo fallita: ${t.javaClass.simpleName}: ${t.message}")
                         sleepQuietly(200)
@@ -301,7 +342,7 @@ class PhantomHostSession(
                         if (running.get()) onLog("Endpoint P2P chiuso: lo riapro")
                         break
                     } catch (e: QuicTransportException) {
-                        if (running.get()) logThrottled("accept-p2p", "Connessione P2P in arrivo fallita: ${e.message}")
+                        if (running.get()) logAcceptFailure("accept-p2p", "P2P", e.message)
                     }
                     val nowMs = SystemClock.elapsedRealtime()
                     if (nowMs - lastCheckMs < 15_000L) continue
@@ -353,7 +394,39 @@ class PhantomHostSession(
 
     private val throttledLogs = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
+    /** Pacchetti iniziali non validi per tipo di accept: (quanti, da quando) per il riepilogo all'ora. */
+    private val strayInitials = HashMap<String, Pair<Int, Long>>()
+    private val strayInitialsExplained = AtomicBoolean(false)
+
     /** Lo stesso tipo di messaggio al massimo una volta ogni 30 s (un client che riprova non deve riempire il log). */
+    /**
+     * Connessione in arrivo fallita. Il caso più comune («authentication failed») è il primo pacchetto di una
+     * connessione che non si riesce a decifrare: rovinato per strada o non di Phantom (rumore sulla porta aperta verso
+     * Internet). QUIC lo scarta senza rispondere e non è un tentativo riuscito di nulla: invece di una riga ogni volta
+     * (52 in un giorno nei test della 1.4.0) si contano e si scrive un riepilogo all'ora.
+     */
+    private fun logAcceptFailure(key: String, label: String, message: String?) {
+        if (message?.contains("authentication failed") != true) {
+            logThrottled(key, "Connessione $label in arrivo fallita: $message")
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        synchronized(strayInitials) {
+            val (count, since) = strayInitials[key] ?: (0 to now)
+            if (!strayInitialsExplained.getAndSet(true)) {
+                onLog("$label: scartato un pacchetto iniziale non valido (innocuo: rumore di rete o pacchetto rovinato). " +
+                    "Da ora in poi solo un riepilogo all'ora")
+            }
+            val total = count + 1
+            if (now - since >= STRAY_SUMMARY_MS) {
+                onLog("$label: $total pacchetti iniziali non validi scartati nell'ultima ora (innocui)")
+                strayInitials[key] = 0 to now
+            } else {
+                strayInitials[key] = total to since
+            }
+        }
+    }
+
     private fun logThrottled(key: String, message: String) {
         val now = SystemClock.elapsedRealtime()
         val last = throttledLogs[key]
@@ -452,7 +525,7 @@ class PhantomHostSession(
                 preferHevc = config.preferHevc,
                 initialBitrateBps = startBps.toInt(),
                 intraRefresh = config.intraRefresh,
-                onLog = onLog,
+                onLog = ::onLog,
             )
             currentEncoder = enc
             synchronized(quality) { quality.fpsCap = enc.actualFps }
@@ -492,11 +565,15 @@ class PhantomHostSession(
             val encRef = AtomicReference<VideoEncoder?>(enc)
             val clientActive = AtomicBoolean(true)
             val negotiatedOnce = AtomicBoolean(false)
+            // iPhone in background (`PauseVideo`): l'encoder è sospeso e il video non parte
+            val videoPaused = AtomicBoolean(false)
 
             // Contatori dei problemi di rete: prima ogni errore di invio finiva in un `catch {}` vuoto.
             val sendErrors = AtomicLong(0)
             val queueOverflows = AtomicLong(0)
             val framesSkipped = AtomicLong(0)
+            val drains = AtomicLong(0)
+            val tooLarge = AtomicLong(0)
 
             fun sendCounted(dgram: ByteArray) {
                 try {
@@ -535,6 +612,16 @@ class PhantomHostSession(
                 }
                 while (true) {
                     val cmd = phantomHost.takeControl() ?: break
+                    if (cmd == RemoteControlCommand.SEND_LOG) {
+                        // la diagnosi la serve la sessione stessa: vale in tutte le modalità
+                        try {
+                            val datagrams = phantomHost.sendLog(diagnosticLog(conn))
+                            for (d in datagrams) sendCounted(d)
+                            onLog("Log dell'host inviato all'iPhone per la diagnosi (${datagrams.size / 2} pezzi)")
+                        } catch (_: Throwable) {
+                        }
+                        continue
+                    }
                     try {
                         onControlCommand(cmd)
                     } catch (_: Throwable) {
@@ -631,6 +718,10 @@ class PhantomHostSession(
                     var loggedErrors = 0L
                     var loggedLost = 0uL
                     var loggedCongestion = 0uL
+                    var loggedSkipped = 0L
+                    var loggedDrains = 0L
+                    var loggedTooLarge = 0L
+                    var loggedFecGroup = -1
                     while (running.get() && clientActive.get() && !conn.isClosed() && !phantomHost.isClosed()) {
                         val nowMs = SystemClock.elapsedRealtime()
                         val policy = thermalProvider()
@@ -655,8 +746,35 @@ class PhantomHostSession(
 
                         val activeEnc = encRef.get()
                         val nowUs = SystemClock.elapsedRealtimeNanos() / 1_000L
+                        // Prima la pausa, poi il keyframe: alla ripresa l'encoder va riattivato prima di chiedergliene uno.
+                        val pausedNow = phantomHost.videoPaused(nowUs.toULong())
+                        if (pausedNow != videoPaused.get()) {
+                            videoPaused.set(pausedNow)
+                            activeEnc?.setSuspended(pausedNow)
+                            onLog(
+                                if (pausedNow) {
+                                    "iPhone in background: video in pausa (niente dati finché non torna)"
+                                } else {
+                                    "iPhone in primo piano: video ripreso"
+                                },
+                            )
+                        }
                         if (phantomHost.wantsKeyframe(nowUs.toULong())) {
                             activeEnc?.requestKeyFrame()
+                        }
+
+                        val fecGroup = phantomHost.fecGroup().toInt()
+                        if (fecGroup != loggedFecGroup) {
+                            if (loggedFecGroup >= 0) {
+                                onLog(
+                                    if (fecGroup < loggedFecGroup) {
+                                        "Perdite sparse: parità aumentata a 1 pacchetto ogni $fecGroup"
+                                    } else {
+                                        "Rete più pulita (o congestionata): parità tornata a 1 pacchetto ogni $fecGroup"
+                                    },
+                                )
+                            }
+                            loggedFecGroup = fecGroup
                         }
 
                         if (nowMs - lastBitrateCheckMs >= 250L) {
@@ -687,12 +805,16 @@ class PhantomHostSession(
                                 activeEnc?.setBitrate(desired.toInt())
                                 appliedBitrate = desired
                             }
-                            val step = synchronized(quality) { quality.update(nowMs, plan.qualityBps) }
+                            // in pausa non passa video: la rete non dice nulla sulla qualità sostenibile
+                            val step = if (videoPaused.get()) null else synchronized(quality) { quality.update(nowMs, plan.qualityBps) }
                             if (step != null) {
                                 currentStep.set(step)
+                                val holdS = synchronized(quality) { quality.nextClimbHoldMs() } / 1000
+                                // dopo una risalita fallita si aspetta di più: lo si scrive, così nel log si vede perché
+                                val holdNote = if (holdS > 20) " · prossima salita dopo $holdS s di rete buona" else ""
                                 onLog(
                                     "Qualità adattata alla rete: ${step.maxShortSide}p · ${step.fps} fps " +
-                                        "(rete ${"%.1f".format(java.util.Locale.ROOT, plan.qualityBps / 1_000_000.0)} Mbps)",
+                                        "(rete ${"%.1f".format(java.util.Locale.ROOT, plan.qualityBps / 1_000_000.0)} Mbps)$holdNote",
                                 )
                                 reconfigureRequested.set(true)
                             }
@@ -786,19 +908,30 @@ class PhantomHostSession(
                             } catch (_: Throwable) {
                                 ""
                             }
-                            if (overflows != loggedOverflows || errors != loggedErrors) {
+                            val skipped = framesSkipped.get()
+                            val drained = drains.get()
+                            val large = tooLarge.get()
+                            // Anche gli svuotamenti senza pacchetti scartati vanno nel log: in P2P la qualità crollava
+                            // (migliaia di frame saltati) senza che comparisse una sola riga.
+                            if (overflows != loggedOverflows || errors != loggedErrors || drained != loggedDrains) {
                                 val queuedKb = try {
                                     conn.queuedSendBytes().toLong() / 1024
                                 } catch (_: Throwable) {
                                     -1L
                                 }
+                                val largeText = if (large != loggedTooLarge) " (di cui troppo grandi ${large - loggedTooLarge})" else ""
                                 onLog(
-                                    "Rete in affanno (ultimi 5 s): ${overflows - loggedOverflows} pacchetti scartati per coda piena, " +
-                                        "${errors - loggedErrors} invii falliti · coda $queuedKb KB · bitrate ${appliedBitrate / 1_000_000} Mbps$quic",
+                                    "Rete in affanno (ultimi 5 s): ${drained - loggedDrains} svuotamenti, ${skipped - loggedSkipped} frame saltati, " +
+                                        "${overflows - loggedOverflows} pacchetti scartati per coda piena, " +
+                                        "${errors - loggedErrors} invii falliti$largeText · coda $queuedKb KB · " +
+                                        "bitrate ${"%.1f".format(java.util.Locale.ROOT, appliedBitrate / 1_000_000.0)} Mbps$quic",
                                 )
                                 loggedOverflows = overflows
                                 loggedErrors = errors
                             }
+                            loggedSkipped = skipped
+                            loggedDrains = drained
+                            loggedTooLarge = large
                         }
                         Thread.sleep(25)
                     }
@@ -823,7 +956,7 @@ class PhantomHostSession(
                             preferHevc = preferHevcNow,
                             initialBitrateBps = appliedBitrate.toInt(),
                             intraRefresh = config.intraRefresh,
-                            onLog = onLog,
+                            onLog = ::onLog,
                         )
                         currentEncoder = enc
                         encRef.set(enc)
@@ -838,7 +971,12 @@ class PhantomHostSession(
 
                     val cap = captureFactory.attachSurface(enc.inputSurface, enc.actualWidth, enc.actualHeight, curSrcW, curSrcH)
                     currentCapture = cap
-                    enc.requestKeyFrame()
+                    if (videoPaused.get()) {
+                        // encoder nuovo (es. rotazione) mentre l'iPhone è in background: resta sospeso anche lui
+                        enc.setSuspended(true)
+                    } else {
+                        enc.requestKeyFrame()
+                    }
 
                     enc.drainLoop(
                         isActive = {
@@ -866,6 +1004,12 @@ class PhantomHostSession(
                         val report = phantomHost.sendFrameVia(conn, isKey, captureTsUs.toULong(), frameBytes)
                         if (report.skipped) {
                             framesSkipped.incrementAndGet()
+                        }
+                        if (report.drainStarted) {
+                            drains.incrementAndGet()
+                        }
+                        if (report.tooLarge > 0u) {
+                            tooLarge.addAndGet(report.tooLarge.toLong())
                         }
                         if (report.queueOverflows > 0u || report.sendErrors > 0u) {
                             queueOverflows.addAndGet(report.queueOverflows.toLong())
@@ -949,3 +1093,6 @@ class PhantomHostSession(
         }
     }
 }
+
+/** Righe di log tenute per la diagnosi chiesta dall'iPhone. */
+private const val MAX_LOG_LINES = 400

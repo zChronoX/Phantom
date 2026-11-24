@@ -331,7 +331,7 @@ fn is_android_context_panic(payload: &(dyn std::any::Any + Send)) -> bool {
 }
 
 /// Coda dei datagrammi in uscita: stesso ragionamento di `phantom-quic` (contiene un keyframe, non 0,7 s di video).
-const DATAGRAM_SEND_BUFFER: usize = 512 * 1024;
+pub const DATAGRAM_SEND_BUFFER: usize = 512 * 1024;
 
 /// Tempo massimo per completare l'handshake di una connessione in arrivo (stesso valore di `phantom-quic`): via
 /// relay o con il hole punching l'handshake richiede facilmente più dell'attesa breve passata ad `accept`.

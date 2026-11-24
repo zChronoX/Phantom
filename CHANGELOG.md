@@ -2,6 +2,72 @@
 
 Le note di ogni release vengono prese da qui dalla CI (sezione `## [x.y.z]` che corrisponde al tag `vx.y.z`).
 
+## [1.5.0] - 2026-11-24
+
+### Correzioni
+- **Video fermo per un minuto con la rete perfetta**: dopo una raffica di perdite QUIC riporta la dimensione massima
+  dei pacchetti a 1200 byte per 60 s, ma il video continuava a essere spezzato in pezzi da ~1400 byte decisi
+  all'inizio della sessione, e ogni pezzo veniva rifiutato. Ora la dimensione dei pezzi segue il massimo attuale,
+  frame per frame. Nel log gli invii rifiutati per questo motivo sono contati a parte («troppo grandi»).
+- **Meno scatti per i blocchi brevi del Wi-Fi**: in LAN la coda di invio assorbe fino a ~600 ms di video invece di
+  ~250 ms (coda QUIC da 2 MiB invece di 512 KiB). Un blocco della radio di qualche centinaio di ms non butta più via
+  i frame e non costringe a un keyframe: finito il blocco, il Wi-Fi smaltisce l'arretrato in pochi millisecondi. In
+  P2P la soglia resta di ~250 ms.
+- **Qualità più stabile**: dopo uno stallo il bitrate scende del 15% invece del 25%; la risoluzione scende dopo 6 s
+  di rete scarsa (prima 3 s) e risale dopo 20 s di rete buona (prima 8 s), e non cambia mai più di una volta ogni 30
+  s. Prima si passava da 720p a 1080p e ritorno anche 11 volte in 45 minuti, con un piccolo fermo a ogni cambio.
+- **Niente più risalite a vuoto**: se dopo una salita a 1080p bisogna riscendere entro 2 minuti, il tentativo
+  successivo aspetta 2 minuti di rete buona, poi 4, 8, fino a 10; restare 5 minuti sul gradino raggiunto cancella la
+  penalità. Nei test del 24/11 la risoluzione era cambiata 21 volte in un'ora, sempre a minuti di distanza. Il log
+  dice quanto si aspetterà prima della prossima salita.
+- **Parità adattiva**: il pacchetto di parità (che ricostruisce un pezzo perso senza aspettare la ritrasmissione)
+  passa da 1 ogni 10 a 1 ogni 5 o 3 quando il client riporta perdite sparse con la coda bassa (5G, relay), e torna a
+  1 ogni 10 dopo 10 s di rete pulita o subito alla prima congestione. Sul simulatore, con il 4% di pacchetti persi:
+  83% di frame consegnati invece di 63%, un terzo di keyframe in meno.
+- **Log più pulito**: le connessioni P2P in arrivo con il primo pacchetto illeggibile (rumore di rete, innocuo)
+  finivano nel log una per una, 52 in un giorno; ora c'è un riepilogo all'ora.
+
+### Background e avvio
+- **Silenzio in background**: uscendo dall'app l'audio di Android tace (prima si sentiva finché non si toglieva con
+  «Audio off»). La sessione resta collegata; al ritorno l'audio riprende come lo si era lasciato. Chi vuole
+  continuare ad ascoltare attiva «Audio in background» nelle impostazioni dell'iPhone.
+- **Video in pausa in background**: l'iPhone chiede al telefono Android di smettere di mandare il video e di
+  sospendere l'encoder finché l'app non torna in primo piano; al ritorno il video riparte subito da un keyframe.
+  Prima il video continuava ad arrivare e veniva buttato: su 5G anche ~1 GB all'ora. La pausa si rinnova ogni
+  secondo e scade da sola dopo 3 s, quindi non resta mai appesa.
+- **Avvio automatico dell'host** (opzione nell'app Android): all'accensione e dopo un aggiornamento dell'app l'host
+  parte da solo in modalità Root, e in Shizuku se Shizuku è già attivo (lo aspetta fino a 45 s). Se non può partire
+  da solo, una notifica apre l'app.
+- **Limiti di qualità dell'encoder** (Android 12+): QP tra 12 e 45, per non sprecare bit su una schermata ferma e
+  non scendere a blocchi grossi nelle scene complesse.
+
+### P2P
+- **Ritorno automatico in LAN**: in P2P l'iPhone riprova ogni tanto l'indirizzo di casa e, se risponde, si ricollega
+  in LAN (prima ci si restava, con qualità peggiore). Se il ritorno fallisce, riprova più di rado (fino a 5 minuti).
+- **Diretto o relay nell'HUD**: accanto a «P2P» compare se il percorso è diretto o passa dal relay.
+- Il log dell'host registra ogni svuotamento della coda e i frame saltati, anche quando non ci sono pacchetti
+  scartati: prima un crollo della qualità in P2P non lasciava traccia.
+
+### iPhone
+- **Diagnosi in un tocco**: dal pannello della HUD, «Diagnosi» prepara un file con iPhone e versione, telemetria, il
+  diario della sessione (connessioni, errori, cambi di rete, background), l'ultima chiusura inattesa e il **log del
+  telefono Android**, chiesto all'host durante la sessione. Si condivide con il foglio di sistema (Messaggi, Mail,
+  File…).
+- **Pannello della HUD compatto**: alto quanto il contenuto (prima occupava quasi tutto lo schermo), griglia senza
+  tasti isolati, telemetria più fitta; il lato della HUD si cambia dalla griglia e «Termina la sessione» ha una riga
+  sua.
+
+### Protocollo
+- Nuovo messaggio `HostLog` (log dell'host a pezzi) e comando `SendLog`, negoziati con la funzione `HOST_LOG`: con
+  versioni precedenti la diagnosi funziona lo stesso, senza il log di Android.
+- Nuovi comandi `PauseVideo`/`ResumeVideo`, negoziati con la funzione `VIDEO_PAUSE`; con un host più vecchio
+  l'iPhone non li manda e il video in background viene scartato come prima.
+- La dimensione del gruppo di parità può cambiare da un frame all'altro (il ricevitore la legge già da ogni pacchetto).
+
+### Documentazione
+- README riscritto: funzioni, architettura con schema, badge, requisiti, installazione, modalità, uso, prestazioni,
+  sviluppo, CI e release, risoluzione dei problemi, privacy e crediti.
+
 ## [1.4.0] - 2026-11-23
 
 ### Raggiungibilità dell'host

@@ -1,11 +1,17 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-23. Branch `main`, base `76144e0` (v1.3.3) più la v1.4.0 (patch consegnata).
+Ultimo aggiornamento: 2026-11-24. Branch `main`, base `172d01d` (v1.4.0) più la v1.5.0 (diff consegnato).
 Roadmap fino alla 2.0.0: documento di progetto «claude/PHANTOM-HANDOFF-ROADMAP.md».
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Ultime release
 
+- **v1.5.0** (2026-11-24): frammenti video che seguono la MTU (fine dei minuti di video fermo), coda LAN da 600 ms
+  per assorbire i blocchi del Wi-Fi, qualità e bitrate più stabili, ritorno automatico in LAN e indicatore
+  diretto/relay in P2P, diagnosi in un tocco con il log di Android (nuovo messaggio `HostLog`), HUD compatta, README
+  riscritto. Dopo i test del 24/11: backoff delle risalite di risoluzione, parità adattiva, silenzio e video in
+  pausa con l'iPhone in background (`PauseVideo`/`ResumeVideo`), avvio automatico dell'host, limiti di QP, log degli
+  accept P2P riassunto.
 - **v1.4.0** (2026-11-23): host sempre raggiungibile (accept LAN/P2P che non muoiono a un handshake fallito,
   handshake da 10 s invece di 400 ms, P2P che controlla il relay e si riapre, mDNS rifatto al cambio rete, Doze e
   Wi-Fi a bassa latenza via Shizuku), HUD laterale a scomparsa su iPhone, sessione viva in background (audio),

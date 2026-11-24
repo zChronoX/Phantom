@@ -37,6 +37,21 @@ class VideoEncoder private constructor(
         }
     }
 
+    /**
+     * Sospende (`true`) o riprende la codifica: da sospeso l'encoder scarta i frame che arrivano dalla Surface invece di
+     * codificarli (iPhone in background: niente lavoro e niente batteria spesi per un video che nessuno guarda). Alla
+     * ripresa serve un keyframe, che chiede la sessione.
+     */
+    fun setSuspended(suspended: Boolean) {
+        try {
+            val params = Bundle().apply {
+                putInt(MediaCodec.PARAMETER_KEY_SUSPEND, if (suspended) 1 else 0)
+            }
+            codec.setParameters(params)
+        } catch (_: Throwable) {
+        }
+    }
+
     fun setBitrate(bps: Int) {
         try {
             val params = Bundle().apply {
@@ -117,6 +132,9 @@ class VideoEncoder private constructor(
         // I-frame periodici lunghi (10 s, stile scrcpy): Phantom usa già FEC XOR + NACK + keyframe
         // on-demand, evitando i micro-lag e gli sprechi di banda dei keyframe ogni 2 secondi.
         private const val KEYFRAME_INTERVAL_SEC = 10
+        /** Limiti di quantizzazione (H.264 e HEVC, scala 0–51) con gli hint a bassa latenza, da Android 12. */
+        private const val QP_MIN = 12
+        private const val QP_MAX = 45
 
         private data class Attempt(
             val codec: VideoCodec,
@@ -252,6 +270,14 @@ class VideoEncoder private constructor(
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                             setInteger(MediaFormat.KEY_LATENCY, 1)
                         }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            // Limiti di quantizzazione: sotto QP_MIN l'immagine non migliora a vista e un'interfaccia
+                            // ferma si mangerebbe bit (e coda) per niente; sopra QP_MAX compaiono i blocchi grossi. Il
+                            // tetto è largo apposta: più stretto, su una rete debole l'encoder sforerebbe il bitrate.
+                            // Gli encoder che non conoscono le chiavi le ignorano.
+                            setInteger(MediaFormat.KEY_VIDEO_QP_MIN, QP_MIN)
+                            setInteger(MediaFormat.KEY_VIDEO_QP_MAX, QP_MAX)
+                        }
                         if (isQualcommEncoder(mc.name)) {
                             // Modalità a bassa latenza degli encoder Qualcomm (Snapdragon, es. Redmi Note 11 Pro 5G):
                             // consegna ogni frame appena codificato invece di trattenerlo per il rate control.
@@ -264,7 +290,8 @@ class VideoEncoder private constructor(
                 mc.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 surface = mc.createInputSurface()
                 mc.start()
-                onLog("Encoder ${mc.name} · ${actualW}×${actualH} @ $actualFps fps${if (lowLatencyHints) " · bassa latenza" else ""}")
+                val qpNote = if (lowLatencyHints && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) " · QP $QP_MIN–$QP_MAX" else ""
+                onLog("Encoder ${mc.name} · ${actualW}×${actualH} @ $actualFps fps${if (lowLatencyHints) " · bassa latenza" else ""}$qpNote")
                 if (intraRefresh) onLog("Intra-refresh attivo (${codecType.name}, periodo $actualFps frame)")
                 return VideoEncoder(
                     codec = mc,

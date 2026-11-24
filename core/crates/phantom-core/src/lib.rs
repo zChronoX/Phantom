@@ -5,6 +5,7 @@
 //! scritti come macchine a stati pure — nessun thread, nessun sonno, tempo passato dal chiamante — così le stesse
 //! prove girano veloci e identiche su ogni piattaforma.
 
+pub mod fec;
 pub mod jitter;
 pub mod pacing;
 pub mod rate;
@@ -14,7 +15,8 @@ use std::collections::VecDeque;
 use phantom_clock::{ClockSync, Sample};
 use phantom_proto::{
     audio_flags, caps, close_reason, decode, AudioCodec, AudioPacket, Codec, ControlCommand, Finger, Header,
-    HostReport, Message, Role, Stats, MAX_AUDIO_PAYLOAD, MAX_CLIPBOARD_BYTES, QUEUE_DELAY_UNKNOWN, VERSION,
+    HostReport, Message, Role, Stats, MAX_AUDIO_PAYLOAD, MAX_CLIPBOARD_BYTES, MAX_HOST_LOG_CHUNK, MAX_HOST_LOG_PARTS,
+    QUEUE_DELAY_UNKNOWN, VERSION, VIDEO_PAUSE_LEASE_US,
 };
 use phantom_video::{AssembledFrame, EncodedFrame, Output, ReceiverConfig, VideoReceiver, VideoSender};
 use rate::{RateConfig, RateController};
@@ -107,8 +109,10 @@ pub struct SessionConfig {
     pub conn_id: u32,
     /// Dimensione dei frammenti video dati.
     pub frag_size: u16,
-    /// Frammenti dati per gruppo di parità (0 = nessuna).
+    /// Frammenti dati per gruppo di parità con la rete pulita (0 = nessuna).
     pub fec_group: u16,
+    /// `true` (predefinito): il gruppo di parità si stringe con le perdite riportate dal client ([`fec::AdaptiveFec`]).
+    pub adaptive_fec: bool,
     /// Frame recenti conservati dall'host per i NACK.
     pub cache_frames: usize,
     /// Impostazioni del ricevitore video.
@@ -154,6 +158,7 @@ impl Default for SessionConfig {
             conn_id: 0x5048_0001,
             frag_size: phantom_proto::MAX_VIDEO_PAYLOAD as u16,
             fec_group: 10,
+            adaptive_fec: true,
             cache_frames: 32,
             receiver: ReceiverConfig::default(),
             sync_fast_us: 100_000,
@@ -256,8 +261,13 @@ pub struct Host {
     pending_clipboard: Option<String>,
     last_ctrl_seq: Option<u32>,
     controls: VecDeque<ControlCommand>,
+    log_id: u32,
+    /// Il client è in background: niente video fino a questo istante (orologio dell'host), salvo rinnovo.
+    video_paused_until_us: Option<u64>,
     stats: HostStats,
     rate: RateController,
+    /// Dimensione del gruppo di parità secondo le perdite riportate dal client.
+    fec: fec::AdaptiveFec,
     /// Esito dell'apertura della sessione, se il client ha già mandato `Hello`.
     negotiated: Option<Negotiated>,
     /// Motivo della chiusura, se la sessione è stata chiusa (stato terminale).
@@ -268,6 +278,7 @@ impl Host {
     /// Crea l'host.
     pub fn new(cfg: SessionConfig) -> Self {
         let video = VideoSender::new(cfg.conn_id, cfg.frag_size, cfg.fec_group, cfg.cache_frames);
+        let cfg_fec_group = if cfg.adaptive_fec { cfg.fec_group } else { 0 };
         let rate = RateController::new(RateConfig {
             start_bps: cfg.start_bitrate_bps,
             min_bps: cfg.min_bitrate_bps,
@@ -290,8 +301,11 @@ impl Host {
             pending_clipboard: None,
             last_ctrl_seq: None,
             controls: VecDeque::new(),
+            log_id: 0,
+            video_paused_until_us: None,
             stats: HostStats::default(),
             rate,
+            fec: fec::AdaptiveFec::new(cfg_fec_group),
             negotiated: None,
             closed: None,
         }
@@ -336,6 +350,8 @@ impl Host {
             | caps::SCREEN_POWER
             | caps::HOST_REPORT
             | caps::SYSTEM_KEYS
+            | caps::HOST_LOG
+            | caps::VIDEO_PAUSE
     }
 
     fn encode(&mut self, m: &Message<'_>) -> Option<Vec<u8>> {
@@ -370,6 +386,28 @@ impl Host {
         self.rate.set_max_bps(max_bps);
     }
 
+    /// Limita la dimensione dei frammenti video a `max_payload` byte (mai oltre quella delle impostazioni).
+    ///
+    /// Va chiamata prima di ogni frame con il massimo che il trasporto accetta **adesso**: la MTU di QUIC cambia durante
+    /// la sessione (la ricerca della MTU la alza; dopo una raffica di perdite quinn sospetta un «black hole» e la
+    /// riporta a 1200 per un minuto). Con una dimensione fissa presa all'apertura, in quel minuto ogni frammento
+    /// risultava troppo grande e il video si fermava del tutto. Il ricevitore legge la dimensione da ogni pacchetto,
+    /// quindi può cambiare da un frame all'altro.
+    pub fn limit_frag_size(&mut self, max_payload: u16) {
+        self.video.frag_size = self.cfg.frag_size.min(max_payload).max(1);
+    }
+
+    /// Frammenti dati per ogni frammento di parità adesso (0 = parità spenta): si stringe con le perdite, vedi
+    /// [`fec::AdaptiveFec`].
+    pub fn fec_group(&self) -> u16 {
+        self.video.fec_group
+    }
+
+    /// Dimensione attuale dei frammenti video (byte).
+    pub fn frag_size(&self) -> u16 {
+        self.video.frag_size
+    }
+
     /// Il controllo del bitrate (sola lettura: fase, giudizio, riduzioni).
     pub fn rate(&self) -> &RateController {
         &self.rate
@@ -381,6 +419,7 @@ impl Host {
     /// si chiede nulla: il primo frame parte solo dopo un `Hello` valido.
     pub fn wants_keyframe(&self, now_us: u64) -> bool {
         self.negotiated.is_some()
+            && self.video_paused_until_us.is_none()
             && self.keyframe_wanted
             && self.last_key_ts_us.is_none_or(|t| now_us.saturating_sub(t) >= self.cfg.min_keyframe_gap_us)
     }
@@ -411,7 +450,7 @@ impl Host {
     /// `capture_ts_us` è l'istante di cattura sull'orologio dell'host. Prima dell'apertura della sessione non esce
     /// nulla (e il frame non entra nelle statistiche).
     pub fn send_frame(&mut self, frame_id: u32, key: bool, capture_ts_us: u64, data: &[u8]) -> Vec<Vec<u8>> {
-        if self.closed.is_some() || self.negotiated.is_none() {
+        if self.closed.is_some() || self.negotiated.is_none() || self.video_paused(capture_ts_us) {
             return Vec::new();
         }
         if key {
@@ -475,6 +514,56 @@ impl Host {
     /// Ultimo testo degli appunti ricevuto dal client, se ce n'è uno nuovo.
     pub fn take_clipboard(&mut self) -> Option<String> {
         self.pending_clipboard.take()
+    }
+
+    /// Spedisce il log dell'host al client che l'ha chiesto (`ControlCommand::SendLog`): restituisce i datagrammi, a
+    /// pezzi da [`MAX_HOST_LOG_CHUNK`] byte. Se il testo è più lungo di quanto ci sta si tiene la parte finale (la più
+    /// recente). Ogni pezzo esce due volte: sono datagrammi non affidabili e una diagnosi a metà serve poco. Vuoto se la
+    /// sessione non è aperta o il client non sa leggere il log.
+    pub fn send_log(&mut self, text: &str) -> Vec<Vec<u8>> {
+        let Some(n) = self.negotiated else { return Vec::new() };
+        if self.closed.is_some() || n.caps & caps::HOST_LOG == 0 {
+            return Vec::new();
+        }
+        let max = MAX_HOST_LOG_CHUNK * usize::from(MAX_HOST_LOG_PARTS);
+        let bytes = text.as_bytes();
+        let bytes = if bytes.len() > max { &bytes[bytes.len() - max..] } else { bytes };
+        let chunks: Vec<&[u8]> =
+            if bytes.is_empty() { vec![&[][..]] } else { bytes.chunks(MAX_HOST_LOG_CHUNK).collect() };
+        let parts = chunks.len() as u16;
+        let log_id = self.log_id;
+        self.log_id = self.log_id.wrapping_add(1);
+        let mut out = Vec::with_capacity(chunks.len() * 2);
+        for _ in 0..2 {
+            for (i, chunk) in chunks.iter().enumerate() {
+                if let Some(d) = self.encode(&Message::HostLog { log_id, part: i as u16, parts, bytes: chunk }) {
+                    out.push(d);
+                }
+            }
+        }
+        out
+    }
+
+    /// `true` se il client è in background e il video non va mandato (`ControlCommand::PauseVideo`). `now_us` è
+    /// l'orologio dell'host: se la pausa non è stata rinnovata in tempo finisce qui, e il prossimo frame sarà un
+    /// keyframe. Chi chiama può sospendere l'encoder finché resta `true`.
+    pub fn video_paused(&mut self, now_us: u64) -> bool {
+        match self.video_paused_until_us {
+            Some(until) if now_us >= until => {
+                self.resume_video();
+                false
+            }
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    fn resume_video(&mut self) {
+        if self.video_paused_until_us.take().is_some() {
+            // il client ha buttato il decoder: si riparte da un keyframe nuovo, senza aspettare il distanziamento
+            self.keyframe_wanted = true;
+            self.last_key_ts_us = None;
+        }
     }
 
     /// Il più vecchio comando di controllo remoto ricevuto dal client (es. risveglio o schermo spento).
@@ -541,7 +630,14 @@ impl Host {
             }
             Message::Nack { frame_id, missing } => out.extend(self.video.on_nack(now_us, frame_id, &missing)),
             Message::Stats(s) => {
-                self.rate.on_stats(now_us, &s);
+                let load = match self.rate.on_stats(now_us, &s) {
+                    rate::Verdict::Fine => fec::Load::Clear,
+                    rate::Verdict::Congested | rate::Verdict::HeavyLoss => fec::Load::Loaded,
+                    rate::Verdict::Hold => fec::Load::Unknown,
+                };
+                if let Some(g) = self.fec.on_stats(now_us, s.frames_ok, s.frames_lost, s.frames_fec, load) {
+                    self.video.fec_group = g;
+                }
             }
             Message::KeyframeRequest { .. } => {
                 self.keyframe_wanted = true;
@@ -573,6 +669,18 @@ impl Host {
             }
             Message::Control { ctrl_seq, command } if is_newer_seq(self.last_ctrl_seq, ctrl_seq) => {
                 self.last_ctrl_seq = Some(ctrl_seq);
+                // la pausa del video la gestisce il core: l'app la legge con `video_paused`
+                match command {
+                    ControlCommand::PauseVideo => {
+                        self.video_paused_until_us = Some(now_us.saturating_add(VIDEO_PAUSE_LEASE_US));
+                        return out;
+                    }
+                    ControlCommand::ResumeVideo => {
+                        self.resume_video();
+                        return out;
+                    }
+                    _ => {}
+                }
                 if self.controls.len() == MAX_PENDING_CONTROLS {
                     self.controls.pop_front();
                 }
@@ -617,6 +725,25 @@ pub struct Client {
     pub delivered: Vec<Delivered>,
     /// Ultimo rapporto dell'host (telemetria).
     host_report: Option<HostReport>,
+    host_log: Option<HostLogAssembly>,
+}
+
+/// Log dell'host in arrivo a pezzi.
+#[derive(Debug)]
+struct HostLogAssembly {
+    log_id: u32,
+    parts: Vec<Option<Vec<u8>>>,
+}
+
+/// Log dell'host ricomposto dal client.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostLogText {
+    /// Testo (i pezzi mancanti sono segnati).
+    pub text: String,
+    /// Pezzi arrivati.
+    pub received: u16,
+    /// Pezzi totali.
+    pub total: u16,
 }
 
 impl Client {
@@ -647,6 +774,7 @@ impl Client {
             closed: None,
             delivered: Vec::new(),
             host_report: None,
+            host_log: None,
         }
     }
 
@@ -689,6 +817,8 @@ impl Client {
             | caps::SCREEN_POWER
             | caps::HOST_REPORT
             | caps::SYSTEM_KEYS
+            | caps::HOST_LOG
+            | caps::VIDEO_PAUSE
     }
 
     /// Frame consegnati dal ricevitore dall'ultima chiamata, nell'ordine di arrivo: chi usa il client per un'app li
@@ -718,6 +848,28 @@ impl Client {
         self.encode(&Message::Clipboard { clip_seq: seq, text: clipped })
     }
 
+    /// Il log dell'host chiesto con `ControlCommand::SendLog`: completo appena sono arrivati tutti i pezzi, oppure,
+    /// con `partial`, quello che c'è (i pezzi mancanti sono segnati nel testo). Una volta preso non torna più.
+    pub fn take_host_log(&mut self, partial: bool) -> Option<HostLogText> {
+        let a = self.host_log.as_ref()?;
+        let total = a.parts.len() as u16;
+        let received = a.parts.iter().filter(|p| p.is_some()).count() as u16;
+        if received == 0 || (received < total && !partial) {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        for (i, p) in a.parts.iter().enumerate() {
+            match p {
+                Some(b) => bytes.extend_from_slice(b),
+                None => {
+                    bytes.extend_from_slice(format!("\n[… pezzo {} di {} non arrivato …]\n", i + 1, total).as_bytes())
+                }
+            }
+        }
+        self.host_log = None;
+        Some(HostLogText { text: String::from_utf8_lossy(&bytes).into_owned(), received, total })
+    }
+
     /// Spedisce un comando di controllo remoto all'host (es. risveglio o spegnimento display fisico).
     pub fn send_control(&mut self, command: ControlCommand) -> Option<Vec<u8>> {
         if self.closed.is_some() || self.negotiated.is_none() {
@@ -726,6 +878,17 @@ impl Client {
         let seq = self.ctrl_seq;
         self.ctrl_seq = self.ctrl_seq.wrapping_add(1);
         self.encode(&Message::Control { ctrl_seq: seq, command })
+    }
+
+    /// Chiede all'host di fermare (`true`) o far ripartire (`false`) il video, per esempio quando l'app va in
+    /// background. La pausa vale [`VIDEO_PAUSE_LEASE_US`]: va ripetuta (circa ogni secondo) finché serve. `None` se la
+    /// sessione non è aperta o l'host non conosce la funzione (`caps::VIDEO_PAUSE`).
+    pub fn video_pause(&mut self, paused: bool) -> Option<Vec<u8>> {
+        if self.negotiated?.caps & caps::VIDEO_PAUSE == 0 {
+            return None;
+        }
+        let command = if paused { ControlCommand::PauseVideo } else { ControlCommand::ResumeVideo };
+        self.send_control(command)
     }
 
     /// Statistiche del ricevitore video.
@@ -824,6 +987,17 @@ impl Client {
             }
             Message::HostReport(r) => {
                 self.host_report = Some(r);
+            }
+            Message::HostLog { log_id, part, parts, bytes } => {
+                let fresh = self.host_log.as_ref().is_none_or(|a| a.log_id != log_id);
+                if fresh {
+                    self.host_log = Some(HostLogAssembly { log_id, parts: vec![None; usize::from(parts)] });
+                }
+                if let Some(a) = self.host_log.as_mut() {
+                    if let Some(slot) = a.parts.get_mut(usize::from(part)) {
+                        *slot = Some(bytes.to_vec());
+                    }
+                }
             }
             _ => {}
         }
@@ -1625,5 +1799,145 @@ mod host_report {
         assert_eq!((got.width, got.height), (1080, 2400));
         assert_eq!(got.keyframes, 2, "i keyframe li conta l'host");
         assert_eq!(host.stats().keyframes_sent, 2);
+    }
+}
+
+#[cfg(test)]
+mod host_log {
+    use super::*;
+
+    fn opened() -> (Host, Client) {
+        let cfg = SessionConfig::default();
+        let mut client = Client::new(cfg.clone());
+        let mut host = Host::new(cfg);
+        let hello = client.tick(0).remove(0);
+        let ack = host.on_datagram(0, &hello).remove(0);
+        client.on_datagram(0, &ack);
+        assert_ne!(client.negotiated().map_or(0, |n| n.caps) & caps::HOST_LOG, 0, "funzione concordata");
+        (host, client)
+    }
+
+    fn sample_log() -> String {
+        (0..120).map(|i| format!("20:42:{i:02} · Rete in affanno · è città №{i}\n")).collect()
+    }
+
+    /// Il client chiede il log, l'host lo spedisce a pezzi (due copie) e il client lo ricompone uguale, accenti compresi
+    /// anche se un pezzo taglia un carattere a metà.
+    #[test]
+    fn log_travels_in_chunks_and_is_reassembled() {
+        let (mut host, mut client) = opened();
+        let req = client.send_control(ControlCommand::SendLog).expect("richiesta");
+        host.on_datagram(1_000, &req);
+        assert_eq!(host.take_control(), Some(ControlCommand::SendLog));
+        let text = sample_log();
+        let datagrams = host.send_log(&text);
+        let parts = text.len().div_ceil(MAX_HOST_LOG_CHUNK);
+        assert_eq!(datagrams.len(), parts * 2, "ogni pezzo esce due volte");
+        assert!(datagrams.iter().all(|d| d.len() <= phantom_proto::MAX_DATAGRAM));
+        // arriva solo la seconda copia, in ordine inverso
+        for d in datagrams[parts..].iter().rev() {
+            client.on_datagram(2_000, d);
+        }
+        let got = client.take_host_log(false).expect("log completo");
+        assert_eq!(got.text, text);
+        assert_eq!((got.received, got.total), (parts as u16, parts as u16));
+        assert!(client.take_host_log(true).is_none(), "una volta preso non torna");
+    }
+
+    /// Se manca un pezzo, il log completo non c'è; quello parziale sì, con il buco segnato.
+    #[test]
+    fn missing_parts_are_marked_in_a_partial_log() {
+        let (mut host, mut client) = opened();
+        let text = sample_log();
+        let datagrams = host.send_log(&text);
+        let parts = datagrams.len() / 2;
+        for (i, d) in datagrams[..parts].iter().enumerate() {
+            if i != 1 {
+                client.on_datagram(2_000, d);
+            }
+        }
+        assert!(client.take_host_log(false).is_none());
+        let got = client.take_host_log(true).expect("log parziale");
+        assert_eq!((got.received, got.total), (parts as u16 - 1, parts as u16));
+        assert!(got.text.contains(&format!("pezzo 2 di {parts} non arrivato")));
+    }
+
+    /// Prima dell'apertura non parte nulla; un log enorme tiene la parte finale (la più recente).
+    #[test]
+    fn log_needs_an_open_session_and_keeps_the_tail() {
+        let mut host = Host::new(SessionConfig::default());
+        assert!(host.send_log("ciao").is_empty());
+        let (mut host, mut client) = opened();
+        let big = "x".repeat(200_000) + "FINE";
+        let datagrams = host.send_log(&big);
+        assert_eq!(datagrams.len(), usize::from(MAX_HOST_LOG_PARTS) * 2);
+        for d in &datagrams {
+            client.on_datagram(2_000, d);
+        }
+        let got = client.take_host_log(false).expect("log");
+        assert!(got.text.ends_with("FINE"));
+        assert_eq!(got.text.len(), MAX_HOST_LOG_CHUNK * usize::from(MAX_HOST_LOG_PARTS));
+    }
+}
+
+#[cfg(test)]
+mod video_pause {
+    use super::*;
+
+    fn opened() -> (Host, Client) {
+        let cfg = SessionConfig::default();
+        let mut client = Client::new(cfg.clone());
+        let mut host = Host::new(cfg);
+        let hello = client.tick(0).remove(0);
+        let ack = host.on_datagram(0, &hello).remove(0);
+        client.on_datagram(0, &ack);
+        assert_ne!(client.negotiated().map_or(0, |n| n.caps) & caps::VIDEO_PAUSE, 0, "funzione concordata");
+        (host, client)
+    }
+
+    /// In background l'host non manda video né chiede keyframe; al ritorno riparte subito da un keyframe, anche se
+    /// l'ultimo è appena partito.
+    #[test]
+    fn paused_host_sends_nothing_and_resumes_with_a_keyframe() {
+        let (mut host, mut client) = opened();
+        assert!(!host.send_frame(1, true, 10_000, &[1, 2, 3]).is_empty());
+        assert!(!host.wants_keyframe(20_000));
+        host.on_datagram(20_000, &client.video_pause(true).expect("pausa"));
+        assert_eq!(host.take_control(), None, "la pausa non arriva all'app come comando");
+        assert!(host.video_paused(30_000));
+        assert!(host.send_frame(2, false, 40_000, &[4, 5, 6]).is_empty(), "niente video in pausa");
+        host.request_keyframe();
+        assert!(!host.wants_keyframe(50_000), "niente keyframe in pausa");
+        host.on_datagram(60_000, &client.video_pause(false).expect("ripresa"));
+        assert!(!host.video_paused(60_000));
+        assert!(host.wants_keyframe(60_000), "si riparte da un keyframe senza aspettare il distanziamento");
+        assert!(!host.send_frame(3, true, 70_000, &[7]).is_empty());
+    }
+
+    /// Se il client sparisce o la ripresa si perde, la pausa scade da sola; se il client la rinnova, resta.
+    #[test]
+    fn pause_expires_unless_renewed() {
+        let (mut host, mut client) = opened();
+        host.on_datagram(1_000_000, &client.video_pause(true).expect("pausa"));
+        host.on_datagram(3_000_000, &client.video_pause(true).expect("rinnovo"));
+        assert!(host.video_paused(1_000_000 + VIDEO_PAUSE_LEASE_US + 500_000), "rinnovata: ancora in pausa");
+        let after = 3_000_000 + VIDEO_PAUSE_LEASE_US;
+        assert!(!host.video_paused(after), "scaduta");
+        assert!(host.wants_keyframe(after));
+        assert!(!host.send_frame(1, true, after + 1, &[1]).is_empty());
+    }
+
+    /// Con un host che non conosce la pausa il client non manda nulla.
+    #[test]
+    fn old_host_never_receives_the_command() {
+        let cfg = SessionConfig::default();
+        let mut client = Client::new(cfg.clone());
+        let hello = client.tick(0).remove(0);
+        let Ok((h, Message::Hello { proto_max, nonce, .. })) = decode(&hello) else { panic!("hello") };
+        let old_caps = caps::H264 | caps::HOST_LOG;
+        let ack = Message::HelloAck { proto: proto_max, caps: old_caps, nonce }.encode(h).expect("ack");
+        client.on_datagram(0, &ack);
+        assert!(client.negotiated().is_some());
+        assert!(client.video_pause(true).is_none());
     }
 }

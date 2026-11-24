@@ -486,6 +486,7 @@ private struct PhantomSettingsSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var manualError = ""
+    @AppStorage(RemoteSession.backgroundAudioKey) private var backgroundAudio = false
 
     var body: some View {
         NavigationStack {
@@ -496,6 +497,15 @@ private struct PhantomSettingsSheet: View {
                         Text("H.264 (AVC)").tag("h264")
                     }
                     Toggle("Mostra indicatori tocco", isOn: $showTouchIndicators)
+                }
+
+                Section {
+                    Toggle("Audio in background", isOn: $backgroundAudio)
+                } header: {
+                    Text("Background")
+                } footer: {
+                    Text("Quando esci dall'app la sessione resta collegata e il Redmi smette di mandare il video. "
+                        + "Spento: l'audio di Android tace finché non torni. Acceso: continui a sentirlo.")
                 }
 
                 Section("Connessione manuale") {

@@ -1,9 +1,63 @@
 # Handoff
 
-Scritto: 2026-11-20; aggiornato il 2026-11-23 con la **v1.4.0** (host sempre raggiungibile, HUD laterale, sessione viva in background). Roadmap completa nel documento di progetto «claude/PHANTOM-HANDOFF-ROADMAP.md».
-Branch: main - base `76144e0` (v1.3.3, pushata e taggata dall'utente) + commit v1.4.0 consegnato come patch (vedi «Uncommitted changes»).
+Scritto: 2026-11-20; aggiornato il 2026-11-24 con la **v1.5.0** (frammenti che seguono la MTU, stalli assorbiti dalla coda, qualità stabile con backoff delle risalite, parità adattiva, ritorno in LAN, diagnosi in un tocco, HUD compatta, silenzio e video in pausa in background, avvio automatico dell'host, limiti di QP, README). Roadmap completa nel documento di progetto «claude/PHANTOM-HANDOFF-ROADMAP.md».
+Branch: main - base `172d01d` (v1.4.0, commit e tag dell'utente a suo nome) + v1.5.0 consegnata come diff (vedi «Uncommitted changes»). Da qui i commit li fa l'utente: si consegna un `.diff` e un messaggio di commit, niente `format-patch`.
 Cartella sul PC: `C:\Users\Giovanni\Documents\Progetti personali\Phantom\Phantom` (spostata dall'utente).
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
+
+## Esito dei test 1.4.0 del 24/11 (giro con 5G e Wi-Fi) e aggiunte alla 1.5.0
+
+- 5G/P2P: quasi sempre 540p 30 fps a 1,3–2,3 Mbit/s; le salite a 720p durano 5–60 s. Nessun «invio fallito» in tutta
+  la giornata. LAN di sera (un'ora, Root): 21 cambi di risoluzione (10 salite a 1080p con ~14,9 Mbit/s stimati, il
+  collegamento cede dopo 15–60 s); HUD iPhone con keyframe 1357, scartati 12665, saltati 2611, resync audio 404.
+- 52 righe «Connessione P2P in arrivo fallita … authentication failed»: è `noq-proto` (`endpoint.rs`, accept) che
+  non riesce a decifrare il pacchetto Initial (rovinato o non di Phantom). Innocuo → `logAcceptFailure`: una riga di
+  spiegazione e poi un riepilogo all'ora.
+- Audio udibile in background: voluto dalla 1.4.0 (l'audio tiene viva l'app), ma il video continuava ad arrivare e
+  veniva scartato (fino a ~1 GB/h su 5G). Aggiunti: `ControlCommand::PauseVideo` (14) / `ResumeVideo` (15) con
+  `caps::VIDEO_PAUSE`, gestiti dal core (`Host::video_paused(now)`, pausa valida `VIDEO_PAUSE_LEASE_US` = 3 s e
+  rinnovata dall'iPhone ogni secondo in `onTick`; alla ripresa keyframe senza distanziamento); `send_frame_via` con
+  `paused` non tocca coda né dropper; Kotlin sospende l'encoder (`PARAMETER_KEY_SUSPEND`) e non aggiorna la qualità
+  in pausa. iPhone: opzione «Audio in background» (`UserDefaults` `backgroundAudio`, spenta di default) che muta il
+  renderer in background (resta attivo per tenere viva la sessione) e lo riporta allo stato del tasto «Audio».
+- `AdaptiveQuality`: backoff delle risalite fallite (discesa entro 2 min da una salita → attesa 2, 4, 8, max 10 min;
+  5 min stabili azzerano), `nextClimbHoldMs()` nel log. Test `failedClimbsWaitLongerEachTime`,
+  `stableClimbResetsTheBackoff`.
+- Parità adattiva (`phantom_core::fec::AdaptiveFec`, `SessionConfig::adaptive_fec`): gruppo 10 → 5 (≥3% di frame
+  danneggiati) → 3 (≥10%) solo con verdetto `Fine` del controllo (coda bassa); torna alla base subito con
+  `Congested`/`HeavyLoss` e dopo 10 s pulita. Test e2e `adaptive_parity_helps_on_lossy_cellular` (4 seed, 4% di
+  perdita: 82,7% contro 63,2% di frame consegnati, keyframe 41 contro 61). Kotlin logga i cambi (`fecGroup()`).
+- Roadmap 1.5.1 anticipata: QP 12–45 (`KEY_VIDEO_QP_MIN/MAX`, API 31+, solo con gli hint a bassa latenza); avvio
+  automatico (`BootReceiver` su `BOOT_COMPLETED`/`MY_PACKAGE_REPLACED`, `HostLauncher` condiviso con il riquadro
+  rapido, opzione `autostart`): Root subito, Shizuku se pronto entro 45 s, altrimenti notifica.
+- Da guardare nei test: in background silenzio e nel log del Redmi «iPhone in background: video in pausa»; ritorno
+  con video subito vivo; a casa meno cambi di risoluzione e le righe «prossima salita dopo N s»; su 5G le righe
+  «parità aumentata»; avvio automatico dopo il riavvio del Redmi.
+
+## Esito dei test 1.4.0 (23/11) e risposta della 1.5.0
+
+- Modalità Root su PixelOS Android 17: Wi-Fi a bassa latenza forzato e Doze escluso, ma stalli ancora presenti →
+  non è il risparmio energetico. Statistiche QUIC: finestra 500–1100 KB (non limita), RTT 8–18 ms con picchi a
+  40–186 ms, 30–200 pacchetti persi ogni 5 s. Il Redmi è collegato al Wi-Fi di un powerline TP-Link TL-WPA7817
+  (5 GHz); l'iPhone era prima sul 2,4 GHz, poi sul 5 GHz vicino al powerline. AirDrop sempre spento. Un powerline
+  aggiunge perdite a raffica e latenza variabile sulla rete elettrica: da provare con entrambi i telefoni sullo stesso
+  access point.
+- Bug MTU: ~600 invii falliti/s per 60 s esatti (`black_hole_cooldown` di quinn) → `Host::limit_frag_size` chiamata
+  da `send_frame_via` con `video_payload_for_datagram(max_datagram_size())` a ogni frame; il ricevitore legge
+  `frag_size` da ogni pacchetto. Test `fragment_size_follows_the_current_transport_limit` (1400 → 1162 → 600 → 1400).
+- Coda: `phantom_quic::DATAGRAM_SEND_BUFFER` 2 MiB; `SourceDropper::limit_bytes(target, window_ms, max)` con 600 ms in
+  LAN e 250 ms in P2P (`QuicConnection::is_p2p`). `RateController::on_send_stall` con `STALL_DECREASE_FACTOR` 0,85 e
+  tetto 0,95. `AdaptiveQuality`: discesa dopo 6 s, risalita dopo 20 s e mai prima di 30 s dall'ultimo cambio.
+- P2P: riga «Rete in affanno … svuotamenti, frame saltati …» anche senza overflow; `p2pViaRelay` nell'HUD (dalla
+  `linkStats` del client); `RemoteSession.maybeProbeLan`: in P2P prova l'indirizzo LAN (1,5 s) ogni 20 s (raddoppia a
+  ogni ritorno fallito, max 5 min) e, se risponde, `handleDisconnect(immediate:)` per ricollegarsi con la LAN prima.
+- Diagnosi: `caps::HOST_LOG`, `ControlCommand::SendLog` (13), `Message::HostLog` (kind 16, pezzi da 1000 byte, max
+  128, ognuno due volte); `PhantomHostSession` tiene le ultime 400 righe di log e risponde da sé a `SEND_LOG`; l'iPhone
+  aspetta 4 s e poi prende il log parziale. File di testo condiviso con `UIActivityViewController`.
+- Da guardare nei test della 1.5.0: niente più minuti di «invii falliti»; meno «Rete in affanno» e meno keyframe in
+  LAN; cambi di risoluzione rari; in P2P «diretto» o «relay» nell'HUD e ritorno in LAN a casa; la diagnosi deve
+  contenere il log del Redmi. Prova da 5G fuori casa. Pulizia della CI: lanciare `tools/archive-legacy.ps1` (vedi
+  sotto) dopo il commit della 1.5.0.
 
 ## Esito dei test 1.3.3 (23/11) e risposta della 1.4.0
 
@@ -226,6 +280,16 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 «sessione (apertura e chiusura)»).
 
 ## Uncommitted changes
+
+**v1.5.0** (base: v1.4.0 = commit `172d01d`). Consegnata come `phantom-v1.5.0.diff` + messaggio di commit (seconda
+versione del 24/11 sera, che comprende la prima più le aggiunte dopo i test del giorno); l'utente
+applica con `git apply --3way` e fa il commit a suo nome. Dopo il commit, per la CI pulita:
+`powershell -NoProfile -ExecutionPolicy Bypass -File tools/archive-legacy.ps1` (crea e pusha `archive/legacy-f0`,
+poi toglie da `main` modulo, sonda, strumenti della Fase 0 e i workflow `android-f0.yml`/`inspect-scrcpy*.yml`).
+Verificato nel container: fmt, clippy `-D warnings`, `cargo test --workspace --release` (core 63 + e2e 10, FFI 17,
+QUIC 5), `cargo doc -D warnings`, binding Kotlin e Swift rigenerati (nomi usati in Swift controllati), `kotlinc` di
+`main` + test, 34 test JVM, Swift senza errori di sintassi (tree-sitter). La compilazione Swift vera è la CI `ios.yml`.
+
 
 **v1.4.0** (base: v1.3.3 = commit `76144e0`). Consegnata come patch. File toccati: `core/crates/phantom-quic`
 (`HANDSHAKE_TIMEOUT`, `LinkStats`, nuovo test con proxy UDP), `core/crates/phantom-p2p` (`HANDSHAKE_TIMEOUT`,

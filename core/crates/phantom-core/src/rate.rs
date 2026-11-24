@@ -63,6 +63,12 @@ pub const CEILING_PROBE_EVERY_US: u64 = 4_000_000;
 pub const CEILING_PROBE_MAX_US: u64 = 32_000_000;
 /// Di quanto si rialza.
 pub const CEILING_PROBE_FACTOR: f64 = 1.10;
+/// Taglio del bitrate per uno svuotamento della coda dell'host (stallo del collegamento). Più dolce di quello per
+/// congestione: nei test 1.4.0 gli stalli erano soprattutto blocchi brevi della radio, non mancanza di banda, e con
+/// 0,75 il bitrate rimbalzava fra 3 e 14 Mbit/s facendo cambiare risoluzione di continuo.
+pub const STALL_DECREASE_FACTOR: f64 = 0.85;
+/// Tetto dopo uno stallo, rispetto al bitrate di prima.
+pub const STALL_CEILING_FACTOR: f64 = 0.95;
 /// Il tetto si dimentica dopo questo tempo senza congestioni, ma mai prima di due intervalli di sonda (µs).
 pub const CEILING_FORGET_US: u64 = 60_000_000;
 
@@ -228,10 +234,24 @@ impl RateController {
     /// coda invece di provocare un keyframe ogni pochi secondi. La velocità di consegna non si usa: misurata durante
     /// uno stallo è vicina a zero e taglierebbe troppo.
     pub fn on_send_stall(&mut self, now_us: u64) -> Verdict {
-        let rx = self.last_rx_rate_bps.take();
-        let v = self.apply(now_us, Verdict::Congested);
-        self.last_rx_rate_bps = rx;
-        v
+        self.last_verdict = Verdict::Congested;
+        self.phase = Phase::Steady;
+        let since_decrease = self.last_decrease_us.map(|t| now_us.saturating_sub(t));
+        if since_decrease.is_none_or(|d| d >= DECREASE_GAP_US) {
+            let next =
+                ((self.bitrate_bps as f64 * STALL_DECREASE_FACTOR) as u64).max(self.cfg.min_bps).min(self.bitrate_bps);
+            if next < self.bitrate_bps {
+                self.decreases += 1;
+            }
+            let ceiling = ((self.bitrate_bps as f64 * STALL_CEILING_FACTOR) as u64).max(next).min(self.cfg.max_bps);
+            let probe_every_us =
+                self.ceiling.map_or(CEILING_PROBE_EVERY_US, |c| (c.probe_every_us * 2).min(CEILING_PROBE_MAX_US));
+            self.ceiling =
+                Some(Ceiling { bps: ceiling, last_move_us: now_us, last_congestion_us: now_us, probe_every_us });
+            self.bitrate_bps = next;
+            self.last_decrease_us = Some(now_us);
+        }
+        Verdict::Congested
     }
 
     /// Elabora una statistica del client (contatori cumulativi). `now_us` è l'orologio dell'host.
@@ -613,15 +633,15 @@ mod tests {
     fn send_stall_cuts_and_sets_a_ceiling() {
         let mut c = RateController::new(RateConfig { start_bps: 14_000_000, min_bps: 3_000_000, max_bps: 32_000_000 });
         assert_eq!(c.on_send_stall(1_000_000), Verdict::Congested);
-        assert_eq!(c.bitrate_bps(), 10_500_000, "passo fisso, non la velocità di consegna");
-        assert_eq!(c.ceiling_bps(), Some(12_600_000));
+        assert_eq!(c.bitrate_bps(), 11_900_000, "passo fisso e dolce, non la velocità di consegna");
+        assert_eq!(c.ceiling_bps(), Some(13_300_000));
         assert_eq!(c.phase(), Phase::Steady);
         // un secondo stallo subito dopo non taglia di nuovo (la coda ha bisogno di tempo per svuotarsi)
         c.on_send_stall(1_100_000);
-        assert_eq!(c.bitrate_bps(), 10_500_000);
+        assert_eq!(c.bitrate_bps(), 11_900_000);
         // uno stallo più tardi taglia ancora e allontana la sonda
         c.on_send_stall(1_500_000);
-        assert_eq!(c.bitrate_bps(), 7_875_000);
+        assert_eq!(c.bitrate_bps(), 10_115_000);
         assert_eq!(c.decreases(), 2);
     }
 
@@ -633,7 +653,7 @@ mod tests {
         f.feed(&mut c, 12, 0, 2_000, 200_000); // finestra di stallo: quasi niente consegnato
         let before = c.bitrate_bps();
         c.on_send_stall(f.t + 1);
-        assert_eq!(c.bitrate_bps(), (before as f64 * DECREASE_FACTOR) as u64);
+        assert_eq!(c.bitrate_bps(), (before as f64 * STALL_DECREASE_FACTOR) as u64);
         assert_eq!(c.last_rx_rate_bps(), Some(200_000), "la misura resta per le statistiche");
     }
 

@@ -366,11 +366,12 @@ fn new_runtime() -> Result<Runtime, QuicError> {
 
 /// Byte di datagrammi in uscita che QUIC tiene in coda prima di scartare i più vecchi.
 ///
-/// Prima era 1 MiB: a 12 Mbit/s sono circa 0,7 s di video che possono aspettare in coda sul telefono, con la latenza
-/// che sale e il controllo del bitrate che se ne accorge tardi. 512 KiB contengono ancora un keyframe 1080p ad alto
-/// bitrate (se la coda fosse più corta del keyframe, QUIC ne butterebbe via l'inizio appena spedito), ma dimezzano la
-/// coda possibile. Il resto lo fa BBR, che non svuota la finestra a ogni perdita casuale del Wi-Fi.
-pub const DATAGRAM_SEND_BUFFER: usize = 512 * 1024;
+/// Storia: 1 MiB, poi 512 KiB per non lasciare crescere la latenza. Da quando c'è lo scarto alla sorgente
+/// (`phantom_core::pacing`) la coda la governa l'host con una soglia a tempo, quindi questo è solo il tetto fisico.
+/// In LAN la soglia è ~600 ms di video (circa 1 MB a 14 Mbit/s): nei test 1.4.0 gli stalli del Wi-Fi riempivano
+/// 512 KiB in ~300 ms e ogni stallo diventava frame buttati più un keyframe, mentre a stallo finito la radio
+/// smaltisce l'arretrato in pochi millisecondi. Deve restare più grande di un keyframe 1080p (vedi HANDOFF).
+pub const DATAGRAM_SEND_BUFFER: usize = 2 * 1024 * 1024;
 
 /// Tempo massimo per completare l'handshake di una connessione in arrivo. È separato dall'attesa di una nuova
 /// connessione (`accept(timeout)`, di solito poche centinaia di ms): prima si usava lo stesso timeout anche per

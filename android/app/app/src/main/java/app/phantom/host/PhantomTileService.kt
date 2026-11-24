@@ -7,8 +7,6 @@ import android.os.Handler
 import android.os.Looper
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
-import app.phantom.host.stream.CaptureMode
-import app.phantom.host.stream.StreamProfile
 import java.util.Locale
 
 /**
@@ -42,25 +40,8 @@ class PhantomTileService : TileService() {
             return
         }
 
-        val prefs = getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE)
-        val modeName = prefs.getString(MainActivity.KEY_MODE, CaptureMode.ROOT.name)
-        val mode = CaptureMode.entries.firstOrNull { it.name == modeName } ?: CaptureMode.ROOT
-        val profName = prefs.getString(MainActivity.KEY_PROFILE, StreamProfile.P1080_120.name)
-        val profile = StreamProfile.entries.firstOrNull { it.name == profName } ?: StreamProfile.P1080_120
-        val preferHevc = prefs.getBoolean(MainActivity.KEY_HEVC, true)
-
-        val shizukuReady = mode == CaptureMode.SHIZUKU &&
-            app.phantom.host.root.ShizukuLauncher.status() == app.phantom.host.root.ShizukuLauncher.Status.READY
-        if (mode == CaptureMode.ROOT || shizukuReady) {
-            val intent = Intent(this, HostForegroundService::class.java).apply {
-                action = if (shizukuReady) HostForegroundService.ACTION_START_SHIZUKU else HostForegroundService.ACTION_START_ROOT
-                putExtra(HostForegroundService.EXTRA_PORT, 47800)
-                putExtra(HostForegroundService.EXTRA_PROFILE, profile.name)
-                putExtra(HostForegroundService.EXTRA_HEVC, preferHevc)
-                putExtra(HostForegroundService.EXTRA_INTRA_REFRESH, prefs.getBoolean(MainActivity.KEY_INTRA_REFRESH, false))
-            }
-            startForegroundService(intent)
-        } else {
+        // Root, o Shizuku già pronto: parte con le impostazioni salvate; altrimenti si apre l'app
+        if (HostLauncher.startFromPrefs(this) != HostLauncher.Outcome.STARTED) {
             val launch = Intent(this, MainActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             }

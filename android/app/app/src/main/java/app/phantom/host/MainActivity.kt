@@ -78,6 +78,7 @@ class MainActivity : Activity() {
     private lateinit var prof720_60Btn: TextView
     private lateinit var hevcSwitch: Switch
     private lateinit var intraSwitch: Switch
+    private lateinit var autostartSwitch: Switch
     private lateinit var dozeRow: ActionRow
 
     // Diagnostics card (chiusa di default)
@@ -102,6 +103,7 @@ class MainActivity : Activity() {
     private var selectedProfile = StreamProfile.P1080_120
     private var preferHevc = true
     private var intraRefresh = false
+    private var autostart = false
     private var customRemoteHost = ""
     private var diagnosticsExpanded = false
     private var lastQrUri = ""
@@ -421,6 +423,44 @@ class MainActivity : Activity() {
         intraRow.addView(intraSwitch)
         cfgCard.addView(intraRow)
 
+        // Avvio automatico all'accensione e dopo un aggiornamento
+        val autoRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, px(12), 0, 0)
+        }
+        val autoTextCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = px(12)
+            }
+        }
+        autoTextCol.addView(
+            TextView(this).apply {
+                text = "Avvio automatico"
+                textSize = 15f
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                setTextColor(theme.textPrimary)
+            },
+        )
+        autoTextCol.addView(
+            TextView(this).apply {
+                text = "All'accensione e dopo un aggiornamento: Root sempre, Shizuku se è attivo; altrimenti una notifica"
+                textSize = 12f
+                setTextColor(theme.textSecondary)
+            },
+        )
+        autostartSwitch = Switch(this).apply {
+            isChecked = autostart
+            setOnCheckedChangeListener { _, checked ->
+                autostart = checked
+                savePreferences()
+            }
+        }
+        autoRow.addView(autoTextCol)
+        autoRow.addView(autostartSwitch)
+        cfgCard.addView(autoRow)
+
         cfgCard.addView(divider())
 
         // Riga Doze / risparmio batteria
@@ -552,7 +592,7 @@ class MainActivity : Activity() {
         val header = buildString {
             appendLine("Phantom $version · ${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
             appendLine("SoC: ${if (Build.VERSION.SDK_INT >= 31) Build.SOC_MODEL else Build.HARDWARE} · ABI: ${Build.SUPPORTED_ABIS.joinToString()}")
-            appendLine("Modalità: $selectedMode · profilo: ${selectedProfile.label} · HEVC: $preferHevc · intra-refresh: $intraRefresh")
+            appendLine("Modalità: $selectedMode · profilo: ${selectedProfile.label} · HEVC: $preferHevc · intra-refresh: $intraRefresh · avvio automatico: $autostart")
             appendLine("Shizuku: ${ShizukuLauncher.status().label} · Accessibilità: ${PhantomAccessibilityService.isEnabled(this@MainActivity)}")
             appendLine("Stato: ${s.statusText} · ${s.thermalLabel}")
             appendLine("----")
@@ -1166,6 +1206,7 @@ class MainActivity : Activity() {
         selectedProfile = StreamProfile.entries.firstOrNull { it.name == profName } ?: StreamProfile.P1080_120
         preferHevc = p.getBoolean(KEY_HEVC, true)
         intraRefresh = p.getBoolean(KEY_INTRA_REFRESH, false)
+        autostart = p.getBoolean(KEY_AUTOSTART, false)
         customRemoteHost = p.getString(KEY_REMOTE_HOST, "").orEmpty().trim()
     }
 
@@ -1175,6 +1216,7 @@ class MainActivity : Activity() {
             .putString(KEY_PROFILE, selectedProfile.name)
             .putBoolean(KEY_HEVC, preferHevc)
             .putBoolean(KEY_INTRA_REFRESH, intraRefresh)
+            .putBoolean(KEY_AUTOSTART, autostart)
             .putString(KEY_REMOTE_HOST, customRemoteHost)
             .apply()
     }
@@ -1276,6 +1318,7 @@ class MainActivity : Activity() {
         internal const val KEY_PROFILE = "profile"
         internal const val KEY_HEVC = "hevc"
         internal const val KEY_INTRA_REFRESH = "intra_refresh"
+        internal const val KEY_AUTOSTART = "autostart"
         internal const val KEY_REMOTE_HOST = "remote_host"
 
         private const val REQ_MEDIA_PROJECTION = 1001

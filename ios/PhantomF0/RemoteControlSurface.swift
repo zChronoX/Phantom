@@ -329,6 +329,9 @@ struct RemoteSessionView: View {
     /// Lato della HUD: «trailing» (destra, predefinito) o «leading» (sinistra). Ricordato tra le sessioni.
     @AppStorage("hudEdge") private var hudEdgeRaw = "trailing"
     @GestureState private var panelDrag: CGFloat = 0
+    /// File della diagnosi pronto da condividere.
+    @State private var diagnosticsFile: SharedFile?
+    @State private var preparingDiagnostics = false
     @State private var keyboardVisible = false
     @State private var toggleKeyboardToken = 0
     @State private var resetTouchesToken = 0
@@ -378,6 +381,9 @@ struct RemoteSessionView: View {
         .toolbar(.hidden, for: .navigationBar)
         .statusBarHidden()
         .persistentSystemOverlays(.hidden)
+        .sheet(item: $diagnosticsFile) { file in
+            ActivityShareSheet(items: [file.url])
+        }
         .onAppear { begin() }
         .onDisappear { end() }
         .onChange(of: scenePhase) { _, phase in
@@ -567,13 +573,16 @@ struct RemoteSessionView: View {
 
     /// Pannello laterale: riepilogo, tasti in griglia, telemetria, lato della HUD e chiusura della sessione.
     private func sidePanel(maxHeight: CGFloat, width: CGFloat) -> some View {
+        // Il pannello è alto quanto il contenuto e diventa scorrevole solo se non ci sta (in orizzontale). Prima un
+        // `.frame(maxHeight:)` flessibile gli faceva prendere quasi tutta l'altezza dello schermo, con i controlli al
+        // centro e tanto spazio vuoto sopra e sotto.
         ViewThatFits(in: .vertical) {
             panelContent
+                .fixedSize(horizontal: false, vertical: true)
             ScrollView(showsIndicators: false) { panelContent }
+                .frame(height: maxHeight)
         }
         .frame(width: width)
-        // In verticale il contenuto ci sta e il pannello è alto quanto serve; in orizzontale diventa scorrevole.
-        .frame(maxHeight: maxHeight)
         .phantomGlassCard(cornerRadius: 26, overVideo: true)
         .padding(hudOnLeft ? Edge.Set.leading : Edge.Set.trailing, 8)
     }
@@ -634,6 +643,18 @@ struct RemoteSessionView: View {
                 controlButton("Risveglia", systemImage: "power") {
                     session.sendControl(.wakeScreen)
                 }
+                controlButton(preparingDiagnostics ? "Preparo…" : "Diagnosi", systemImage: "stethoscope") {
+                    guard !preparingDiagnostics else { return }
+                    preparingDiagnostics = true
+                    session.collectDiagnostics(hudLines: [hudSummaryLine] + hudTelemetryLines) { url in
+                        preparingDiagnostics = false
+                        if let url = url { diagnosticsFile = SharedFile(url: url) }
+                    }
+                }
+                controlButton(hudOnLeft ? "A destra" : "A sinistra",
+                              systemImage: hudOnLeft ? "arrow.right.to.line" : "arrow.left.to.line") {
+                    withAnimation(hudAnimation) { hudEdgeRaw = hudOnLeft ? "trailing" : "leading" }
+                }
             }
 
             if case .localQuicLoopback = mode {
@@ -641,10 +662,10 @@ struct RemoteSessionView: View {
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.white.opacity(0.7))
             } else if session.metrics.connected {
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 2) {
                     ForEach(Array(hudTelemetryLines.enumerated()), id: \.offset) { _, line in
                         Text(line)
-                            .font(.caption2.monospacedDigit())
+                            .font(.system(size: 10.5).monospacedDigit())
                             .foregroundStyle(.white.opacity(0.72))
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -652,38 +673,31 @@ struct RemoteSessionView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            HStack(spacing: 8) {
-                controlButton(hudOnLeft ? "HUD a destra" : "HUD a sinistra",
-                              systemImage: hudOnLeft ? "arrow.right.to.line" : "arrow.left.to.line") {
-                    withAnimation(hudAnimation) { hudEdgeRaw = hudOnLeft ? "trailing" : "leading" }
-                }
-                Button(role: .destructive) {
-                    end()
-                    dismiss()
-                } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: "xmark")
-                            .font(.footnote.weight(.semibold))
-                        Text("Termina")
-                            .font(.caption2.weight(.medium))
-                    }
+            Button(role: .destructive) {
+                end()
+                dismiss()
+            } label: {
+                Label("Termina la sessione", systemImage: "xmark")
+                    .font(.footnote.weight(.semibold))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 7)
+                    .padding(.vertical, 9)
                     .background(Color.red.opacity(0.42), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                }
-                .accessibilityLabel("Termina la sessione")
             }
         }
         .foregroundStyle(.white)
-        .padding(14)
+        .padding(12)
     }
 
     private var hudSummaryLine: String {
         let m = session.metrics
         guard m.connected else { return session.statusText }
         let rtt = m.rttMs.map { String(format: "%.0f ms", $0) } ?? "–"
-        let prefix = m.endpointLabel.isEmpty ? "" : "\(m.endpointLabel) · "
+        var prefix = m.endpointLabel.isEmpty ? "" : "\(m.endpointLabel) · "
+        if let relay = m.p2pViaRelay {
+            // in P2P si vede se il percorso è diretto o passa dal relay (più lento, bitrate più basso)
+            prefix += relay ? "relay · " : "diretto · "
+        }
         return String(format: "%@%.0f fps · %@", prefix, m.fps, rtt)
     }
 
@@ -856,4 +870,22 @@ private final class GamepadBridge {
             self?.handler?(code, pressed)
         }
     }
+}
+
+
+/// File da condividere con il foglio di sistema (la diagnosi).
+struct SharedFile: Identifiable {
+    let url: URL
+    var id: String { url.path }
+}
+
+/// Foglio di condivisione di sistema (AirDrop, Messaggi, File, Mail…).
+struct ActivityShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }

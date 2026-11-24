@@ -144,6 +144,10 @@ object RootHostMain {
                     RemoteControlCommand.VOLUME_UP -> injector.injectKeyCode(KeyEvent.KEYCODE_VOLUME_UP)
                     RemoteControlCommand.VOLUME_DOWN -> injector.injectKeyCode(KeyEvent.KEYCODE_VOLUME_DOWN)
                     RemoteControlCommand.SCREENSHOT -> injector.injectKeyCode(KeyEvent.KEYCODE_SYSRQ)
+                    // gestito dalla sessione stessa (log per la diagnosi): qui non arriva
+                    RemoteControlCommand.SEND_LOG -> Unit
+                    // la pausa del video la gestiscono il core e la sessione: qui non arriva
+                    RemoteControlCommand.PAUSE_VIDEO, RemoteControlCommand.RESUME_VIDEO -> Unit
                 }
             },
             onClientConnected = {

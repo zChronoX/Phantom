@@ -210,6 +210,12 @@ pub enum RemoteControlCommand {
     VolumeDown,
     /// Screenshot.
     Screenshot,
+    /// Chiede all'host il suo log recente per la diagnosi.
+    SendLog,
+    /// Il client è in background: niente video (meglio [`PhantomClient::video_pause`], che controlla l'host).
+    PauseVideo,
+    /// Il client è tornato in primo piano: il video riparte.
+    ResumeVideo,
 }
 
 impl From<RemoteControlCommand> for ProtoControlCommand {
@@ -227,6 +233,9 @@ impl From<RemoteControlCommand> for ProtoControlCommand {
             RemoteControlCommand::VolumeUp => ProtoControlCommand::VolumeUp,
             RemoteControlCommand::VolumeDown => ProtoControlCommand::VolumeDown,
             RemoteControlCommand::Screenshot => ProtoControlCommand::Screenshot,
+            RemoteControlCommand::SendLog => ProtoControlCommand::SendLog,
+            RemoteControlCommand::PauseVideo => ProtoControlCommand::PauseVideo,
+            RemoteControlCommand::ResumeVideo => ProtoControlCommand::ResumeVideo,
         }
     }
 }
@@ -246,6 +255,9 @@ impl From<ProtoControlCommand> for RemoteControlCommand {
             ProtoControlCommand::VolumeUp => RemoteControlCommand::VolumeUp,
             ProtoControlCommand::VolumeDown => RemoteControlCommand::VolumeDown,
             ProtoControlCommand::Screenshot => RemoteControlCommand::Screenshot,
+            ProtoControlCommand::SendLog => RemoteControlCommand::SendLog,
+            ProtoControlCommand::PauseVideo => RemoteControlCommand::PauseVideo,
+            ProtoControlCommand::ResumeVideo => RemoteControlCommand::ResumeVideo,
         }
     }
 }
@@ -299,6 +311,10 @@ pub enum Capability {
     HostReport,
     /// Tasti di sistema come comandi di controllo.
     SystemKeys,
+    /// Log dell'host su richiesta per la diagnosi.
+    HostLog,
+    /// Pausa del video mentre il client è in background.
+    VideoPause,
 }
 
 impl Capability {
@@ -315,6 +331,8 @@ impl Capability {
             Capability::ScreenPower => caps::SCREEN_POWER,
             Capability::HostReport => caps::HOST_REPORT,
             Capability::SystemKeys => caps::SYSTEM_KEYS,
+            Capability::HostLog => caps::HOST_LOG,
+            Capability::VideoPause => caps::VIDEO_PAUSE,
         }
     }
 }
@@ -469,8 +487,14 @@ pub struct FrameSendReport {
     pub queue_overflows: u32,
     /// Datagrammi rifiutati dal trasporto (connessione chiusa, troppo grandi, datagrammi non supportati).
     pub send_errors: u32,
+    /// Di cui rifiutati perché più grandi del massimo attuale (MTU scesa a metà frame).
+    pub too_large: u32,
+    /// Il frame ha fatto partire uno svuotamento della coda (stallo del collegamento).
+    pub drain_started: bool,
     /// Il frame non è stato spedito: coda di invio troppo piena, o si aspetta il keyframe dopo uno svuotamento.
     pub skipped: bool,
+    /// Il frame non è stato spedito perché il client è in background (pausa del video): non è un problema di rete.
+    pub paused: bool,
     /// L'encoder deve produrre un keyframe adesso (`requestSyncFrame`).
     pub request_keyframe: bool,
 }
@@ -645,6 +669,18 @@ impl PhantomHost {
         lock(&self.inner).host.wants_keyframe(now_us)
     }
 
+    /// Frammenti dati per ogni frammento di parità adesso (0 = parità spenta): con perdite sparse e coda bassa il
+    /// gruppo si stringe (da 10 a 5 o 3), con la congestione torna largo.
+    pub fn fec_group(&self) -> u16 {
+        lock(&self.inner).host.fec_group()
+    }
+
+    /// `true` se il client è in background e il video non va mandato: l'app può sospendere l'encoder finché resta
+    /// così. Quando la pausa finisce (ripresa del client o scadenza) [`PhantomHost::wants_keyframe`] torna `true`.
+    pub fn video_paused(&self, now_us: u64) -> bool {
+        lock(&self.inner).host.video_paused(now_us)
+    }
+
     /// Spedisce un frame già codificato. `key` dice se l'encoder ha prodotto un keyframe, `capture_ts_us` è l'istante
     /// di cattura sull'orologio dell'host. Restituisce i datagrammi da mandare al client.
     pub fn send_frame(&self, key: bool, capture_ts_us: u64, data: Vec<u8>) -> Vec<Vec<u8>> {
@@ -674,19 +710,34 @@ impl PhantomHost {
             bytes: 0,
             queue_overflows: 0,
             send_errors: 0,
+            too_large: 0,
+            drain_started: false,
             skipped: false,
+            paused: false,
             request_keyframe: false,
         };
-        let queued = SEND_BUFFER_BYTES.saturating_sub(connection.send_buffer_space());
+        let capacity = connection.send_buffer_capacity();
+        let queued = capacity.saturating_sub(connection.send_buffer_space());
         {
             let mut g = lock(&self.inner);
+            if g.host.video_paused(capture_ts_us) {
+                // client in background: il frame non parte e la coda non conta (niente stalli né keyframe)
+                report.paused = true;
+                return report;
+            }
+            // frammenti sempre entro il massimo che il trasporto accetta adesso (la MTU cambia durante la sessione)
+            if let Some(max) = connection.max_datagram_size() {
+                g.host.limit_frag_size(video_payload_for_datagram(max));
+            }
             let target = g.host.target_bitrate_bps();
-            let limit = g.dropper.limit_bytes(target, SEND_BUFFER_BYTES * 4 / 5);
+            let window_ms = if connection.is_p2p() { P2P_QUEUE_WINDOW_MS } else { LAN_QUEUE_WINDOW_MS };
+            let limit = g.dropper.limit_bytes(target, window_ms, capacity * 4 / 5);
             let drains = g.dropper.drains();
             let outcome = g.dropper.decide(queued, limit, key);
             if g.dropper.drains() > drains {
                 // la coda è andata oltre la soglia: è congestione anche se il client non l'ha ancora vista
                 g.host.on_send_stall(capture_ts_us);
+                report.drain_started = true;
             }
             if outcome.request_keyframe {
                 g.host.request_keyframe();
@@ -707,6 +758,9 @@ impl PhantomHost {
             }
             if !outcome.sent {
                 report.send_errors += 1;
+                if outcome.too_large {
+                    report.too_large += 1;
+                }
             }
         }
         let mut g = lock(&self.inner);
@@ -719,6 +773,7 @@ impl PhantomHost {
             g.dropper.on_queue_overflow();
             if g.dropper.drains() > drains {
                 g.host.on_send_stall(capture_ts_us);
+                report.drain_started = true;
             }
         }
         report.request_keyframe = g.host.wants_keyframe(capture_ts_us);
@@ -813,6 +868,12 @@ impl PhantomHost {
         lock(&self.inner).host.take_clipboard()
     }
 
+    /// Prepara il log dell'host per il client che l'ha chiesto (`RemoteControlCommand::SendLog`): restituisce i
+    /// datagrammi da spedire (pezzi da 1000 byte, ognuno due volte; si tiene la parte più recente se è lungo).
+    pub fn send_log(&self, text: String) -> Vec<Vec<u8>> {
+        lock(&self.inner).host.send_log(&text)
+    }
+
     /// Il più vecchio comando di controllo remoto ricevuto dal client (es. risveglio o schermo spento).
     pub fn take_control(&self) -> Option<RemoteControlCommand> {
         lock(&self.inner).host.take_control().map(RemoteControlCommand::from)
@@ -899,6 +960,16 @@ impl PhantomClient {
         lock(&self.inner).send_clipboard(&text)
     }
 
+    /// Il log dell'host chiesto con [`RemoteControlCommand::SendLog`]: completo appena arrivano tutti i pezzi, oppure,
+    /// con `partial`, quello che c'è (i pezzi mancanti sono segnati). Una volta preso non torna più.
+    pub fn take_host_log(&self, partial: bool) -> Option<HostLogText> {
+        lock(&self.inner).take_host_log(partial).map(|l| HostLogText {
+            text: l.text,
+            received: l.received,
+            total: l.total,
+        })
+    }
+
     /// Ultimo testo degli appunti ricevuto dall'host, se presente.
     pub fn take_clipboard(&self) -> Option<String> {
         lock(&self.inner).take_clipboard()
@@ -907,6 +978,13 @@ impl PhantomClient {
     /// Spedisce un comando di controllo remoto all'host (risveglio / spegnimento display fisico).
     pub fn send_control(&self, command: RemoteControlCommand) -> Option<Vec<u8>> {
         lock(&self.inner).send_control(command.into())
+    }
+
+    /// Chiede all'host di fermare (`true`) o far ripartire (`false`) il video, per esempio quando l'app va in
+    /// background. La pausa scade dopo 3 s: va ripetuta circa ogni secondo finché serve. `None` se la sessione non è
+    /// aperta o l'host non conosce la funzione.
+    pub fn video_pause(&self, paused: bool) -> Option<Vec<u8>> {
+        lock(&self.inner).video_pause(paused)
     }
 
     /// Spedisce un evento di tastiera all'host: `code` è il codice HID, `down` dice premuto o rilasciato. Sono eventi,
@@ -1460,7 +1538,7 @@ impl QuicConnection {
     /// il bitrate).
     pub fn queued_send_bytes(&self) -> u64 {
         let space = self.send_buffer_space();
-        SEND_BUFFER_BYTES.saturating_sub(space) as u64
+        self.send_buffer_capacity().saturating_sub(space) as u64
     }
 
     /// Statistiche del percorso QUIC: RTT, finestra di congestione, pacchetti spediti/persi, eventi di congestione
@@ -1499,6 +1577,17 @@ impl QuicConnection {
     }
 }
 
+/// Log dell'host ricomposto dal client (vedi [`PhantomClient::take_host_log`]).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct HostLogText {
+    /// Testo (i pezzi mancanti sono segnati).
+    pub text: String,
+    /// Pezzi arrivati.
+    pub received: u16,
+    /// Pezzi totali.
+    pub total: u16,
+}
+
 /// Statistiche del percorso di una [`QuicConnection`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct LinkStats {
@@ -1516,16 +1605,27 @@ pub struct LinkStats {
     pub via_relay: bool,
 }
 
-/// Coda dei datagrammi in uscita impostata nei due trasporti.
-const SEND_BUFFER_BYTES: usize = phantom_quic::DATAGRAM_SEND_BUFFER;
+/// Finestra di coda prima dello scarto alla sorgente in LAN (vedi `SourceDropper::limit_bytes`).
+const LAN_QUEUE_WINDOW_MS: u64 = 600;
+/// Finestra di coda prima dello scarto alla sorgente in P2P/relay.
+const P2P_QUEUE_WINDOW_MS: u64 = 250;
 
 /// Esito di un invio contato.
 struct SendOutcome {
     sent: bool,
     displaced_older: bool,
+    too_large: bool,
 }
 
 impl QuicConnection {
+    /// Capacità della coda dei datagrammi in uscita di questo trasporto (byte).
+    fn send_buffer_capacity(&self) -> usize {
+        match &self.link {
+            ConnectionBackend::Direct(_) => phantom_quic::DATAGRAM_SEND_BUFFER,
+            ConnectionBackend::P2p(_) => phantom_p2p::DATAGRAM_SEND_BUFFER,
+        }
+    }
+
     fn send_buffer_space(&self) -> usize {
         match &self.link {
             ConnectionBackend::Direct(link) => link.datagram_send_buffer_space(),
@@ -1537,11 +1637,17 @@ impl QuicConnection {
     /// datagrammi più vecchi ancora in coda.
     fn send_counted(&self, datagram: &[u8]) -> SendOutcome {
         let displaced_older = datagram.len() > self.send_buffer_space();
-        let sent = match &self.link {
-            ConnectionBackend::Direct(link) => link.send_datagram(datagram).is_ok(),
-            ConnectionBackend::P2p(link) => link.send_datagram(datagram).is_ok(),
+        let (sent, too_large) = match &self.link {
+            ConnectionBackend::Direct(link) => match link.send_datagram(datagram) {
+                Ok(()) => (true, false),
+                Err(e) => (false, matches!(e, phantom_quic::QuicError::DatagramTooLarge { .. })),
+            },
+            ConnectionBackend::P2p(link) => match link.send_datagram(datagram) {
+                Ok(()) => (true, false),
+                Err(e) => (false, matches!(e, phantom_p2p::P2pError::DatagramTooLarge { .. })),
+            },
         };
-        SendOutcome { sent, displaced_older: displaced_older && sent }
+        SendOutcome { sent, displaced_older: displaced_older && sent, too_large }
     }
 }
 
@@ -1590,6 +1696,33 @@ mod tests {
         assert!(client.touch_tick(1, fingers).is_some(), "dopo l'apertura il tocco parte");
         assert!(client.send_key(1, 4, true).is_some(), "dopo l'apertura la tastiera parte");
         assert!(!host.send_frame(true, 1, vec![1, 2, 3]).is_empty(), "dopo l'apertura il video parte");
+    }
+
+    /// Regressione 1.4.0: la MTU di QUIC scende a metà sessione (sospetto «black hole» dopo una raffica di perdite) e
+    /// i frammenti calcolati all'apertura diventano troppo grandi. Ora la dimensione segue il massimo attuale, frame
+    /// per frame, e il client ricompone i frame anche quando cambia.
+    #[test]
+    fn fragment_size_follows_the_current_transport_limit() {
+        let host = PhantomHost::new(default_session_settings());
+        let client = PhantomClient::new(default_session_settings());
+        open(&host, &client);
+        let mut frames = Vec::new();
+        for (i, limit) in [1_400u32, 1_162, 600, 1_162, 1_400].into_iter().enumerate() {
+            let payload = video_payload_for_datagram(limit);
+            lock(&host.inner).host.limit_frag_size(payload);
+            let t = 1_000_000 + i as u64 * 16_000;
+            let key = i == 0;
+            let datagrams = host.send_frame(key, t + HOST_OFFSET_US, vec![0x5A; 20_000]);
+            assert!(
+                datagrams.iter().all(|d| d.len() <= limit as usize),
+                "frame {i}: datagrammi entro {limit} byte (max {:?})",
+                datagrams.iter().map(Vec::len).max()
+            );
+            pump(&host, &client, t, datagrams.into_iter().map(|d| (To::Client, d)).collect());
+            frames.extend(client.take_frames());
+        }
+        assert_eq!(frames.len(), 5, "tutti i frame ricomposti anche con frammenti di dimensione diversa");
+        assert!(frames.iter().all(|f| f.data.len() == 20_000 && f.data.iter().all(|&b| b == 0x5A)));
     }
 
     #[test]

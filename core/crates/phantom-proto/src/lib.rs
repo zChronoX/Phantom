@@ -44,6 +44,10 @@ pub const AUDIO_HEADER_LEN: usize = 22;
 pub const MAX_AUDIO_PAYLOAD: usize = MAX_DATAGRAM - HEADER_LEN - AUDIO_HEADER_LEN;
 /// Lunghezza massima del testo UTF-8 negli appunti condivisi.
 pub const MAX_CLIPBOARD_BYTES: usize = 1024;
+/// Byte di testo per pezzo di [`Message::HostLog`] (sta in un datagramma anche con la MTU minima).
+pub const MAX_HOST_LOG_CHUNK: usize = 1000;
+/// Pezzi massimi di un log dell'host (circa 128 KB).
+pub const MAX_HOST_LOG_PARTS: u16 = 128;
 
 /// Tipo di messaggio.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -79,6 +83,8 @@ pub enum Kind {
     Control = 14,
     /// Rapporto periodico dell'host su encoder e coda di invio (host → client).
     HostReport = 15,
+    /// Un pezzo del log dell'host, chiesto dal client per la diagnosi (host → client).
+    HostLog = 16,
 }
 
 impl Kind {
@@ -99,6 +105,7 @@ impl Kind {
             13 => Kind::Clipboard,
             14 => Kind::Control,
             15 => Kind::HostReport,
+            16 => Kind::HostLog,
             _ => return None,
         })
     }
@@ -217,7 +224,18 @@ pub enum ControlCommand {
     VolumeDown = 11,
     /// Screenshot.
     Screenshot = 12,
+    /// Chiede all'host il suo log recente per la diagnosi (risponde con [`Message::HostLog`]).
+    SendLog = 13,
+    /// Il client è in background: niente video finché non torna (vale per [`VIDEO_PAUSE_LEASE_US`], il client lo
+    /// ripete finché resta in background, così una pausa non resta appesa se il client sparisce).
+    PauseVideo = 14,
+    /// Il client è tornato in primo piano: il video riparte subito da un keyframe.
+    ResumeVideo = 15,
 }
+
+/// Durata di una richiesta [`ControlCommand::PauseVideo`]: se il client non la rinnova entro questo tempo (datagramma
+/// perso, app sospesa) l'host riprende da solo a mandare il video.
+pub const VIDEO_PAUSE_LEASE_US: u64 = 3_000_000;
 
 impl ControlCommand {
     /// Comando dal suo valore sul filo.
@@ -235,6 +253,9 @@ impl ControlCommand {
             10 => ControlCommand::VolumeUp,
             11 => ControlCommand::VolumeDown,
             12 => ControlCommand::Screenshot,
+            13 => ControlCommand::SendLog,
+            14 => ControlCommand::PauseVideo,
+            15 => ControlCommand::ResumeVideo,
             _ => return None,
         })
     }
@@ -266,6 +287,10 @@ pub mod caps {
     pub const HOST_REPORT: u32 = 1 << 9;
     /// Tasti di sistema come comandi di controllo (Indietro, Home, Recenti, Notifiche, Power, Volume, Screenshot).
     pub const SYSTEM_KEYS: u32 = 1 << 10;
+    /// Log dell'host su richiesta del client (`ControlCommand::SendLog` → `Message::HostLog`).
+    pub const HOST_LOG: u32 = 1 << 11;
+    /// Pausa del video mentre il client è in background (`ControlCommand::PauseVideo`/`ResumeVideo`).
+    pub const VIDEO_PAUSE: u32 = 1 << 12;
 }
 
 /// Motivi del messaggio [`Message::Close`].
@@ -407,6 +432,18 @@ pub enum Message<'a> {
         clip_seq: u32,
         /// Testo UTF-8 (massimo [`MAX_CLIPBOARD_BYTES`] byte).
         text: &'a str,
+    },
+    /// Un pezzo del log dell'host (host → client). I pezzi di uno stesso log hanno lo stesso `log_id`; il testo è
+    /// UTF-8 ma un pezzo può tagliare un carattere a metà, quindi si ricompone sui byte.
+    HostLog {
+        /// Identificativo del log (cresce a ogni richiesta).
+        log_id: u32,
+        /// Indice del pezzo (da 0).
+        part: u16,
+        /// Numero totale dei pezzi (da 1 a [`MAX_HOST_LOG_PARTS`]).
+        parts: u16,
+        /// Byte del pezzo (massimo [`MAX_HOST_LOG_CHUNK`]).
+        bytes: &'a [u8],
     },
     /// Comando di controllo remoto del dispositivo host (client → host).
     Control {
@@ -619,6 +656,7 @@ impl Message<'_> {
             Message::Close { .. } => Kind::Close,
             Message::Audio(_) => Kind::Audio,
             Message::Clipboard { .. } => Kind::Clipboard,
+            Message::HostLog { .. } => Kind::HostLog,
             Message::Control { .. } => Kind::Control,
             Message::HostReport(_) => Kind::HostReport,
         }
@@ -732,6 +770,17 @@ impl Message<'_> {
                 put_u32(out, *clip_seq);
                 put_u16(out, text.len() as u16);
                 out.extend_from_slice(text.as_bytes());
+            }
+            Message::HostLog { log_id, part, parts, bytes } => {
+                if bytes.len() > MAX_HOST_LOG_CHUNK || *parts == 0 || *parts > MAX_HOST_LOG_PARTS || part >= parts {
+                    out.truncate(start);
+                    return Err(DecodeError::TooLarge);
+                }
+                put_u32(out, *log_id);
+                put_u16(out, *part);
+                put_u16(out, *parts);
+                put_u16(out, bytes.len() as u16);
+                out.extend_from_slice(bytes);
             }
             Message::Control { ctrl_seq, command } => {
                 put_u32(out, *ctrl_seq);
@@ -936,6 +985,20 @@ pub fn decode(buf: &[u8]) -> Result<(Header, Message<'_>), DecodeError> {
             let text = core::str::from_utf8(raw).map_err(|_| DecodeError::BadField("clipboard utf8"))?;
             Message::Clipboard { clip_seq, text }
         }
+        Kind::HostLog => {
+            let log_id = r.u32()?;
+            let part = r.u16()?;
+            let parts = r.u16()?;
+            if parts == 0 || parts > MAX_HOST_LOG_PARTS || part >= parts {
+                return Err(DecodeError::BadField("host log part"));
+            }
+            let len = r.u16()? as usize;
+            if len > MAX_HOST_LOG_CHUNK {
+                return Err(DecodeError::BadField("host log len"));
+            }
+            let bytes = r.take(len)?;
+            Message::HostLog { log_id, part, parts, bytes }
+        }
         Kind::Control => {
             let ctrl_seq = r.u32()?;
             let command = ControlCommand::from_u8(r.u8()?).ok_or(DecodeError::BadField("control command"))?;
@@ -1111,15 +1174,16 @@ mod tests {
             payload: &[0x11, 0x90],
         }));
         roundtrip(&Message::Clipboard { clip_seq: 7, text: "ciao Phantom 🚀" });
+        roundtrip(&Message::HostLog { log_id: 3, part: 1, parts: 4, bytes: "riga del log · è".as_bytes() });
         roundtrip(&Message::Control { ctrl_seq: 3, command: ControlCommand::ScreenOff });
         roundtrip(&Message::Control { ctrl_seq: 4, command: ControlCommand::WakeScreen });
         roundtrip(&Message::Control { ctrl_seq: 5, command: ControlCommand::ScreenOn });
-        for v in 1..=12u8 {
+        for v in 1..=15u8 {
             let command = ControlCommand::from_u8(v).expect("comando noto");
             assert_eq!(command as u8, v);
             roundtrip(&Message::Control { ctrl_seq: u32::from(v), command });
         }
-        assert!(ControlCommand::from_u8(0).is_none() && ControlCommand::from_u8(13).is_none());
+        assert!(ControlCommand::from_u8(0).is_none() && ControlCommand::from_u8(16).is_none());
         roundtrip(&Message::HostReport(HostReport {
             encoder_fps_x10: 604,
             encoded_kbps: 14_250,

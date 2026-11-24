@@ -308,6 +308,46 @@ fn fec_reduces_dependence_on_retransmission() {
     assert!(with.delivered >= without.delivered, "né le consegne");
 }
 
+/// 5G o relay con perdite sparse (4% dei pacchetti) e banda che basta: con la parità fissa da 10 molti frame arrivano
+/// rotti e si aspetta un keyframe; quella adattiva stringe il gruppo e ne salva di più. Media su più seed, perché qui
+/// un keyframe perso pesa molto sul risultato di una singola prova.
+#[test]
+fn adaptive_parity_helps_on_lossy_cellular() {
+    let link = LinkConfig {
+        base_delay_us: 20_000,
+        jitter_us: 4_000,
+        loss: 0.04,
+        bandwidth_bps: Some(80_000_000),
+        queue_bytes: 1024 * 1024,
+        ..LinkConfig::ideal()
+    };
+    let average = |cfg: SessionConfig| {
+        let (mut ratio, mut keys, mut p95) = (0.0, 0, 0.0);
+        let seeds = 10..14u64;
+        let n = seeds.clone().count() as f64;
+        for seed in seeds {
+            let r = run(seed, link.clone(), link.clone(), cfg.clone(), 12);
+            ratio += r.delivered as f64 / r.sent as f64 / n;
+            keys += r.keyframe_requests;
+            p95 += pct(&r.latencies_ms, 0.95) / n;
+        }
+        (ratio, keys, p95)
+    };
+    let (fixed, fixed_keys, fixed_p95) = average(SessionConfig { adaptive_fec: false, ..SessionConfig::default() });
+    let (adaptive, adaptive_keys, adaptive_p95) = average(SessionConfig::default());
+    println!("parità fissa 1:10: consegnati {:.1}% · keyframe {fixed_keys} · p95 {fixed_p95:.1} ms", fixed * 100.0);
+    println!(
+        "parità adattiva: consegnati {:.1}% · keyframe {adaptive_keys} · p95 {adaptive_p95:.1} ms",
+        adaptive * 100.0
+    );
+    assert!(adaptive >= fixed + 0.08, "più frame consegnati ({:.1}% contro {:.1}%)", adaptive * 100.0, fixed * 100.0);
+    assert!(adaptive_keys < fixed_keys, "meno keyframe chiesti ({adaptive_keys} contro {fixed_keys})");
+    assert!(
+        adaptive_p95 <= fixed_p95 + 2.0,
+        "senza peggiorare la latenza ({adaptive_p95:.1} contro {fixed_p95:.1} ms)"
+    );
+}
+
 #[test]
 fn burst_loss_triggers_keyframe_recovery() {
     // raffiche lunghe: i NACK non bastano, il client deve chiedere keyframe e ripartire.
