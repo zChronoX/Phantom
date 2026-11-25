@@ -140,7 +140,7 @@ flowchart LR
 | `phantom-quic` | trasporto QUIC per la LAN (quinn, BBR, datagrammi RFC 9221, certificato fissato) |
 | `phantom-p2p` | trasporto P2P con iroh (NAT traversal, relay, identità persistente) |
 | `phantom-clock` | sincronizzazione degli orologi per misurare la latenza |
-| `phantom-netsim` | simulatore di rete per i test (perdite, ritardi, code) |
+| `phantom-netsim` | simulatore di rete per i test (perdite, ritardi, code) e modello del mittente QUIC (BBR) |
 | `phantom-ffi` | binding UniFFI 0.32 per Kotlin e Swift |
 
 Le scelte di progetto sono documentate negli ADR in [docs/adr/](docs/adr/).
@@ -227,11 +227,14 @@ raggiunge tramite la sua identità P2P, da qualsiasi rete. Tornati a casa la ses
 | Parametro | LAN | P2P |
 | --- | --- | --- |
 | Bitrate di partenza | 12 Mbit/s | 6 Mbit/s |
-| Bitrate minimo / massimo | 3 / 32 Mbit/s | 0,6 / 20 Mbit/s |
+| Bitrate minimo / massimo | 3 / 32 Mbit/s | 1 / 20 Mbit/s |
 | Tetto per pixel | 0,15 bit/pixel in HEVC, 0,22 in H.264 (oltre la qualità non migliora a vista) | idem |
-| Coda prima dello scarto | ~600 ms (il Wi-Fi smaltisce gli arretrati in pochi ms) | ~250 ms |
+| Coda prima dello scarto | ~600 ms (il Wi-Fi smaltisce gli arretrati in pochi ms) | ~500 ms diretto, ~250 ms via relay |
 
 Il controllo del bitrate guarda insieme perdite, ritardo di coda misurato con i ping e stalli della coda di invio.
+L'iPhone chiede di rimandare un pezzo di frame solo quando è sicuro che sia perso (è già arrivato qualcosa spedito
+dopo) e durante un blocco della rete non chiede nulla: arriverà tutto insieme. Al ritorno dal background il
+controllo di congestione del trasporto riparte per qualche secondo dal bitrate di prima, invece che da zero.
 Quando la rete si blocca l'host non accumula secondi di ritardo: salta i frame, svuota la coda e riparte da un solo
 keyframe. La HUD espansa mostra tutto quello che serve per capire come sta andando: latenza p50/p95, tempo di
 codifica, RTT, Mbit/s ricevuti e obiettivo, frame persi e saltati, keyframe, stato dell'audio e termico.

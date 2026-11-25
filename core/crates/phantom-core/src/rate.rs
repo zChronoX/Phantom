@@ -254,6 +254,18 @@ impl RateController {
         Verdict::Congested
     }
 
+    /// Come [`RateController::on_stats`], ma senza cambiare il bitrate: aggiorna solo i contatori di riferimento e la
+    /// velocità di consegna. Serve quando il giudizio sarebbe falsato: video in pausa (passano solo audio e
+    /// riempimento) o primi secondi dopo il ritorno (il trasporto sta riscoprendo la banda).
+    pub fn observe_stats(&mut self, now_us: u64, s: &Stats) -> Verdict {
+        let cur = Prev { ok: s.frames_ok, lost: s.frames_lost, bytes: s.rx_bytes, at_us: now_us };
+        let Some(prev) = self.prev.replace(cur) else { return Verdict::Hold };
+        let dt = now_us.saturating_sub(prev.at_us);
+        self.last_rx_rate_bps =
+            (dt >= MIN_RATE_WINDOW_US).then(|| u64::from(cur.bytes.wrapping_sub(prev.bytes)) * 8 * 1_000_000 / dt);
+        Verdict::Hold
+    }
+
     /// Elabora una statistica del client (contatori cumulativi). `now_us` è l'orologio dell'host.
     pub fn on_stats(&mut self, now_us: u64, s: &Stats) -> Verdict {
         let cur = Prev { ok: s.frames_ok, lost: s.frames_lost, bytes: s.rx_bytes, at_us: now_us };

@@ -1,11 +1,16 @@
 # Stato del lavoro
 
-Ultimo aggiornamento: 2026-11-24. Branch `main`, base `172d01d` (v1.4.0) più la v1.5.0 (diff consegnato).
+Ultimo aggiornamento: 2026-11-25. Branch `main`, base `f13f2a3` (v1.5.0) più la v1.6.0 (diff consegnato).
 Roadmap fino alla 2.0.0: documento di progetto «claude/PHANTOM-HANDOFF-ROADMAP.md».
 Regole di lavoro in `AGENTS.md`; ripresa in `HANDOFF.md`.
 
 ## Ultime release
 
+- **v1.6.0** (2026-11-25, comprende la 1.5.1 mai pubblicata): niente più 0 fps al ritorno dal background (risveglio
+  del telefono, encoder nuovo e minimo temporaneo del controllo di congestione), fine delle ritrasmissioni inutili e
+  delle scadenze durante i blocchi della radio, tetto agli fps in ingresso all'encoder (fine dei 240 ms di ritardo a
+  120 Hz), 5G senza bitrate bloccato al minimo, parità stabile, timer dell'iPhone adattivo. Nuovo banco di prova con
+  il trasporto modellato (`e2e_transport`).
 - **v1.5.0** (2026-11-24): frammenti video che seguono la MTU (fine dei minuti di video fermo), coda LAN da 600 ms
   per assorbire i blocchi del Wi-Fi, qualità e bitrate più stabili, ritorno automatico in LAN e indicatore
   diretto/relay in P2P, diagnosi in un tocco con il log di Android (nuovo messaggio `HostLog`), HUD compatta, README

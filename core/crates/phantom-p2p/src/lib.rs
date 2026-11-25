@@ -4,6 +4,9 @@
 //! **senza VPN esterne (niente Tailscale) e senza aprire porte sul router**: l'identità è la chiave
 //! crittografica Ed25519 persistente dell'host (`EndpointId`), autenticata automaticamente da TLS 1.3.
 
+mod floor;
+pub use floor::RampFloor;
+
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -86,6 +89,8 @@ pub fn endpoint_id_from_secret_key(secret_key: &[u8]) -> Result<String, P2pError
 pub struct P2pEndpoint {
     endpoint: Endpoint,
     online: bool,
+    /// Minimo temporaneo del controllo di congestione, condiviso con le connessioni dell'endpoint.
+    floor: Arc<RampFloor>,
     // Ultimo campo: l'endpoint viene chiuso prima del runtime Tokio.
     runtime: Arc<Runtime>,
 }
@@ -96,7 +101,8 @@ impl P2pEndpoint {
         let arr: [u8; 32] = secret_key.try_into().map_err(|_| P2pError::InvalidSecretKey)?;
         let sk = SecretKey::from_bytes(&arr);
         let runtime = new_runtime()?;
-        let tc = transport_config();
+        let floor = Arc::new(RampFloor::default());
+        let tc = transport_config(Arc::clone(&floor));
         let (endpoint, online) = runtime.block_on(async {
             let ep = Endpoint::builder(presets::N0)
                 .secret_key(sk)
@@ -108,13 +114,14 @@ impl P2pEndpoint {
             let online = !wait_online.is_zero() && tokio::time::timeout(wait_online, ep.online()).await.is_ok();
             Ok::<_, P2pError>((ep, online))
         })?;
-        Ok(Self { endpoint, online, runtime: Arc::new(runtime) })
+        Ok(Self { endpoint, online, floor, runtime: Arc::new(runtime) })
     }
 
     /// Apre un endpoint client P2P pronto per collegarsi tramite `EndpointId` (da 5G/4G o qualsiasi Wi-Fi).
     pub fn bind_client(wait_online: Duration) -> Result<Self, P2pError> {
         let runtime = new_runtime()?;
-        let tc = transport_config();
+        let floor = Arc::new(RampFloor::default());
+        let tc = transport_config(Arc::clone(&floor));
         let (endpoint, online) = runtime.block_on(async {
             let ep = Endpoint::builder(presets::N0)
                 .transport_config(tc)
@@ -124,7 +131,7 @@ impl P2pEndpoint {
             let online = !wait_online.is_zero() && tokio::time::timeout(wait_online, ep.online()).await.is_ok();
             Ok::<_, P2pError>((ep, online))
         })?;
-        Ok(Self { endpoint, online, runtime: Arc::new(runtime) })
+        Ok(Self { endpoint, online, floor, runtime: Arc::new(runtime) })
     }
 
     /// Identificatore pubblico (`EndpointId`) di questo nodo, usato dal client per raggiungerlo ovunque.
@@ -179,7 +186,7 @@ impl P2pEndpoint {
                 .map_err(|_| P2pError::Timeout)?
                 .map_err(|e| P2pError::Connection(e.to_string()))
         })?;
-        Ok(P2pLink { connection, runtime: Arc::clone(&self.runtime) })
+        Ok(P2pLink { connection, floor: Arc::clone(&self.floor), runtime: Arc::clone(&self.runtime) })
     }
 
     /// Si collega a un host remoto tramite il suo `EndpointId` (P2P diretto con hole punching o relay cifrato E2E).
@@ -197,7 +204,7 @@ impl P2pEndpoint {
                 .map_err(|_| P2pError::Timeout)?
                 .map_err(|e| P2pError::Connection(e.to_string()))
         })?;
-        Ok(P2pLink { connection, runtime: Arc::clone(&self.runtime) })
+        Ok(P2pLink { connection, floor: Arc::clone(&self.floor), runtime: Arc::clone(&self.runtime) })
     }
 
     /// Notifica a `iroh` un cambio di interfaccia di rete (es. passaggio Wi-Fi ↔ 5G/4G) per migrare i percorsi.
@@ -218,6 +225,7 @@ impl Drop for P2pEndpoint {
 #[derive(Debug)]
 pub struct P2pLink {
     connection: Connection,
+    floor: Arc<RampFloor>,
     // Ultimo campo: la connessione si chiude prima che il runtime sparisca.
     runtime: Arc<Runtime>,
 }
@@ -257,6 +265,14 @@ impl P2pLink {
     /// Massimo datagramma applicativo accettato in questo momento.
     pub fn max_datagram_size(&self) -> Option<usize> {
         self.connection.max_datagram_size()
+    }
+
+    /// Per `duration` il controllo di congestione non scende sotto il ritmo `rate_bps` (bit/s) e una finestra di
+    /// 2 × ritmo × RTT del percorso scelto (vedi [`RampFloor`]): serve al ritorno dal background, quando BBR ha
+    /// dimenticato la banda.
+    pub fn set_ramp_floor(&self, rate_bps: u64, duration: Duration) {
+        let rtt = self.connection.paths().iter().find(|p| p.is_selected()).map(|p| p.stats().rtt);
+        self.floor.set(rate_bps, rtt.unwrap_or(Duration::from_millis(60)), duration);
     }
 
     /// Statistiche del percorso scelto (RTT, finestra di congestione) e della connessione (perdite), e se il
@@ -354,12 +370,13 @@ pub struct LinkStats {
     pub via_relay: bool,
 }
 
-fn transport_config() -> QuicTransportConfig {
+fn transport_config(floor: Arc<RampFloor>) -> QuicTransportConfig {
     let mut builder = QuicTransportConfig::builder()
         .datagram_receive_buffer_size(Some(1 << 20))
         .datagram_send_buffer_size(DATAGRAM_SEND_BUFFER)
         // BBR (v3) invece di Cubic: le perdite casuali di Wi-Fi e 5G non svuotano la finestra di invio.
-        .congestion_controller_factory(Arc::new(noq_proto::congestion::Bbr3Config::default()))
+        // con un minimo temporaneo che l'app imposta al ritorno dal background (`RampFloor`)
+        .congestion_controller_factory(Arc::new(floor::FloorFactory { floor }))
         .keep_alive_interval(Duration::from_secs(3));
     if let Ok(timeout) = IdleTimeout::try_from(Duration::from_secs(15)) {
         builder = builder.max_idle_timeout(Some(timeout));
@@ -405,20 +422,26 @@ mod tests {
                 Endpoint::builder(presets::Minimal)
                     .secret_key(sk)
                     .alpns(vec![ALPN.to_vec()])
-                    .transport_config(transport_config())
+                    .transport_config(transport_config(Arc::new(RampFloor::default())))
                     .bind()
                     .await
             })
             .expect("bind minimal host");
         let port = host_ep.bound_sockets().into_iter().find(SocketAddr::is_ipv4).expect("socket ipv4").port();
         let host_addr = EndpointAddr::from(host_ep.id()).with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
-        let host = P2pEndpoint { endpoint: host_ep, online: false, runtime: Arc::new(rt_host) };
+        let host = P2pEndpoint { endpoint: host_ep, online: false, floor: Arc::default(), runtime: Arc::new(rt_host) };
 
         let rt_client = new_runtime().expect("rt client");
         let client_ep = rt_client
-            .block_on(async { Endpoint::builder(presets::Minimal).transport_config(transport_config()).bind().await })
+            .block_on(async {
+                Endpoint::builder(presets::Minimal)
+                    .transport_config(transport_config(Arc::new(RampFloor::default())))
+                    .bind()
+                    .await
+            })
             .expect("bind minimal client");
-        let client = P2pEndpoint { endpoint: client_ep, online: false, runtime: Arc::new(rt_client) };
+        let client =
+            P2pEndpoint { endpoint: client_ep, online: false, floor: Arc::default(), runtime: Arc::new(rt_client) };
 
         let (tx, rx) = std::sync::mpsc::channel();
         let acceptor = std::thread::spawn(move || {

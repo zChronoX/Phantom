@@ -207,6 +207,30 @@ class VideoEncoder private constructor(
             throw IllegalStateException("Impossibile avviare MediaCodec: ${lastError?.javaClass?.simpleName}: ${lastError?.message}", lastError)
         }
 
+        @Volatile
+        private var recoveryCapsLogged = false
+
+        /**
+         * Una volta per processo, scrive nel log i parametri «vendor» dell'encoder che servono a recuperare le perdite
+         * senza keyframe interi (LTR, riferimenti a lungo termine) e quelli di intra-refresh e QP: è il dato che manca
+         * per la prossima voce della roadmap (recupero con LTR), da leggere nella diagnosi.
+         */
+        private fun logRecoveryCapabilities(mc: MediaCodec, onLog: (String) -> Unit) {
+            if (recoveryCapsLogged || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+            recoveryCapsLogged = true
+            val params = try {
+                mc.supportedVendorParameters
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            val keys = listOf("ltr", "refresh", "qp", "low-latency", "intra", "slice")
+            val useful = params.filter { p -> keys.any { p.contains(it, ignoreCase = true) } }
+            onLog(
+                "Parametri dell'encoder ${mc.name} per il recupero (LTR, intra-refresh, QP): " +
+                    useful.joinToString(", ").ifEmpty { "nessuno" } + " · ${params.size} parametri vendor in tutto",
+            )
+        }
+
         internal fun isQualcommEncoder(name: String): Boolean =
             name.startsWith("c2.qti.", ignoreCase = true) || name.startsWith("OMX.qcom.", ignoreCase = true)
 
@@ -255,6 +279,13 @@ class VideoEncoder private constructor(
                     setInteger(MediaFormat.KEY_FRAME_RATE, actualFps)
                     setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEYFRAME_INTERVAL_SEC)
                     setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        // Lo schermo del Redmi va a 120 Hz: senza tetto il display virtuale manda fino a 120 frame al
+                        // secondo a un encoder configurato per 60, che ne regge ~70 a 864×1920. I frame in più si
+                        // accodavano: 232 ms di «codifica» nella diagnosi del 25/11. Con il tetto la sorgente scarta
+                        // quelli di troppo prima dell'encoder (come `--max-fps` di scrcpy).
+                        setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, actualFps.toFloat())
+                    }
                     if (setVbr) {
                         setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
                     }
@@ -293,6 +324,7 @@ class VideoEncoder private constructor(
                 val qpNote = if (lowLatencyHints && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) " · QP $QP_MIN–$QP_MAX" else ""
                 onLog("Encoder ${mc.name} · ${actualW}×${actualH} @ $actualFps fps${if (lowLatencyHints) " · bassa latenza" else ""}$qpNote")
                 if (intraRefresh) onLog("Intra-refresh attivo (${codecType.name}, periodo $actualFps frame)")
+                logRecoveryCapabilities(mc, onLog)
                 return VideoEncoder(
                     codec = mc,
                     inputSurface = surface,

@@ -6,8 +6,9 @@
 //! dalla parità) e torna largo dopo `RELAX_AFTER_US` di rete pulita.
 //!
 //! Le perdite da congestione non si curano con più parità (aggiunge byte a un collegamento già pieno): il gruppo si
-//! stringe solo quando il client misura una coda bassa (le perdite sono della radio, non del carico) e torna subito
-//! largo appena il controllo del bitrate vede congestione.
+//! stringe solo quando il client misura una coda bassa (le perdite sono della radio, non del carico) e torna largo
+//! quando il controllo del bitrate vede congestione per due statistiche di fila. Con una sola, su 5G il gruppo
+//! cambiava ogni pochi secondi (test del 25/11): il jitter fa scambiare per coda una singola finestra.
 
 /// Frazione di frame danneggiati (persi o recuperati dalla parità) da cui si passa al gruppo da 5.
 pub const MEDIUM_IMPAIRED: f64 = 0.03;
@@ -40,12 +41,14 @@ pub struct AdaptiveFec {
     current: u16,
     prev: Option<(u32, u32, u32)>,
     calm_since_us: Option<u64>,
+    /// L'ultima statistica era [`Load::Loaded`].
+    loaded_before: bool,
 }
 
 impl AdaptiveFec {
     /// `base` è il gruppo con la rete pulita (0 = parità spenta: resta spenta).
     pub fn new(base: u16) -> Self {
-        AdaptiveFec { base, current: base, prev: None, calm_since_us: None }
+        AdaptiveFec { base, current: base, prev: None, calm_since_us: None, loaded_before: false }
     }
 
     /// Gruppo attuale.
@@ -54,13 +57,15 @@ impl AdaptiveFec {
     }
 
     /// Statistiche cumulative del client (frame consegnati, persi, recuperati dalla parità) e stato della rete. Il
-    /// gruppo si stringe solo con [`Load::Clear`] e torna alla base con [`Load::Loaded`]. Restituisce il nuovo gruppo
-    /// se cambia.
+    /// gruppo si stringe solo con [`Load::Clear`] e torna alla base con due [`Load::Loaded`] di fila. Restituisce il
+    /// nuovo gruppo se cambia.
     pub fn on_stats(&mut self, now_us: u64, ok: u32, lost: u32, fec: u32, load: Load) -> Option<u16> {
         if self.base == 0 {
             return None;
         }
-        if load == Load::Loaded && self.current != self.base {
+        let loaded_twice = load == Load::Loaded && self.loaded_before;
+        self.loaded_before = load == Load::Loaded;
+        if loaded_twice && self.current != self.base {
             // la parità in più pesa su un collegamento già pieno: via subito
             self.current = self.base;
             self.calm_since_us = None;
@@ -155,14 +160,13 @@ mod tests {
         assert_eq!(feed(&mut f, &mut c, 2, 12, Load::Unknown), None, "coda non chiara: nemmeno");
         assert_eq!(f.group(), 10);
         assert_eq!(feed(&mut f, &mut c, 3, 12, Load::Clear), Some(3));
-        assert_eq!(
-            feed(&mut f, &mut c, 4, 12, Load::Loaded),
-            Some(10),
-            "arriva la congestione: si torna subito larghi"
-        );
+        assert_eq!(feed(&mut f, &mut c, 4, 12, Load::Loaded), None, "una statistica congestionata sola non basta");
+        assert_eq!(feed(&mut f, &mut c, 5, 12, Load::Clear), None);
+        assert_eq!(feed(&mut f, &mut c, 6, 12, Load::Loaded), None);
+        assert_eq!(feed(&mut f, &mut c, 7, 12, Load::Loaded), Some(10), "due di fila: si torna larghi");
         // finestre da 10 frame: si giudicano insieme
-        assert_eq!(f.on_stats(5_000_000, c.0 + 9, c.1 + 1, c.2, Load::Clear), None);
-        assert_eq!(f.on_stats(5_100_000, c.0 + 18, c.1 + 2, c.2, Load::Clear), Some(3), "2 persi su 20 = 10%");
+        assert_eq!(f.on_stats(8_000_000, c.0 + 9, c.1 + 1, c.2, Load::Clear), None);
+        assert_eq!(f.on_stats(8_100_000, c.0 + 18, c.1 + 2, c.2, Load::Clear), Some(3), "2 persi su 20 = 10%");
     }
 
     #[test]

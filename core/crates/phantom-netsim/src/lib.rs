@@ -8,6 +8,8 @@
 //! raffica (modello di Gilbert-Elliott), riordino, duplicazione, banda limitata con coda finita (perdita per coda
 //! piena, come un router che si riempie).
 
+pub mod transport;
+
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 

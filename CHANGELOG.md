@@ -2,6 +2,62 @@
 
 Le note di ogni release vengono prese da qui dalla CI (sezione `## [x.y.z]` che corrisponde al tag `vx.y.z`).
 
+## [1.6.0] - 2026-11-25
+
+Comprende le correzioni preparate come 1.5.1 (mai pubblicata) e il lavoro sul 5G.
+
+### 5G e ritorno dal background
+- **Video subito al ritorno dal background**: in pausa il trasporto vede passare solo l'audio e il suo controllo di
+  congestione (BBR) «dimentica» la banda; al ritorno la finestra d'invio era di pochi KB e il primo frame arrivava
+  dopo ~5 s (una delle cause dei «0 fps»). Ora, per i 3 s della ripresa, il trasporto ha un minimo di ritmo e di
+  finestra pari al bitrate di prima della pausa, poi decide di nuovo BBR da solo. Sul banco di prova 5G: primo frame
+  dopo 0,3 s invece di 5,5 s, frame saltati dimezzati, bitrate medio da ~7–10 a ~13 Mbit/s. In background non costa
+  nulla.
+- **Fine delle ritrasmissioni inutili**: l'iPhone chiedeva di rimandare i pezzi di un frame dopo soli 3 ms di
+  silenzio, ma con il ritmo d'invio del trasporto, a bassa banda o con il jitter del 5G i pezzi arrivano più distanziati
+  e venivano chiesti pezzi solo in ritardo: sul banco le ritrasmissioni erano il 42% dei pacchetti su 5G e il 65% su
+  un relay lento, con quasi nessuna perdita vera, e la coda in più causava altri problemi. Ora un pezzo mancante si
+  chiede subito solo se è già arrivato qualcosa spedito dopo (i pacchetti viaggiano in ordine: allora è perso
+  davvero), altrimenti dopo 60 ms. Ritrasmissioni all'1%; sul 5G simulato il bitrate medio sale da ~10 a ~16 Mbit/s.
+- **Un blocco della radio non è una perdita**: se dalla rete non arriva nulla per 50 ms (nemmeno l'audio, che passa
+  ogni ~21 ms) l'iPhone non chiede ritrasmissioni e non dà per persi i frame in arrivo; finito il blocco arriva tutto e
+  il video riparte senza keyframe.
+- **Apertura della sessione su collegamenti lenti**: la tolleranza dei primi secondi ora vale solo per i ritorni dal
+  background; all'apertura, su un relay lento, il video poteva restare fermo ~5 s.
+
+### Correzioni
+- **Video fermo a 0 fps al ritorno dal background**: durante la pausa il telefono Android poteva addormentarsi (display
+  spento, niente da catturare), oppure l'encoder ripreso non riceveva frame finché lo schermo restava fermo. Ora al
+  ritorno dell'iPhone l'host risveglia il telefono (Root e Shizuku; se lo schermo fisico era spento con «Schermo Off»
+  lo rispegne subito dopo) e riparte con encoder e display virtuale nuovi, che producono subito un keyframe.
+- **Ritardo di 240 ms in LAN**: lo schermo del Redmi va a 120 Hz e mandava fino a 120 frame al secondo a un encoder
+  configurato per 60, che ne regge ~70 a 864×1920; i frame in più si accodavano (232 ms di «codifica» nella
+  diagnosi). Ora la sorgente scarta i frame oltre la frequenza dell'encoder (Android 10+).
+
+### 5G e P2P
+- **Niente più qualità al minimo dopo ogni ritorno**: dopo il background il trasporto riparte con una stima bassa
+  della banda (ha visto passare solo l'audio) e il primo keyframe riempiva la coda: svuotamento, frame saltati e
+  bitrate al minimo per minuti. Ora per 3 s dopo ogni ritorno la coda può arrivare a 1,2 s e né gli svuotamenti né le
+  statistiche dell'iPhone abbassano il bitrate (in pausa il controllo osserva soltanto).
+- **Blocchi della radio assorbiti**: in P2P diretto la coda tiene fino a ~500 ms di video (prima 250 ms) e uno
+  svuotamento isolato non abbassa più il bitrate; due in meno di 20 s sì. Via relay resta tutto come prima.
+- **Bitrate minimo in P2P da 0,6 a 1 Mbit/s**: a 0,6 anche 540p diventa un mosaico.
+- **Parità più stabile**: torna a 1 pacchetto ogni 10 solo con due statistiche congestionate di fila (su 5G cambiava
+  ogni pochi secondi e riempiva il log).
+
+### iPhone
+- **Meno consumi**: il timer della sessione girava sempre a 250 Hz, anche senza toccare lo schermo e con l'app in
+  background. Ora va a 250 Hz solo con le dita sullo schermo, a 100 Hz senza tocco e a 20 Hz in background.
+
+### Sviluppo
+- Nuovo banco di prova `e2e_transport` con il mittente QUIC modellato (coda dei datagrammi, finestra e ritmo alla BBR
+  con la stima della banda che scade quando passa poco traffico): riproduce il comportamento dei log reali del 5G e
+  ha i suoi test (ritorno dal background, relay lento, 5G con blocchi, LAN). Il vecchio banco non lo vedeva.
+- Lo scarto alla sorgente (coda d'invio troppo lunga) è passato dall'FFI al core (`Host::plan_frame`), così app e
+  banco di prova usano la stessa logica.
+- Il log del Redmi elenca, una volta, i parametri dell'encoder utili al recupero senza keyframe (LTR): serve per la
+  prossima voce della roadmap.
+
 ## [1.5.0] - 2026-11-24
 
 ### Correzioni

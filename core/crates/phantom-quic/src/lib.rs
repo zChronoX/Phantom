@@ -17,6 +17,9 @@
 //! nella fase 5 con l'accoppiamento) e lo **fissa**. Non c'è una PKI e non si
 //! accettano certificati diversi da quello fissato.
 
+mod floor;
+pub use floor::RampFloor;
+
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
@@ -154,6 +157,8 @@ pub fn generate_host_identity() -> Result<HostIdentity, QuicError> {
 pub struct HostEndpoint {
     endpoint: Endpoint,
     certificate: Vec<u8>,
+    /// Minimo temporaneo del controllo di congestione, condiviso con le connessioni accettate.
+    floor: Arc<RampFloor>,
     // Ultimo campo: si chiude l'endpoint prima che il runtime sparisca.
     runtime: Arc<Runtime>,
 }
@@ -174,12 +179,13 @@ impl HostEndpoint {
         }
         let runtime = new_runtime()?;
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der));
-        let server = server_config(&cert_der, key)?;
+        let floor = Arc::new(RampFloor::default());
+        let server = server_config(&cert_der, key, Arc::clone(&floor))?;
         let endpoint = {
             let _guard = runtime.enter();
             Endpoint::server(server, addr).map_err(QuicError::Io)?
         };
-        Ok(HostEndpoint { endpoint, certificate: cert_der, runtime: Arc::new(runtime) })
+        Ok(HostEndpoint { endpoint, certificate: cert_der, floor, runtime: Arc::new(runtime) })
     }
 
     /// Indirizzo locale su cui l'endpoint è in ascolto.
@@ -204,7 +210,7 @@ impl HostEndpoint {
                 .map_err(|_| QuicError::Timeout)?
                 .map_err(QuicError::Connection)
         })?;
-        Ok(QuicLink { connection, runtime: Arc::clone(&self.runtime) })
+        Ok(QuicLink { connection, floor: Arc::clone(&self.floor), runtime: Arc::clone(&self.runtime) })
     }
 }
 
@@ -247,7 +253,8 @@ impl ClientEndpoint {
         pinned_certificate_der: &[u8],
         timeout: Duration,
     ) -> Result<QuicLink, QuicError> {
-        let config = client_config(pinned_certificate_der)?;
+        let floor = Arc::new(RampFloor::default());
+        let config = client_config(pinned_certificate_der, Arc::clone(&floor))?;
         let connecting = {
             // `connect_with` avvia subito il task della connessione: serve il
             // contesto del runtime, non solo quello del futuro che si aspetta.
@@ -260,7 +267,7 @@ impl ClientEndpoint {
                 Ok(result) => result.map_err(QuicError::Connection),
             }
         })?;
-        Ok(QuicLink { connection, runtime: Arc::clone(&self.runtime) })
+        Ok(QuicLink { connection, floor, runtime: Arc::clone(&self.runtime) })
     }
 }
 
@@ -275,6 +282,7 @@ impl Drop for ClientEndpoint {
 #[derive(Debug)]
 pub struct QuicLink {
     connection: Connection,
+    floor: Arc<RampFloor>,
     // Ultimo campo: si chiude la connessione prima che il runtime sparisca.
     runtime: Arc<Runtime>,
 }
@@ -321,6 +329,12 @@ impl QuicLink {
     /// non sono supportati.
     pub fn max_datagram_size(&self) -> Option<usize> {
         self.connection.max_datagram_size()
+    }
+
+    /// Per `duration` il controllo di congestione non scende sotto il ritmo `rate_bps` (bit/s) e una finestra di
+    /// 2 × ritmo × RTT (vedi [`RampFloor`]): serve al ritorno dal background, quando BBR ha dimenticato la banda.
+    pub fn set_ramp_floor(&self, rate_bps: u64, duration: Duration) {
+        self.floor.set(rate_bps, self.connection.rtt(), duration);
     }
 
     /// Statistiche del percorso (RTT, finestra di congestione, perdite).
@@ -398,14 +412,15 @@ pub struct LinkStats {
 /// Byte di datagrammi in arrivo tenuti in attesa che l'app li legga.
 pub const DATAGRAM_RECEIVE_BUFFER: usize = 1 << 20;
 
-fn transport_config() -> Arc<TransportConfig> {
+fn transport_config(floor: Arc<RampFloor>) -> Arc<TransportConfig> {
     let mut config = TransportConfig::default();
     // I datagrammi sono opzionali: senza buffer di ricezione QUIC li rifiuta.
     config.datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE_BUFFER)).datagram_send_buffer_size(DATAGRAM_SEND_BUFFER);
     // BBR invece di Cubic: Cubic dimezza la finestra a ogni perdita, e sul Wi-Fi di un telefono le perdite sono
     // spesso casuali, non congestione. Con Cubic i datagrammi si accumulavano in coda (latenza) e poi venivano
     // scartati (frame rotti → keyframe → ancora più coda). Il controllo del bitrate vero resta quello di Phantom.
-    config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+    // Con un minimo temporaneo che l'app imposta al ritorno dal background (`RampFloor`).
+    config.congestion_controller_factory(Arc::new(floor::FloorFactory { floor }));
     // Keep-alive e timeout calibrati anche per reti mobili (4G/5G / NAT / Tailscale).
     config.keep_alive_interval(Some(Duration::from_secs(3)));
     if let Ok(timeout) = IdleTimeout::try_from(Duration::from_secs(15)) {
@@ -414,7 +429,11 @@ fn transport_config() -> Arc<TransportConfig> {
     Arc::new(config)
 }
 
-fn server_config(certificate: &[u8], key: PrivateKeyDer<'static>) -> Result<ServerConfig, QuicError> {
+fn server_config(
+    certificate: &[u8],
+    key: PrivateKeyDer<'static>,
+    floor: Arc<RampFloor>,
+) -> Result<ServerConfig, QuicError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut tls = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -425,11 +444,11 @@ fn server_config(certificate: &[u8], key: PrivateKeyDer<'static>) -> Result<Serv
     tls.alpn_protocols = vec![ALPN.to_vec()];
     let quic = QuicServerConfig::try_from(tls).map_err(|e| QuicError::TlsConfig(e.to_string()))?;
     let mut config = ServerConfig::with_crypto(Arc::new(quic));
-    config.transport_config(transport_config());
+    config.transport_config(transport_config(floor));
     Ok(config)
 }
 
-fn client_config(pinned_certificate_der: &[u8]) -> Result<ClientConfig, QuicError> {
+fn client_config(pinned_certificate_der: &[u8], floor: Arc<RampFloor>) -> Result<ClientConfig, QuicError> {
     if pinned_certificate_der.is_empty() {
         return Err(QuicError::EmptyCertificate);
     }
@@ -447,7 +466,7 @@ fn client_config(pinned_certificate_der: &[u8]) -> Result<ClientConfig, QuicErro
     tls.alpn_protocols = vec![ALPN.to_vec()];
     let quic = QuicClientConfig::try_from(tls).map_err(|e| QuicError::TlsConfig(e.to_string()))?;
     let mut config = ClientConfig::new(Arc::new(quic));
-    config.transport_config(transport_config());
+    config.transport_config(transport_config(floor));
     Ok(config)
 }
 

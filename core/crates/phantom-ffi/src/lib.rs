@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use phantom_core::jitter::{AudioJitter, JitterConfig};
-use phantom_core::pacing::{FrameDecision, SourceDropper};
+use phantom_core::pacing::LinkKind;
 use phantom_core::phantom_proto::{
     caps, AudioCodec as ProtoAudioCodec, Codec, ControlCommand as ProtoControlCommand, Finger, Header,
     HostReport as ProtoHostReport, Message, HEADER_LEN, MAX_DATAGRAM, MAX_FINGERS, MAX_VIDEO_PAYLOAD, VIDEO_HEADER_LEN,
@@ -623,7 +623,8 @@ pub struct ClientCounters {
 struct HostInner {
     host: Host,
     next_frame_id: u32,
-    dropper: SourceDropper,
+    /// Ritorno dal background per cui il minimo del trasporto è già stato impostato (`Host::resume_ramp`).
+    floor_for: Option<u64>,
 }
 
 /// Lato host (Android): riceve ping, ritrasmissioni, richieste di keyframe e tocco dal client; spedisce video.
@@ -638,11 +639,7 @@ impl PhantomHost {
     #[uniffi::constructor]
     pub fn new(settings: SessionSettings) -> Arc<Self> {
         Arc::new(PhantomHost {
-            inner: Mutex::new(HostInner {
-                host: Host::new(settings.into()),
-                next_frame_id: 0,
-                dropper: SourceDropper::new(),
-            }),
+            inner: Mutex::new(HostInner { host: Host::new(settings.into()), next_frame_id: 0, floor_for: None }),
         })
     }
 
@@ -653,7 +650,7 @@ impl PhantomHost {
         cfg.auth_token = parse_optional_auth_token(&auth_token);
         cfg.audio_enabled = audio_enabled;
         Arc::new(PhantomHost {
-            inner: Mutex::new(HostInner { host: Host::new(cfg), next_frame_id: 0, dropper: SourceDropper::new() }),
+            inner: Mutex::new(HostInner { host: Host::new(cfg), next_frame_id: 0, floor_for: None }),
         })
     }
 
@@ -718,31 +715,37 @@ impl PhantomHost {
         };
         let capacity = connection.send_buffer_capacity();
         let queued = capacity.saturating_sub(connection.send_buffer_space());
+        let link = if !connection.is_p2p() {
+            LinkKind::Lan
+        } else if connection.link_stats().via_relay {
+            LinkKind::Relay
+        } else {
+            LinkKind::P2pDirect
+        };
         {
             let mut g = lock(&self.inner);
-            if g.host.video_paused(capture_ts_us) {
-                // client in background: il frame non parte e la coda non conta (niente stalli né keyframe)
-                report.paused = true;
-                return report;
-            }
             // frammenti sempre entro il massimo che il trasporto accetta adesso (la MTU cambia durante la sessione)
             if let Some(max) = connection.max_datagram_size() {
                 g.host.limit_frag_size(video_payload_for_datagram(max));
             }
-            let target = g.host.target_bitrate_bps();
-            let window_ms = if connection.is_p2p() { P2P_QUEUE_WINDOW_MS } else { LAN_QUEUE_WINDOW_MS };
-            let limit = g.dropper.limit_bytes(target, window_ms, capacity * 4 / 5);
-            let drains = g.dropper.drains();
-            let outcome = g.dropper.decide(queued, limit, key);
-            if g.dropper.drains() > drains {
-                // la coda è andata oltre la soglia: è congestione anche se il client non l'ha ancora vista
-                g.host.on_send_stall(capture_ts_us);
-                report.drain_started = true;
+            // ritorno dal background: il trasporto ha dimenticato la banda (in pausa passava solo l'audio). Per i secondi
+            // della ripresa gli si dà un minimo di ritmo e finestra pari al bitrate di prima (più un margine): senza, il
+            // primo frame arrivava dopo ~5 s (banco `e2e_transport`, «0 fps» dei test del 25/11)
+            if let Some(start) = g.host.resume_ramp(capture_ts_us) {
+                if g.floor_for != Some(start) {
+                    g.floor_for = Some(start);
+                    let rate = g.host.target_bitrate_bps().saturating_mul(5) / 4;
+                    let left = (start + phantom_core::RAMP_GRACE_US).saturating_sub(capture_ts_us);
+                    connection.set_ramp_floor(rate, Duration::from_micros(left));
+                }
             }
-            if outcome.request_keyframe {
-                g.host.request_keyframe();
+            let plan = g.host.plan_frame(capture_ts_us, key, queued, capacity, link);
+            report.paused = plan.paused;
+            report.drain_started = plan.drain_started;
+            if plan.paused {
+                return report;
             }
-            if outcome.decision == FrameDecision::Skip {
+            if plan.skip {
                 report.skipped = true;
                 report.request_keyframe = g.host.wants_keyframe(capture_ts_us);
                 return report;
@@ -764,17 +767,8 @@ impl PhantomHost {
             }
         }
         let mut g = lock(&self.inner);
-        if key {
-            g.dropper.on_keyframe_sent(report.bytes as usize);
-        }
-        if report.queue_overflows > 0 {
-            // il frame precedente arriverà rotto: si svuota e si riparte da un keyframe (non uno per pacchetto)
-            let drains = g.dropper.drains();
-            g.dropper.on_queue_overflow();
-            if g.dropper.drains() > drains {
-                g.host.on_send_stall(capture_ts_us);
-                report.drain_started = true;
-            }
+        if g.host.frame_sent(capture_ts_us, key, report.bytes as usize, report.queue_overflows, link) {
+            report.drain_started = true;
         }
         report.request_keyframe = g.host.wants_keyframe(capture_ts_us);
         report
@@ -782,7 +776,7 @@ impl PhantomHost {
 
     /// Frame saltati finora dallo scarto alla sorgente (coda di invio troppo piena).
     pub fn frames_skipped(&self) -> u64 {
-        lock(&self.inner).dropper.skipped()
+        lock(&self.inner).host.frames_skipped()
     }
 
     /// Chiede un keyframe dal lato host (vale la distanza minima tra keyframe): lo si legge poi da
@@ -1605,11 +1599,6 @@ pub struct LinkStats {
     pub via_relay: bool,
 }
 
-/// Finestra di coda prima dello scarto alla sorgente in LAN (vedi `SourceDropper::limit_bytes`).
-const LAN_QUEUE_WINDOW_MS: u64 = 600;
-/// Finestra di coda prima dello scarto alla sorgente in P2P/relay.
-const P2P_QUEUE_WINDOW_MS: u64 = 250;
-
 /// Esito di un invio contato.
 struct SendOutcome {
     sent: bool,
@@ -1630,6 +1619,14 @@ impl QuicConnection {
         match &self.link {
             ConnectionBackend::Direct(link) => link.datagram_send_buffer_space(),
             ConnectionBackend::P2p(link) => link.datagram_send_buffer_space(),
+        }
+    }
+
+    /// Minimo temporaneo del controllo di congestione (vedi `phantom_quic::RampFloor`).
+    fn set_ramp_floor(&self, rate_bps: u64, duration: Duration) {
+        match &self.link {
+            ConnectionBackend::Direct(link) => link.set_ramp_floor(rate_bps, duration),
+            ConnectionBackend::P2p(link) => link.set_ramp_floor(rate_bps, duration),
         }
     }
 

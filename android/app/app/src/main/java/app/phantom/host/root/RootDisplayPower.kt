@@ -66,6 +66,9 @@ object RootDisplayPower {
         false
     }
 
+    /** `true` se il display fisico è stato spento da Phantom («Schermo Off») e non ancora riacceso. */
+    fun isTurnedOff(): Boolean = displayTurnedOff.get()
+
     /** Riaccende il display fisico solo se questa sessione lo aveva effettivamente spento. */
     fun restoreIfTurnedOff() {
         if (displayTurnedOff.compareAndSet(true, false)) {

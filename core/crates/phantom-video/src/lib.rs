@@ -246,6 +246,14 @@ impl VideoSender {
 
 // ─────────────────────────────────────────────────────────── lato client
 
+/// Silenzio di un frame prima di chiedere i frammenti in coda, se non è ancora arrivato nulla spedito dopo (µs):
+/// possono essere solo in ritardo. Più lungo di [`LINK_SILENCE_US`], così durante un blocco della rete non parte.
+const MAX_TAIL_IDLE_US: u64 = 60_000;
+/// Senza alcun pacchetto dalla rete per questo tempo il collegamento è considerato bloccato (µs): niente richieste di
+/// ritrasmissione e niente scadenze, perché quello che manca è fermo in rete e arriverà tutto insieme. L'audio passa
+/// ogni ~21 ms, quindi 50 ms di silenzio totale non sono normali.
+pub const LINK_SILENCE_US: u64 = 50_000;
+
 /// Impostazioni del lato client.
 #[derive(Clone, Debug)]
 pub struct ReceiverConfig {
@@ -459,6 +467,17 @@ pub struct VideoReceiver {
     asked_start_key: bool,
     last_key_request_us: Option<u64>,
     rtt_us: u64,
+    /// Arrivo più recente di un frammento originale (non ritrasmesso) del frame più nuovo visto: i frammenti partono in
+    /// ordine, quindi se arriva qualcosa di un frame successivo, ciò che manca dei frame precedenti è perso davvero.
+    newest_rx_us: u64,
+    /// Arrivo più recente di un pacchetto che non è video (audio, risposte ai ping): l'host lo ha spedito dopo i frame
+    /// già partiti, quindi vale come prova che i loro frammenti mancanti sono persi (vedi [`VideoReceiver::note_other`]).
+    other_rx_us: u64,
+    /// Ultimo pacchetto ricevuto dalla rete, di qualunque tipo (vedi [`VideoReceiver::note_activity`]).
+    last_any_rx_us: Option<u64>,
+    /// Ultimo silenzio della rete: (inizio, fine). Durante un blocco della radio non arriva nulla; finito il blocco
+    /// arriva tutto insieme. Il tempo del silenzio non conta per le scadenze dei frame.
+    last_silence: Option<(u64, u64)>,
 }
 
 impl VideoReceiver {
@@ -477,6 +496,10 @@ impl VideoReceiver {
             asked_start_key: false,
             last_key_request_us: None,
             rtt_us: 0,
+            newest_rx_us: 0,
+            other_rx_us: 0,
+            last_any_rx_us: None,
+            last_silence: None,
         }
     }
 
@@ -492,7 +515,52 @@ impl VideoReceiver {
     }
 
     /// Riceve un frammento (già decodificato dal protocollo).
+    /// È arrivato un pacchetto qualsiasi dalla rete (video, audio, risposta a un ping): il collegamento è vivo. Il
+    /// client la chiama per ogni datagramma; [`VideoReceiver::on_fragment`] la chiama da sé.
+    pub fn note_activity(&mut self, now_us: u64) {
+        if let Some(last) = self.last_any_rx_us {
+            if now_us.saturating_sub(last) >= LINK_SILENCE_US {
+                self.last_silence = Some((last, now_us));
+            }
+        }
+        self.last_any_rx_us = Some(self.last_any_rx_us.map_or(now_us, |l| l.max(now_us)));
+    }
+
+    /// È arrivato un pacchetto che non è video (audio, risposta a un ping, rapporto dell'host). Sullo stesso
+    /// collegamento i pacchetti viaggiano in ordine e l'host spedisce ogni frame tutto insieme: se arriva qualcosa
+    /// spedito dopo, i frammenti che mancano ai frame precedenti sono persi e si possono chiedere subito.
+    pub fn note_other(&mut self, now_us: u64) {
+        self.note_activity(now_us);
+        self.other_rx_us = self.other_rx_us.max(now_us);
+    }
+
+    /// `true` se dalla rete non arriva nulla da [`LINK_SILENCE_US`]: è un blocco del collegamento, non una perdita.
+    fn link_silent(&self, now_us: u64) -> bool {
+        self.last_any_rx_us.is_some_and(|t| now_us.saturating_sub(t) >= LINK_SILENCE_US)
+    }
+
+    /// Da quanto un frame non riceve nulla (`last_rx_us` è il suo ultimo frammento), senza contare l'ultimo silenzio
+    /// della rete.
+    fn idle_of(&self, now_us: u64, last_rx_us: u64) -> u64 {
+        let since = match self.last_silence {
+            Some((_, end)) if end > last_rx_us => end,
+            _ => last_rx_us,
+        };
+        now_us.saturating_sub(since)
+    }
+
+    /// Età di un frame dal primo frammento (`first_rx_us`), senza contare l'ultimo silenzio della rete.
+    fn age_of(&self, now_us: u64, first_rx_us: u64) -> u64 {
+        let age = now_us.saturating_sub(first_rx_us);
+        match self.last_silence {
+            Some((start, end)) if end > first_rx_us => age.saturating_sub(end - start.max(first_rx_us)),
+            _ => age,
+        }
+    }
+
+    /// Elabora un frammento arrivato all'istante `now_us`.
     pub fn on_fragment(&mut self, now_us: u64, v: &VideoFragment<'_>) -> Vec<Output> {
+        self.note_activity(now_us);
         let mut out = Vec::new();
         self.stats.fragments += 1;
         self.stats.bytes += v.payload.len() as u64;
@@ -528,6 +596,9 @@ impl VideoReceiver {
         }
         if self.highest_seen.is_none_or(|hs| newer(v.frame_id, hs)) {
             self.highest_seen = Some(v.frame_id);
+        }
+        if v.flags & video_flags::RETRANSMIT == 0 && self.highest_seen == Some(v.frame_id) {
+            self.newest_rx_us = now_us;
         }
         self.gap_since.remove(&v.frame_id);
         self.gap_nacks.remove(&v.frame_id);
@@ -601,14 +672,26 @@ impl VideoReceiver {
         let mut out = Vec::new();
         // NACK dei frammenti mancanti
         let retry = self.cfg.nack_retry_us.max(self.rtt_us.saturating_mul(3) / 2);
-        let ids: Vec<u32> = self.frames.keys().copied().collect();
+        // I frammenti in coda a un frame si chiedono subito solo se è già arrivato qualcosa di un frame successivo (i
+        // frammenti partono in ordine: allora sono persi davvero); altrimenti possono essere ancora in viaggio e si
+        // aspetta [`MAX_TAIL_IDLE_US`]. Con 3 ms fissi, a collegamento lento, con l'invio a ritmo di BBR o con il jitter
+        // del 5G si chiedevano frammenti solo in ritardo: sul banco `e2e_transport` le ritrasmissioni erano il 42–65%
+        // dei pacchetti con quasi nessuna perdita, e la coda in più ne provocava altre.
+        let newest = self.highest_seen;
+        let newest_rx = self.newest_rx_us;
+        let other_rx = self.other_rx_us;
+        // collegamento muto (blocco della radio): non si chiede nulla, quello che manca è ancora in viaggio
+        let silent = self.link_silent(now_us);
+        let ids: Vec<u32> = if silent { Vec::new() } else { self.frames.keys().copied().collect() };
         for id in ids {
+            let (age, idle) = match self.frames.get(&id) {
+                Some(st) => (self.age_of(now_us, st.first_rx_us), self.idle_of(now_us, st.last_rx_us)),
+                None => continue,
+            };
             let Some(st) = self.frames.get_mut(&id) else { continue };
             if st.is_complete() {
                 continue;
             }
-            let age = now_us.saturating_sub(st.first_rx_us);
-            let idle = now_us.saturating_sub(st.last_rx_us);
             let due = if st.nacks == 0 {
                 age >= self.cfg.nack_delay_us
             } else {
@@ -620,7 +703,10 @@ impl VideoReceiver {
             // «Buchi» = mancanti con indice minore dell'ultimo arrivato: sono davvero persi o riordinati. I mancanti in
             // coda possono essere ancora in viaggio: si chiedono solo se il frame non riceve nulla da un po'.
             let all = st.missing();
-            let wanted: Vec<u16> = if idle >= self.cfg.nack_delay_us {
+            let overtaken =
+                (newest.is_some_and(|n| newer(n, id)) && newest_rx > st.last_rx_us) || other_rx > st.last_rx_us;
+            let tail_due = if overtaken { idle >= self.cfg.nack_delay_us } else { idle >= MAX_TAIL_IDLE_US };
+            let wanted: Vec<u16> = if tail_due {
                 all
             } else {
                 all.into_iter().filter(|m| st.highest_idx.is_some_and(|h| *m < h)).collect()
@@ -636,7 +722,8 @@ impl VideoReceiver {
             }
         }
         // frame persi per intero: si chiede di rimandarli (lista vuota)
-        let gaps: Vec<(u32, u64)> = self.gap_since.iter().map(|(k, v)| (*k, *v)).collect();
+        let gaps: Vec<(u32, u64)> =
+            if silent { Vec::new() } else { self.gap_since.iter().map(|(k, v)| (*k, *v)).collect() };
         for (id, since) in gaps {
             let (n, last) = self.gap_nacks.get(&id).copied().unwrap_or((0, 0));
             let due = if n == 0 {
@@ -756,9 +843,11 @@ impl VideoReceiver {
                     self.next_deliver = Some(next.wrapping_add(1));
                 }
                 Some(st) => {
-                    let stalled = now_us.saturating_sub(st.last_rx_us) > self.cfg.max_frame_age_us;
-                    let too_old = now_us.saturating_sub(st.first_rx_us) > self.cfg.max_frame_total_us;
-                    if stalled || too_old {
+                    // con il collegamento muto non scade nulla: finito il blocco i frammenti arrivano tutti insieme
+                    let silent = self.link_silent(now_us);
+                    let stalled = self.idle_of(now_us, st.last_rx_us) > self.cfg.max_frame_age_us;
+                    let too_old = self.age_of(now_us, st.first_rx_us) > self.cfg.max_frame_total_us;
+                    if !silent && (stalled || too_old) {
                         self.drop_frame(next, DropReason::Timeout, out);
                         if !self.need_key {
                             self.need_key = true;
@@ -776,7 +865,7 @@ impl VideoReceiver {
                         return;
                     }
                     let since = self.gap_since.get(&next).copied().unwrap_or(now_us);
-                    if now_us.saturating_sub(since) > self.cfg.max_frame_age_us {
+                    if !self.link_silent(now_us) && self.idle_of(now_us, since) > self.cfg.max_frame_age_us {
                         self.gap_since.remove(&next);
                         self.gap_nacks.remove(&next);
                         self.stats.dropped_timeout += 1;
@@ -968,7 +1057,11 @@ mod tests {
         feed(&mut rx, 0, &dg[0]);
         feed(&mut rx, 0, &dg[1]);
         let mut nacks = 0;
-        for t in (0..200_000).step_by(1_000) {
+        for t in (0..200_000u64).step_by(1_000) {
+            // l'audio continua ad arrivare ogni ~21 ms: il collegamento è vivo
+            if t.is_multiple_of(21_000) {
+                rx.note_other(t);
+            }
             nacks += rx.poll(t).iter().filter(|o| matches!(o, Output::Nack { .. })).count();
         }
         assert_eq!(nacks, 3, "al massimo max_nacks richieste per frame");
@@ -991,8 +1084,12 @@ mod tests {
             let data = mk(id, key);
             let dg = tx.send_frame(&encoded(id, key, &data));
             if id == 4 {
-                // prima dell'arrivo del keyframe il tempo è passato: il frame 1 non è mai arrivato e va scartato
-                outs.extend(rx.poll(80_000));
+                // prima dell'arrivo del keyframe il tempo è passato (con l'audio che arriva): il frame 1 non è mai
+                // arrivato e va scartato
+                for t in [42_000u64, 63_000, 80_000] {
+                    rx.note_other(t);
+                    outs.extend(rx.poll(t));
+                }
             }
             if lost {
                 continue;
@@ -1035,6 +1132,10 @@ mod tests {
                 outs.extend(feed(&mut rx, now, &d));
             }
             outs.extend(rx.poll(now));
+        }
+        // l'audio continua ad arrivare: il collegamento è vivo, il frame 1 è perso davvero
+        for t in (40_000..=1_250_000u64).step_by(20_000) {
+            rx.note_other(t);
         }
         outs.extend(rx.poll(100_000));
         let requests = |outs: &[Output]| outs.iter().filter(|o| matches!(o, Output::RequestKeyframe { .. })).count();
@@ -1158,5 +1259,51 @@ mod tests {
         };
         rx.on_fragment(1, &v2);
         assert_eq!(rx.stats().frames_ok, 0);
+    }
+
+    /// Un blocco della rete (nessun pacchetto per centinaia di ms) non è una perdita: niente richieste di ritrasmissione
+    /// e niente scadenze; finito il blocco i frammenti arrivano e il frame si completa senza keyframe.
+    #[test]
+    fn a_silent_link_is_a_stall_not_a_loss() {
+        let (data, _) = frame(1, true, 4_000);
+        let mut tx = VideoSender::new(1, 1000, 0, 4);
+        let dg = tx.send_frame(&encoded(1, true, &data));
+        let mut rx = VideoReceiver::new(ReceiverConfig::default());
+        feed(&mut rx, 0, &dg[0]);
+        let mut outs = Vec::new();
+        for t in (0..400_000).step_by(1_000) {
+            outs.extend(rx.poll(t));
+        }
+        assert!(!outs.iter().any(|o| matches!(o, Output::Nack { .. })), "niente NACK durante il blocco");
+        assert!(!outs.iter().any(|o| matches!(o, Output::Dropped { .. })), "niente scadenze durante il blocco");
+        let mut got = None;
+        for d in &dg[1..] {
+            for o in feed(&mut rx, 400_000, d) {
+                if let Output::Frame(f) = o {
+                    got = Some(f);
+                }
+            }
+        }
+        assert_eq!(got.expect("completo dopo il blocco").data, data);
+    }
+
+    /// Con il collegamento vivo e un frame successivo già arrivato, i frammenti mancanti si chiedono subito; senza
+    /// prove della perdita (nessun pacchetto spedito dopo) si aspetta, perché possono essere solo in ritardo.
+    #[test]
+    fn tail_is_requested_only_when_something_later_arrived() {
+        let mut tx = VideoSender::new(1, 1000, 0, 4);
+        let a = frame(1, true, 4_000).0;
+        let da = tx.send_frame(&encoded(1, true, &a));
+        let mut rx = VideoReceiver::new(ReceiverConfig::default());
+        feed(&mut rx, 0, &da[0]);
+        feed(&mut rx, 1_000, &da[1]);
+        let early: usize = (1_000..20_000).step_by(1_000).map(|t| rx.poll(t).len()).sum();
+        assert_eq!(early, 0, "coda forse ancora in viaggio: si aspetta");
+        rx.note_other(20_000);
+        let nacks: Vec<Output> = (20_000..25_000).step_by(1_000).flat_map(|t| rx.poll(t)).collect();
+        assert!(
+            nacks.iter().any(|o| matches!(o, Output::Nack { frame_id: 1, missing } if missing == &vec![2, 3])),
+            "è arrivato un pacchetto spedito dopo: la coda è persa"
+        );
     }
 }

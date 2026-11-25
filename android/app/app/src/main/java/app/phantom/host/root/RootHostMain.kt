@@ -153,6 +153,23 @@ object RootHostMain {
             onClientConnected = {
                 injector.injectKeyCode(KeyEvent.KEYCODE_WAKEUP)
             },
+            onVideoResumed = {
+                // Durante la pausa il telefono può essersi addormentato: KEYCODE_WAKEUP lo risveglia (se è già sveglio
+                // non fa nulla). Il risveglio riaccende anche il pannello: se l'utente l'aveva spento con «Schermo Off»
+                // lo si rispegne appena il display è di nuovo acceso.
+                val keepPanelOff = RootDisplayPower.isTurnedOff()
+                injector.injectKeyCode(KeyEvent.KEYCODE_WAKEUP)
+                if (keepPanelOff) {
+                    Thread({
+                        try {
+                            Thread.sleep(600)
+                            val ok = RootDisplayPower.setPhysicalDisplayPower(false)
+                            emit("LOG|Ritorno dell'iPhone: schermo fisico rispento (ok=$ok)" + powerError(ok))
+                        } catch (_: Throwable) {
+                        }
+                    }, "phantom-panel-off").start()
+                }
+            },
             onReady = { boundPort, certHex ->
                 emit("READY|$boundPort|$certHex")
             },

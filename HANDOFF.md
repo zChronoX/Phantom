@@ -1,9 +1,75 @@
 # Handoff
 
 Scritto: 2026-11-20; aggiornato il 2026-11-24 con la **v1.5.0** (frammenti che seguono la MTU, stalli assorbiti dalla coda, qualità stabile con backoff delle risalite, parità adattiva, ritorno in LAN, diagnosi in un tocco, HUD compatta, silenzio e video in pausa in background, avvio automatico dell'host, limiti di QP, README). Roadmap completa nel documento di progetto «claude/PHANTOM-HANDOFF-ROADMAP.md».
-Branch: main - base `172d01d` (v1.4.0, commit e tag dell'utente a suo nome) + v1.5.0 consegnata come diff (vedi «Uncommitted changes»). Da qui i commit li fa l'utente: si consegna un `.diff` e un messaggio di commit, niente `format-patch`.
+Branch: main - base `f13f2a3` (v1.5.0, commit e tag dell'utente) + v1.6.0 consegnata come diff (comprende la 1.5.1 mai pubblicata; vedi «Uncommitted changes»). I commit li fa l'utente: si consegna un `.diff` e un messaggio di commit, niente `format-patch`.
 Cartella sul PC: `C:\Users\Giovanni\Documents\Progetti personali\Phantom\Phantom` (spostata dall'utente).
 Archivio locale: `archive/f0-avsamplebuffer` - commit 04361a0
+
+## v1.6.0: banco con il trasporto modellato e correzioni del 5G (25/11 sera)
+
+- `phantom-netsim::transport::ModelSender`: coda dei datagrammi, finestra 2 × banda × RTT minimo, ritmo con guadagno
+  (2,89 all'avvio, poi 1,25/0,9/1), stima della banda = massimo dei campioni in 5 s, campioni app-limited accettati
+  solo se alzano la stima (come BBR): con solo audio la stima scade e la finestra torna a 4,8 KB, esattamente come
+  nei log del 25/11. `set_floor` modella `RampFloor`.
+- `phantom-core/tests/e2e_transport.rs`: scenari 5G (RTT ~65 ms, jitter 12 ms, 0,3% di perdite, blocchi da 400 ms
+  ogni 6 s, 30 fps), 5G con due background da 20 s, relay lento (2,5 Mbit/s), Wi-Fi con powerline, LAN stretta.
+  Report con `cargo test --release -p phantom-core --test e2e_transport -- --ignored --nocapture`; sequenza
+  secondo per secondo con `PHANTOM_TIMELINE=1` e `PHANTOM_SCENARIO=relay|5g` su `transport_timeline`.
+- Trovati col banco (non visibili nel vecchio `e2e_netsim`, che spedisce tutto subito):
+  1. **Ritorno dal background**: stima del trasporto a 0,1–0,2 Mbit/s, coda da 480 KB, primo frame dopo ~5,5 s.
+     Riempimento in background provato e scartato (raffiche app-limited: non tengono la stima e falsavano il
+     controllo del bitrate). Soluzione: `RampFloor` (in `phantom-quic/src/floor.rs` per quinn e
+     `phantom-p2p/src/floor.rs` per noq) = involucro attorno a BBR con minimo di finestra e ritmo (noq: anche
+     `metrics().pacing_rate`), impostato da `send_frame_via` una volta per ritorno (`Host::resume_ramp`, rate = 1,25 ×
+     obiettivo, fino alla fine di `RAMP_GRACE_US`). In pausa e nella tolleranza le statistiche del client vanno a
+     `RateController::observe_stats` (niente tagli).
+  2. **Ritrasmissioni inutili** (42% su 5G, 65% su relay lento): NACK dei frammenti in coda dopo 3 ms di silenzio.
+     Ora `VideoReceiver::poll` chiede la coda solo se `overtaken` (arrivato un frammento originale di un frame più
+     nuovo dopo l'ultimo di questo, o un pacchetto non video: `note_other`, chiamato da `Client::on_datagram`) dopo
+     `nack_delay_us`, altrimenti dopo `MAX_TAIL_IDLE_US` = 60 ms.
+  3. **Blocchi della radio**: `LINK_SILENCE_US` = 50 ms senza alcun pacchetto → niente NACK né scadenze; `idle_of` e
+     `age_of` non contano l'ultimo silenzio.
+  4. **Tolleranza all'apertura**: con la 1.5.1 su un relay lento il video restava fermo ~5 s; ora `ramp_until_us` si
+     imposta solo alla ripresa dal background.
+- Numeri del banco (media di 3 seed), prima → dopo: 5G con background, primo frame dopo il ritorno 5,5 → 0,3 s,
+  saltati ~350 → ~145, obiettivo medio ~7–10 → ~13 Mbit/s; 5G a regime, ritrasmissioni 42% → 0–1%, obiettivo ~10 →
+  ~16 Mbit/s; relay lento, ritrasmissioni 65% → 0%, svuotamenti 26 → 5, keyframe 27 → 7, video fermo 5,7 → 0,3 s.
+- Vecchio banco `e2e_netsim`: `congested_link_converges_by_lowering_bitrate` ora usa la media di 8 seed (con il seed
+  5 passava per caso: con altri crollava a 0 anche prima; media 0,53 → 0,62); `burst_loss_triggers_keyframe_recovery`
+  soglia per seed 0,65 → 0,6 (seed 8: 0,78 → 0,63, media 0,84 → 0,81) perché senza ritmo d'invio né audio la nuova
+  regola dei NACK aspetta il frame successivo. Scelta consapevole: il banco con il trasporto modellato è quello che
+  somiglia all'app.
+- `Host::plan_frame`/`frame_sent` (scarto alla sorgente spostato da `phantom-ffi` al core), `pacing::LinkKind`.
+- Il controllo del bitrate basato sul ritardo (roadmap P1.1) non è stato toccato: sul banco il bitrate a regime è
+  già alto, i problemi erano altrove. Da rivalutare con i log della 1.6.0.
+- Android: `VideoEncoder.logRecoveryCapabilities` scrive una volta i parametri vendor con «ltr», «refresh», «qp»,
+  «low-latency», «intra», «slice» (API 31+): servono per la roadmap P1.3.
+- Da verificare nei test: ritorni dal background con video subito vivo anche su 5G; nell'HUD meno «keyframe» e più
+  Mbit/s su 5G; nel log la riga «Parametri dell'encoder … per il recupero».
+
+## Esito dei test 1.5.0 (25/11, Root, giro su 5G e poi LAN) e risposta della 1.5.1
+
+- Funzionano: silenzio in background e audio al ritorno anche dopo pause lunghe; avvio automatico dopo il riavvio
+  (Root); «QP 12–45» nel log; HUD «P2P · diretto»; backoff delle risalite («prossima salita dopo 120 s»), 4 cambi di
+  risoluzione in 70 minuti di P2P; riepilogo orario dei pacchetti P2P illeggibili.
+- **0 fps al ritorno** (screenshot: P2P diretto, encoder 0 fps, ricevuti 0): encoder sospeso senza frame in ingresso
+  (telefono addormentato durante la pausa, o schermo fermo dopo `PARAMETER_KEY_SUSPEND`). → `onVideoResumed` (Root e
+  Shizuku: `KEYCODE_WAKEUP`, poi `setPhysicalDisplayPower(false)` dopo 600 ms se «Schermo Off» era attivo,
+  `RootDisplayPower.isTurnedOff()`) e `reconfigureRequested` (encoder e display virtuale nuovi) alla ripresa.
+- **Codifica 232 ms in LAN** (864×1920, encoder 70 fps con 60 configurati): il display a 120 Hz riempiva l'encoder.
+  → `KEY_MAX_FPS_TO_ENCODER` = fps dell'encoder (API 29+). Da verificare che «codifica» torni a ~40 ms; se no,
+  sospettare i limiti di QP.
+- **5G con bitrate fermo a 0,6 Mbit/s**: dopo ogni ritorno la finestra QUIC è di 5–40 KB (BBR ha visto solo l'audio)
+  e il keyframe riempie la coda → svuotamento, 100–290 frame saltati, `on_send_stall` taglia; in regime 1–5
+  svuotamenti ogni 5 s con coda spesso a 0 KB al campionamento (blocchi brevi della radio). → `Host::in_ramp` (3 s
+  dopo apertura o ripresa: finestra 1200 ms e nessun taglio), `Host::on_queue_drain(now, forgiving)` (in P2P uno
+  svuotamento isolato non taglia, due entro 20 s sì), finestra P2P diretto 500 ms (relay 250, via `link_stats`),
+  minimo P2P 1 Mbit/s. La parità cambiava ogni pochi secondi → torna alla base solo con due `Loaded` di fila.
+- Il simulatore `e2e_netsim` non modella la coda di invio dell'host né il controllo di congestione del trasporto:
+  per questo non riproduce la trappola del 5G (provato con blocchi da 400 ms a 30 fps: il core da solo resta alto).
+  È il primo lavoro della 1.6.0 (sezione 5 della roadmap). `run_fps` permette già prove a 30/60 fps.
+- iPhone: timer di sessione adattivo (`adaptTickRate`: 4 ms con le dita, 10 ms senza, 50 ms in background; senza
+  `.strict`), prima sempre 4 ms.
 
 ## Esito dei test 1.4.0 del 24/11 (giro con 5G e Wi-Fi) e aggiunte alla 1.5.0
 
@@ -280,6 +346,11 @@ Atteso: cinque blocchi, ognuno con «Tutti i test superati» (l'ultimo è
 «sessione (apertura e chiusura)»).
 
 ## Uncommitted changes
+
+**v1.6.0** (base: v1.5.0 = commit `f13f2a3`; comprende la 1.5.1 mai pubblicata). Consegnata come `phantom-v1.6.0.diff`
++ messaggio di commit. Verificato nel container: fmt, clippy `-D warnings`, `cargo test --workspace --release`
+(core 65, e2e_netsim 10, e2e_transport 4, video 14, netsim 18, quic 2+5, p2p 4, FFI 17), `cargo doc -D warnings`,
+`kotlinc` di `main` + test, 34 test JVM. Swift invariato rispetto alla 1.5.1 (controllato con tree-sitter).
 
 **v1.5.0** (base: v1.4.0 = commit `172d01d`). Consegnata come `phantom-v1.5.0.diff` + messaggio di commit (seconda
 versione del 24/11 sera, che comprende la prima più le aggiunte dopo i test del giorno); l'utente

@@ -88,6 +88,8 @@ final class RemoteSession: ObservableObject {
     private let ioQueue = DispatchQueue(label: "app.phantom.remote.io", qos: .userInteractive)
     private let recvQueue = DispatchQueue(label: "app.phantom.remote.recv", qos: .userInteractive)
     private var tickTimer: DispatchSourceTimer?
+    /// Intervallo attuale del timer di sessione (ms). Solo da `ioQueue`.
+    private var tickIntervalMs = 4
 
     private let sampleLock = NSLock()
     private let sampleBuilder = AnnexBSampleBuilder()
@@ -518,6 +520,13 @@ final class RemoteSession: ObservableObject {
             withLock { touchDispatch.markSent(version: ver) }
             try? q.sendDatagram(datagram: datagram)
         }
+        if !fingers.isEmpty {
+            // dita appoggiate: il timer torna subito a 240 Hz per rinfrescare lo stato del tocco
+            ioQueue.async { [weak self] in
+                guard let self = self, self.tickIntervalMs != 4 else { return }
+                self.setTickInterval(ms: 4)
+            }
+        }
     }
 
     /// Il renderer ha scartato (coda piena) o non è riuscito a decodificare un frame: i frame successivi sarebbero
@@ -748,8 +757,11 @@ final class RemoteSession: ObservableObject {
             }
         }
 
-        // Timer a 250 Hz (allineato al tocco a 240 Hz) per `tick`, stato del tocco e telemetria.
-        let timer = DispatchSource.makeTimerSource(flags: .strict, queue: ioQueue)
+        // Timer per `tick`, stato del tocco e telemetria: 250 Hz (allineato al tocco a 240 Hz) solo con le dita sullo
+        // schermo, più lento altrimenti e in background (vedi `adaptTickRate`). Prima girava sempre a 250 Hz, anche
+        // con l'app in background: 250 risvegli al secondo della CPU per nulla.
+        let timer = DispatchSource.makeTimerSource(queue: ioQueue)
+        tickIntervalMs = 4
         timer.schedule(deadline: .now(), repeating: .milliseconds(4), leeway: .microseconds(500))
         timer.setEventHandler { [weak self] in
             self?.onTick(client: client, conn: conn, gen: gen)
@@ -805,6 +817,25 @@ final class RemoteSession: ObservableObject {
         if backgrounded && now &- lastVideoPauseSentUs >= 1_000_000 {
             sendVideoPause(true)
         }
+        adaptTickRate(backgrounded: backgrounded)
+    }
+
+    /// Sceglie la frequenza del timer di sessione: 4 ms con le dita sullo schermo (lo stato del tocco va rinfrescato a
+    /// 240 Hz anche se le dita stanno ferme), 10 ms senza tocco (ping, statistiche e NACK non hanno bisogno di più: i
+    /// datagrammi in arrivo si elaborano subito nel ciclo di ricezione), 50 ms in background. Solo da `ioQueue`.
+    private func adaptTickRate(backgrounded: Bool) {
+        let touching = withLock { touchDispatch.shouldSendOnTick }
+        let wanted = backgrounded ? 50 : (touching ? 4 : 10)
+        guard wanted != tickIntervalMs else { return }
+        setTickInterval(ms: wanted)
+    }
+
+    /// Solo da `ioQueue`.
+    private func setTickInterval(ms: Int) {
+        guard let timer = withLock({ tickTimer }) else { return }
+        tickIntervalMs = ms
+        let leeway: DispatchTimeInterval = ms <= 4 ? .microseconds(500) : .milliseconds(max(1, ms / 5))
+        timer.schedule(deadline: .now() + .milliseconds(ms), repeating: .milliseconds(ms), leeway: leeway)
     }
 
     private func drainAudioAndClipboard(client: PhantomClient, gen: UInt64) {

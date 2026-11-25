@@ -78,6 +78,8 @@ class PhantomHostSession(
     private val onClipboardFromClient: (String) -> Unit = {},
     private val onControlCommand: (RemoteControlCommand) -> Unit = {},
     private val onClientConnected: () -> Unit = {},
+    /** L'iPhone è tornato in primo piano dopo una pausa del video: Root e Shizuku risvegliano lo schermo. */
+    private val onVideoResumed: () -> Unit = {},
     private val onReady: (port: Int, certHex: String) -> Unit,
     private val onP2pReady: (endpointId: String) -> Unit = {},
     private val onStats: (HostLiveStats) -> Unit,
@@ -482,7 +484,9 @@ class PhantomHostSession(
             startBitrateBps = if (isLan) 12_000_000uL else 6_000_000uL,
             // In P2P (5G, relay) la banda può essere molto bassa: meglio un'immagine più piccola e fluida
             // (la qualità adattiva scende a 720p/540p) che una coda di secondi.
-            minBitrateBps = if (isLan) 3_000_000uL else 600_000uL,
+            // P2P: sotto 1 Mbit/s anche 540p 30 fps diventa un mosaico (test del 25/11, fermo a 0,6 per minuti); se la
+            // rete non regge, meglio qualche frame saltato che un'immagine illeggibile
+            minBitrateBps = if (isLan) 3_000_000uL else 1_000_000uL,
             maxBitrateBps = if (isLan) 32_000_000uL else 20_000_000uL,
         )
         val initialPolicy = thermalProvider()
@@ -751,11 +755,22 @@ class PhantomHostSession(
                         if (pausedNow != videoPaused.get()) {
                             videoPaused.set(pausedNow)
                             activeEnc?.setSuspended(pausedNow)
+                            if (!pausedNow) {
+                                // Ritorno dall'iPhone. Nei test del 25/11 a volte restava a 0 fps: il telefono si era
+                                // addormentato durante la pausa (display spento, niente da catturare) oppure l'encoder
+                                // ripreso non riceveva frame finché lo schermo restava fermo. Si risveglia il telefono e
+                                // si riparte con encoder e display virtuale nuovi, che producono subito un keyframe.
+                                try {
+                                    onVideoResumed()
+                                } catch (_: Throwable) {
+                                }
+                                reconfigureRequested.set(true)
+                            }
                             onLog(
                                 if (pausedNow) {
                                     "iPhone in background: video in pausa (niente dati finché non torna)"
                                 } else {
-                                    "iPhone in primo piano: video ripreso"
+                                    "iPhone in primo piano: video ripreso (schermo risvegliato, encoder nuovo)"
                                 },
                             )
                         }

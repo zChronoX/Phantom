@@ -10,6 +10,39 @@
 //! I frame non-key tra la fine dello svuotamento e il keyframe si saltano anche loro, perché farebbero riferimento a
 //! frame mai spediti (immagine rovinata). Il client non vede buchi nella numerazione: per lui è solo una pausa.
 
+/// Tipo di collegamento, per la finestra di coda prima dello scarto.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkKind {
+    /// QUIC diretto sulla rete locale.
+    Lan,
+    /// P2P con percorso diretto (tipicamente 5G o un altro Wi-Fi).
+    P2pDirect,
+    /// P2P via relay.
+    Relay,
+}
+
+impl LinkKind {
+    /// Finestra di coda (ms) prima dello scarto alla sorgente a regime (vedi [`SourceDropper::limit_bytes`]).
+    pub fn queue_window_ms(self) -> u64 {
+        match self {
+            LinkKind::Lan => LAN_QUEUE_WINDOW_MS,
+            LinkKind::P2pDirect => P2P_QUEUE_WINDOW_MS,
+            LinkKind::Relay => RELAY_QUEUE_WINDOW_MS,
+        }
+    }
+}
+
+/// Finestra di coda in LAN: gli stalli del Wi-Fi durano qualche centinaio di ms e poi la radio smaltisce l'arretrato
+/// in pochi ms.
+pub const LAN_QUEUE_WINDOW_MS: u64 = 600;
+/// Finestra di coda in P2P diretto (5G): i blocchi della radio di qualche centinaio di ms vanno assorbiti, non pagati
+/// con un keyframe (prima 250 ms, test del 25/11).
+pub const P2P_QUEUE_WINDOW_MS: u64 = 500;
+/// Via relay la banda è vicina al bitrate e l'arretrato si smaltirebbe lentamente.
+pub const RELAY_QUEUE_WINDOW_MS: u64 = 250;
+/// Nei primi secondi dopo l'apertura o il ritorno dal background il trasporto sta ancora scoprendo la banda.
+pub const RAMP_QUEUE_WINDOW_MS: u64 = 1_200;
+
 /// Decisione per un frame appena uscito dall'encoder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameDecision {

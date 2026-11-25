@@ -12,6 +12,7 @@ pub mod rate;
 
 use std::collections::VecDeque;
 
+use pacing::{FrameDecision, LinkKind, SourceDropper};
 use phantom_clock::{ClockSync, Sample};
 use phantom_proto::{
     audio_flags, caps, close_reason, decode, AudioCodec, AudioPacket, Codec, ControlCommand, Finger, Header,
@@ -36,6 +37,16 @@ const MAX_PENDING_KEYS: usize = 32;
 
 /// Comandi di controllo remoto in attesa di essere prelevati dall'host.
 const MAX_PENDING_CONTROLS: usize = 16;
+
+/// Dopo il ritorno dal background, per questo tempo gli svuotamenti della coda e le statistiche del client non
+/// abbassano il bitrate (µs): il controllo di congestione del trasporto, che in pausa ha visto solo l'audio, sta
+/// riscoprendo la banda (con l'aiuto del minimo temporaneo, `RampFloor`). Nei test del 25/11 ogni ritorno su 5G faceva
+/// uno svuotamento e portava il bitrate al minimo per minuti. All'apertura della sessione no: su un collegamento lento
+/// (relay) senza tagli il video restava fermo per secondi (banco `e2e_transport`).
+pub const RAMP_GRACE_US: u64 = 3_000_000;
+/// Con `forgiving`, uno svuotamento isolato (nessun altro da questo tempo) non abbassa il bitrate (µs): su 5G un blocco
+/// della radio di mezzo secondo è normale e non dice nulla sulla banda; due ravvicinati sì.
+pub const DRAIN_FORGIVE_US: u64 = 20_000_000;
 
 /// Pacchetti audio in attesa sul client: coda corta per evitare accumulo di latenza.
 const MAX_PENDING_AUDIO: usize = 64;
@@ -215,6 +226,17 @@ pub struct Delivered {
     pub latency_us: Option<i64>,
 }
 
+/// Esito di [`Host::plan_frame`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FramePlan {
+    /// Il client è in background: il frame non va spedito (non è un problema di rete).
+    pub paused: bool,
+    /// Il frame non va spedito: coda troppo piena, o si aspetta il keyframe dopo uno svuotamento.
+    pub skip: bool,
+    /// Questo frame ha fatto partire uno svuotamento della coda.
+    pub drain_started: bool,
+}
+
 /// Statistiche di un lato.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HostStats {
@@ -264,6 +286,14 @@ pub struct Host {
     log_id: u32,
     /// Il client è in background: niente video fino a questo istante (orologio dell'host), salvo rinnovo.
     video_paused_until_us: Option<u64>,
+    /// Fine del periodo di avvio (apertura o ripresa del video): fino ad allora gli svuotamenti non tagliano il bitrate.
+    ramp_until_us: Option<u64>,
+    /// Ultimo svuotamento della coda visto da [`Host::on_queue_drain`].
+    last_drain_us: Option<u64>,
+    /// Scarto alla sorgente quando la coda di invio del trasporto è troppo lunga.
+    dropper: SourceDropper,
+    /// Inizio dell'ultimo periodo di avvio dovuto a un ritorno dal background (non all'apertura).
+    resume_started_us: Option<u64>,
     stats: HostStats,
     rate: RateController,
     /// Dimensione del gruppo di parità secondo le perdite riportate dal client.
@@ -303,6 +333,10 @@ impl Host {
             controls: VecDeque::new(),
             log_id: 0,
             video_paused_until_us: None,
+            ramp_until_us: None,
+            last_drain_us: None,
+            dropper: SourceDropper::new(),
+            resume_started_us: None,
             stats: HostStats::default(),
             rate,
             fec: fec::AdaptiveFec::new(cfg_fec_group),
@@ -550,7 +584,7 @@ impl Host {
     pub fn video_paused(&mut self, now_us: u64) -> bool {
         match self.video_paused_until_us {
             Some(until) if now_us >= until => {
-                self.resume_video();
+                self.resume_video(now_us);
                 false
             }
             Some(_) => true,
@@ -558,12 +592,106 @@ impl Host {
         }
     }
 
-    fn resume_video(&mut self) {
+    fn resume_video(&mut self, now_us: u64) {
         if self.video_paused_until_us.take().is_some() {
             // il client ha buttato il decoder: si riparte da un keyframe nuovo, senza aspettare il distanziamento
             self.keyframe_wanted = true;
             self.last_key_ts_us = None;
+            self.ramp_until_us = Some(now_us.saturating_add(RAMP_GRACE_US));
+            self.resume_started_us = Some(now_us);
         }
+    }
+
+    /// Inizio dell'ultimo ritorno dal background ([`ControlCommand::ResumeVideo`] o scadenza della pausa), se il periodo
+    /// di avvio che ne è seguito è ancora in corso. Il trasporto, che durante la pausa ha visto passare solo l'audio, ha
+    /// dimenticato la banda: chi gestisce la connessione gli dà un minimo temporaneo di finestra e ritmo d'invio
+    /// (vedi `RampFloor` in `phantom-quic`). Ogni ritorno ha il suo istante, così il minimo si applica una volta sola.
+    pub fn resume_ramp(&self, now_us: u64) -> Option<u64> {
+        self.resume_started_us.filter(|_| self.in_ramp(now_us))
+    }
+
+    /// `true` nei primi secondi dopo il ritorno dal background ([`RAMP_GRACE_US`]): chi gestisce la coda può lasciarla
+    /// più lunga, perché il trasporto sta ancora riscoprendo la banda.
+    pub fn in_ramp(&self, now_us: u64) -> bool {
+        self.ramp_until_us.is_some_and(|until| now_us < until)
+    }
+
+    /// Decide se spedire un frame appena uscito dall'encoder, guardando la coda di invio del trasporto: `queued_bytes`
+    /// è quanto c'è in coda adesso, `capacity_bytes` la capacità della coda, `link` il tipo di collegamento. Va chiamata
+    /// prima di [`Host::send_frame`]; dopo l'invio si chiama [`Host::frame_sent`]. Vedi [`pacing`].
+    pub fn plan_frame(
+        &mut self,
+        now_us: u64,
+        key: bool,
+        queued_bytes: usize,
+        capacity_bytes: usize,
+        link: LinkKind,
+    ) -> FramePlan {
+        let mut plan = FramePlan::default();
+        if self.video_paused(now_us) {
+            // client in background: il frame non parte e la coda non conta (niente stalli né keyframe)
+            plan.paused = true;
+            return plan;
+        }
+        let window_ms = if self.in_ramp(now_us) { pacing::RAMP_QUEUE_WINDOW_MS } else { link.queue_window_ms() };
+        let limit = self.dropper.limit_bytes(self.target_bitrate_bps(), window_ms, capacity_bytes * 4 / 5);
+        let drains = self.dropper.drains();
+        let outcome = self.dropper.decide(queued_bytes, limit, key);
+        if self.dropper.drains() > drains {
+            // coda oltre la soglia: congestione anche se il client non l'ha ancora vista (in P2P uno svuotamento
+            // isolato è un blocco della radio e non abbassa il bitrate)
+            self.on_queue_drain(now_us, link != LinkKind::Lan);
+            plan.drain_started = true;
+        }
+        if outcome.request_keyframe {
+            self.request_keyframe();
+        }
+        plan.skip = outcome.decision == FrameDecision::Skip;
+        plan
+    }
+
+    /// Un frame è stato spedito (`bytes` byte in datagrammi); `overflows` dice quanti datagrammi hanno costretto il
+    /// trasporto a buttarne di più vecchi già in coda. Restituisce `true` se è partito uno svuotamento.
+    pub fn frame_sent(&mut self, now_us: u64, key: bool, bytes: usize, overflows: u32, link: LinkKind) -> bool {
+        if key {
+            self.dropper.on_keyframe_sent(bytes);
+        }
+        if overflows == 0 {
+            return false;
+        }
+        // il frame precedente arriverà rotto: si svuota e si riparte da un keyframe (non uno per pacchetto)
+        let drains = self.dropper.drains();
+        self.dropper.on_queue_overflow();
+        if self.dropper.drains() > drains {
+            self.on_queue_drain(now_us, link != LinkKind::Lan);
+            return true;
+        }
+        false
+    }
+
+    /// Frame saltati finora dallo scarto alla sorgente.
+    pub fn frames_skipped(&self) -> u64 {
+        self.dropper.skipped()
+    }
+
+    /// Svuotamenti della coda finora.
+    pub fn queue_drains(&self) -> u64 {
+        self.dropper.drains()
+    }
+
+    /// La coda di invio è stata svuotata (frame saltati, si riparte da un keyframe). Abbassa il bitrate come
+    /// [`rate::RateController::on_send_stall`], tranne durante il periodo di avvio ([`Host::in_ramp`]) e, con `forgiving`
+    /// (P2P), per uno svuotamento isolato ([`DRAIN_FORGIVE_US`]). Restituisce `true` se il bitrate è stato abbassato.
+    pub fn on_queue_drain(&mut self, now_us: u64, forgiving: bool) -> bool {
+        let previous = self.last_drain_us.replace(now_us);
+        if self.in_ramp(now_us) {
+            return false;
+        }
+        if forgiving && previous.is_none_or(|t| now_us.saturating_sub(t) >= DRAIN_FORGIVE_US) {
+            return false;
+        }
+        self.on_send_stall(now_us);
+        true
     }
 
     /// Il più vecchio comando di controllo remoto ricevuto dal client (es. risveglio o schermo spento).
@@ -630,7 +758,10 @@ impl Host {
             }
             Message::Nack { frame_id, missing } => out.extend(self.video.on_nack(now_us, frame_id, &missing)),
             Message::Stats(s) => {
-                let load = match self.rate.on_stats(now_us, &s) {
+                // in pausa e subito dopo il ritorno il giudizio sarebbe falsato: si osserva soltanto
+                let quiet = self.video_paused_until_us.is_some() || self.in_ramp(now_us);
+                let verdict = if quiet { self.rate.observe_stats(now_us, &s) } else { self.rate.on_stats(now_us, &s) };
+                let load = match verdict {
                     rate::Verdict::Fine => fec::Load::Clear,
                     rate::Verdict::Congested | rate::Verdict::HeavyLoss => fec::Load::Loaded,
                     rate::Verdict::Hold => fec::Load::Unknown,
@@ -676,7 +807,7 @@ impl Host {
                         return out;
                     }
                     ControlCommand::ResumeVideo => {
-                        self.resume_video();
+                        self.resume_video(now_us);
                         return out;
                     }
                     _ => {}
@@ -937,6 +1068,13 @@ impl Client {
         let Ok((hdr, msg)) = decode(bytes) else { return Vec::new() };
         if hdr.conn_id != self.cfg.conn_id {
             return Vec::new();
+        }
+        // qualunque pacchetto dice che il collegamento è vivo (serve al ricevitore video per distinguere un blocco
+        // della rete da una perdita); uno che non è video dice anche che i frammenti spediti prima sono già passati
+        if matches!(msg, Message::Video(_)) {
+            self.video.note_activity(now_us);
+        } else {
+            self.video.note_other(now_us);
         }
         let mut send = Vec::new();
         match msg {
@@ -1939,5 +2077,59 @@ mod video_pause {
         client.on_datagram(0, &ack);
         assert!(client.negotiated().is_some());
         assert!(client.video_pause(true).is_none());
+    }
+}
+
+#[cfg(test)]
+mod queue_drain {
+    use super::*;
+
+    fn opened() -> (Host, Client) {
+        let cfg = SessionConfig::default();
+        let mut client = Client::new(cfg.clone());
+        let mut host = Host::new(cfg);
+        let hello = client.tick(0).remove(0);
+        let ack = host.on_datagram(0, &hello).remove(0);
+        client.on_datagram(0, &ack);
+        (host, client)
+    }
+
+    /// Nei primi secondi della sessione e dopo il ritorno dal background gli svuotamenti non tagliano il bitrate.
+    #[test]
+    fn drains_during_ramp_do_not_cut_the_bitrate() {
+        let (mut host, mut client) = opened();
+        let start = host.target_bitrate_bps();
+        assert!(!host.in_ramp(1_000_000), "all'apertura nessuna tolleranza");
+        assert!(host.on_queue_drain(1_000_000, false), "si taglia subito");
+        let cut = host.target_bitrate_bps();
+        assert!(cut < start);
+        assert_eq!(host.resume_ramp(1_000_000), None);
+        // background e ritorno: qualche secondo di tolleranza, con l'istante del ritorno
+        host.on_datagram(10_000_000, &client.video_pause(true).expect("pausa"));
+        host.on_datagram(20_000_000, &client.video_pause(false).expect("ripresa"));
+        assert!(host.in_ramp(20_500_000));
+        assert_eq!(host.resume_ramp(20_500_000), Some(20_000_000));
+        assert!(!host.on_queue_drain(20_500_000, false));
+        assert_eq!(host.target_bitrate_bps(), cut);
+        assert_eq!(host.resume_ramp(20_000_000 + RAMP_GRACE_US), None, "finita la tolleranza");
+        assert!(host.on_queue_drain(20_000_000 + RAMP_GRACE_US, false));
+    }
+
+    /// In P2P uno svuotamento isolato non taglia; un secondo entro 20 s sì.
+    #[test]
+    fn forgiving_mode_ignores_a_lone_drain() {
+        let (mut host, _client) = opened();
+        let t0 = 10_000_000;
+        let start = host.target_bitrate_bps();
+        assert!(!host.on_queue_drain(t0, true), "il primo si perdona");
+        assert_eq!(host.target_bitrate_bps(), start);
+        assert!(host.on_queue_drain(t0 + 5_000_000, true), "il secondo ravvicinato no");
+        assert!(host.target_bitrate_bps() < start);
+        let after = host.target_bitrate_bps();
+        assert!(
+            !host.on_queue_drain(t0 + 5_000_000 + DRAIN_FORGIVE_US, true),
+            "dopo 20 s tranquilli si perdona di nuovo"
+        );
+        assert_eq!(host.target_bitrate_bps(), after);
     }
 }
